@@ -14,10 +14,15 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal Color Color;
             internal Vector3 Pivot;
+            internal Vector3 TargetPivot;
+            internal Vector3 TargetPosition;
+            internal Quaternion TargetRotation;
             internal float FieldOfView;
             internal float Aspect;
             internal bool Orthographic;
             internal float OrthographicSize;
+
+            private bool _hasTransform;
 
             internal ViewportMarker(GameObject gameObject, string displayName, Color color)
             {
@@ -32,28 +37,83 @@ namespace Glasspage.UnitySync
             internal void Apply(UnitySyncViewportState viewport)
             {
                 DisplayName = viewport.DisplayName;
-                Pivot = viewport.Pivot;
+                TargetPivot = viewport.Pivot;
+                TargetPosition = viewport.Position;
+                TargetRotation = viewport.Rotation.normalized;
                 FieldOfView = viewport.FieldOfView;
                 Aspect = Mathf.Clamp(viewport.Aspect, 0.1f, 10f);
                 Orthographic = viewport.Orthographic;
                 OrthographicSize = viewport.OrthographicSize;
 
                 GameObject.name = DisplayName + " (Viewport)";
-                GameObject.transform.SetPositionAndRotation(viewport.Position, viewport.Rotation.normalized);
+                if (!_hasTransform)
+                {
+                    Pivot = TargetPivot;
+                    GameObject.transform.SetPositionAndRotation(TargetPosition, TargetRotation);
+                    _hasTransform = true;
+                }
+            }
+
+            internal bool Interpolate(float amount)
+            {
+                Transform transform = GameObject.transform;
+                Vector3 position = transform.position;
+                Quaternion rotation = transform.rotation;
+
+                bool positionChanged = (position - TargetPosition).sqrMagnitude > 0.00000001f;
+                bool rotationChanged = Quaternion.Angle(rotation, TargetRotation) > 0.01f;
+                bool pivotChanged = (Pivot - TargetPivot).sqrMagnitude > 0.00000001f;
+                if (!positionChanged && !rotationChanged && !pivotChanged)
+                {
+                    return false;
+                }
+
+                position = positionChanged
+                    ? Vector3.Lerp(position, TargetPosition, amount)
+                    : TargetPosition;
+                rotation = rotationChanged
+                    ? Quaternion.Slerp(rotation, TargetRotation, amount)
+                    : TargetRotation;
+                Pivot = pivotChanged
+                    ? Vector3.Lerp(Pivot, TargetPivot, amount)
+                    : TargetPivot;
+
+                if ((position - TargetPosition).sqrMagnitude <= 0.00000001f)
+                {
+                    position = TargetPosition;
+                }
+
+                if (Quaternion.Angle(rotation, TargetRotation) <= 0.01f)
+                {
+                    rotation = TargetRotation;
+                }
+
+                if ((Pivot - TargetPivot).sqrMagnitude <= 0.00000001f)
+                {
+                    Pivot = TargetPivot;
+                }
+
+                transform.SetPositionAndRotation(position, rotation);
+                return true;
             }
         }
 
-        private const string RootName = "[UnitySync] Collaborators";
+        private const string CollaboratorsContainerName = "Collaborators";
+        private const float TransformInterpolationSpeed = 18f;
 
         private static readonly Dictionary<Guid, ViewportMarker> Markers =
             new Dictionary<Guid, ViewportMarker>();
 
-        private static GameObject _root;
+        private static GameObject _collaboratorsRoot;
+        private static GUIStyle _labelStyle;
+        private static GUIStyle _labelShadowStyle;
+        private static double _lastInterpolationTime;
 
         static UnitySyncPresenceRoot()
         {
             SceneView.duringSceneGui += OnSceneGUI;
-            EditorApplication.delayCall += CleanupOrphanedRoots;
+            EditorApplication.update += UpdateInterpolatedTransforms;
+            UnitySyncVisualSettings.Changed += SceneView.RepaintAll;
         }
 
         internal static void Apply(UnitySyncViewportState viewport, Guid localPlayerId)
@@ -71,8 +131,8 @@ namespace Glasspage.UnitySync
                 {
                     hideFlags = HideFlags.DontSaveInEditor | HideFlags.NotEditable
                 };
-                SetEditorOnlyTag(markerObject);
-                markerObject.transform.SetParent(_root.transform, false);
+                UnitySyncHierarchy.Configure(markerObject);
+                markerObject.transform.SetParent(_collaboratorsRoot.transform, false);
 
                 marker = new ViewportMarker(
                     markerObject,
@@ -96,6 +156,8 @@ namespace Glasspage.UnitySync
             {
                 UnityEngine.Object.DestroyImmediate(marker.GameObject);
             }
+
+            DestroyCollaboratorsContainerIfEmpty();
         }
 
         internal static string[] GetParticipantNames()
@@ -119,6 +181,8 @@ namespace Glasspage.UnitySync
                 Markers.Remove(staleId);
             }
 
+            DestroyCollaboratorsContainerIfEmpty();
+
             names.Sort(StringComparer.OrdinalIgnoreCase);
             return names.ToArray();
         }
@@ -126,45 +190,80 @@ namespace Glasspage.UnitySync
         internal static void Clear()
         {
             Markers.Clear();
-            if (_root != null)
-            {
-                UnityEngine.Object.DestroyImmediate(_root);
-            }
-
-            _root = null;
-            CleanupOrphanedRoots();
+            UnitySyncHierarchy.DestroyContainer(_collaboratorsRoot);
+            _collaboratorsRoot = null;
         }
 
         private static void EnsureRoot()
         {
-            if (_root != null)
+            if (_collaboratorsRoot != null)
             {
                 return;
             }
 
-            CleanupOrphanedRoots();
-            _root = new GameObject(RootName)
-            {
-                hideFlags = HideFlags.DontSaveInEditor | HideFlags.NotEditable
-            };
-            SetEditorOnlyTag(_root);
+            _collaboratorsRoot = UnitySyncHierarchy.GetOrCreateContainer(CollaboratorsContainerName);
         }
 
-        private static void CleanupOrphanedRoots()
+        private static void DestroyCollaboratorsContainerIfEmpty()
         {
-            GameObject[] gameObjects = Resources.FindObjectsOfTypeAll<GameObject>();
-            foreach (GameObject gameObject in gameObjects)
+            if (Markers.Count != 0)
             {
-                if (gameObject == null ||
-                    gameObject == _root ||
-                    gameObject.name != RootName ||
-                    EditorUtility.IsPersistent(gameObject) ||
-                    (gameObject.hideFlags & HideFlags.DontSaveInEditor) == 0)
+                return;
+            }
+
+            UnitySyncHierarchy.DestroyContainer(_collaboratorsRoot);
+            _collaboratorsRoot = null;
+        }
+
+        private static void UpdateInterpolatedTransforms()
+        {
+            double now = EditorApplication.timeSinceStartup;
+            if (_lastInterpolationTime <= 0d)
+            {
+                _lastInterpolationTime = now;
+                return;
+            }
+
+            float deltaTime = (float)Math.Min(now - _lastInterpolationTime, 0.1d);
+            _lastInterpolationTime = now;
+            if (deltaTime <= 0f || Markers.Count == 0)
+            {
+                return;
+            }
+
+            float amount = 1f - Mathf.Exp(-TransformInterpolationSpeed * deltaTime);
+            bool changed = false;
+            List<Guid> staleIds = null;
+            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
+            {
+                ViewportMarker marker = pair.Value;
+                if (marker.GameObject == null)
                 {
+                    if (staleIds == null)
+                    {
+                        staleIds = new List<Guid>();
+                    }
+
+                    staleIds.Add(pair.Key);
                     continue;
                 }
 
-                UnityEngine.Object.DestroyImmediate(gameObject);
+                changed |= marker.Interpolate(amount);
+            }
+
+            if (staleIds != null)
+            {
+                foreach (Guid staleId in staleIds)
+                {
+                    Markers.Remove(staleId);
+                }
+
+                DestroyCollaboratorsContainerIfEmpty();
+            }
+
+            if (changed)
+            {
+                SceneView.RepaintAll();
             }
         }
 
@@ -174,6 +273,14 @@ namespace Glasspage.UnitySync
             {
                 return;
             }
+
+            float opacity = UnitySyncVisualSettings.ViewportOpacity;
+            if (opacity <= 0f)
+            {
+                return;
+            }
+
+            float directionLineDistance = UnitySyncVisualSettings.LineDistance;
 
             Matrix4x4 previousMatrix = Handles.matrix;
             Color previousColor = Handles.color;
@@ -186,7 +293,7 @@ namespace Glasspage.UnitySync
                 }
 
                 Transform markerTransform = marker.GameObject.transform;
-                Handles.color = marker.Color;
+                Handles.color = WithAlpha(marker.Color, opacity);
                 Handles.matrix = Matrix4x4.TRS(
                     markerTransform.position,
                     markerTransform.rotation,
@@ -205,24 +312,74 @@ namespace Glasspage.UnitySync
                     DrawPerspectiveFrustum(marker.FieldOfView, marker.Aspect);
                 }
 
-                Handles.DrawLine(Vector3.zero, Vector3.forward * 1.15f);
-                Handles.DrawWireDisc(Vector3.forward * 1.15f, Vector3.forward, 0.04f);
+                if (directionLineDistance > 0f)
+                {
+                    Handles.DrawLine(Vector3.zero, Vector3.forward * directionLineDistance);
+                    Handles.DrawWireDisc(
+                        Vector3.forward * directionLineDistance,
+                        Vector3.forward,
+                        0.04f);
+                }
 
                 Handles.matrix = previousMatrix;
                 Handles.color = new Color(
                     marker.Color.r,
                     marker.Color.g,
                     marker.Color.b,
-                    0.55f);
+                    0.55f * opacity);
                 Handles.DrawDottedLine(markerTransform.position, marker.Pivot, 4f);
-                Handles.color = marker.Color;
-                Handles.Label(
-                    markerTransform.position + markerTransform.up * 0.2f,
-                    marker.DisplayName);
+                DrawDisplayName(sceneView, marker, markerTransform, opacity);
             }
 
             Handles.matrix = previousMatrix;
             Handles.color = previousColor;
+        }
+
+        private static void DrawDisplayName(
+            SceneView sceneView,
+            ViewportMarker marker,
+            Transform markerTransform,
+            float opacity)
+        {
+            Camera camera = sceneView.camera;
+            if (camera == null)
+            {
+                return;
+            }
+
+            EnsureLabelStyles();
+
+            float handleSize = HandleUtility.GetHandleSize(markerTransform.position);
+            Vector3 labelPosition = markerTransform.position + camera.transform.up * handleSize * 0.12f;
+            float shadowOffset = handleSize * 0.012f;
+            Vector3 shadowPosition = labelPosition +
+                                     camera.transform.right * shadowOffset -
+                                     camera.transform.up * shadowOffset;
+
+            _labelShadowStyle.normal.textColor = new Color(0f, 0f, 0f, 0.9f * opacity);
+            _labelStyle.normal.textColor = WithAlpha(marker.Color, opacity);
+            Handles.Label(shadowPosition, marker.DisplayName, _labelShadowStyle);
+            Handles.Label(labelPosition, marker.DisplayName, _labelStyle);
+        }
+
+        private static void EnsureLabelStyles()
+        {
+            if (_labelStyle != null)
+            {
+                return;
+            }
+
+            _labelStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontStyle = FontStyle.Bold
+            };
+            _labelShadowStyle = new GUIStyle(_labelStyle);
+        }
+
+        private static Color WithAlpha(Color color, float alpha)
+        {
+            return new Color(color.r, color.g, color.b, alpha);
         }
 
         private static void DrawPerspectiveFrustum(float fieldOfView, float aspect)
@@ -264,18 +421,6 @@ namespace Glasspage.UnitySync
             Handles.DrawLine(bottomRight, topRight);
             Handles.DrawLine(topRight, topLeft);
             Handles.DrawLine(topLeft, bottomLeft);
-        }
-
-        private static void SetEditorOnlyTag(GameObject gameObject)
-        {
-            try
-            {
-                gameObject.tag = "EditorOnly";
-            }
-            catch (UnityException)
-            {
-                // The transient hide flag still prevents persistence if project tags are unavailable.
-            }
         }
 
         private static Color ColorFor(Guid playerId)
