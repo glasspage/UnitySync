@@ -26,6 +26,7 @@ namespace Glasspage.UnitySync
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
         private static string _displayName = "Collaborator";
+        private static Color _color = Color.white;
         private static string _joinCode = string.Empty;
         private static double _nextSendTime;
 
@@ -34,6 +35,7 @@ namespace Glasspage.UnitySync
         internal static UnitySyncSessionState State => _state;
         internal static string JoinCode => _joinCode;
         internal static bool IsActive => _transport != null;
+        internal static Color DefaultColor => ColorFor(LocalPlayerId);
 
         static UnitySyncSession()
         {
@@ -44,7 +46,12 @@ namespace Glasspage.UnitySync
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
         }
 
-        internal static bool StartHost(string advertisedAddress, int port, string displayName, out string error)
+        internal static bool StartHost(
+            string advertisedAddress,
+            int port,
+            string displayName,
+            Color color,
+            out string error)
         {
             error = string.Empty;
             if (_transport != null)
@@ -61,6 +68,7 @@ namespace Glasspage.UnitySync
             try
             {
                 _displayName = NormalizeDisplayName(displayName);
+                _color = NormalizeColor(color);
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, secret);
                 _transport.StartHost(port);
                 _joinCode = code;
@@ -88,7 +96,7 @@ namespace Glasspage.UnitySync
             }
         }
 
-        internal static bool Connect(string joinCode, string displayName, out string error)
+        internal static bool Connect(string joinCode, string displayName, Color color, out string error)
         {
             error = string.Empty;
             if (_transport != null)
@@ -105,6 +113,7 @@ namespace Glasspage.UnitySync
             try
             {
                 _displayName = NormalizeDisplayName(displayName);
+                _color = NormalizeColor(color);
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, data.Secret);
                 _transport.StartClient(data.Address, data.Port);
                 _state = UnitySyncSessionState.Connecting;
@@ -133,6 +142,12 @@ namespace Glasspage.UnitySync
         internal static void Stop()
         {
             StopInternal(true);
+        }
+
+        internal static void SetLocalColor(Color color)
+        {
+            _color = NormalizeColor(color);
+            _nextSendTime = 0d;
         }
 
         internal static string[] GetLogs()
@@ -212,6 +227,7 @@ namespace Glasspage.UnitySync
             UnitySyncViewportState viewport = new UnitySyncViewportState(
                 LocalPlayerId,
                 _displayName,
+                _color,
                 camera.transform.position,
                 camera.transform.rotation,
                 sceneView.pivot,
@@ -276,6 +292,28 @@ namespace Glasspage.UnitySync
             }
 
             return value.Length <= 32 ? value : value.Substring(0, 32);
+        }
+
+        private static Color NormalizeColor(Color color)
+        {
+            return new Color(
+                Mathf.Clamp01(color.r),
+                Mathf.Clamp01(color.g),
+                Mathf.Clamp01(color.b),
+                1f);
+        }
+
+        private static Color ColorFor(Guid playerId)
+        {
+            byte[] bytes = playerId.ToByteArray();
+            int hash = 17;
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                hash = unchecked(hash * 31 + bytes[i]);
+            }
+
+            float hue = (uint)hash % 360u / 360f;
+            return Color.HSVToRGB(hue, 0.72f, 1f);
         }
 
         private static void AddLog(string message)

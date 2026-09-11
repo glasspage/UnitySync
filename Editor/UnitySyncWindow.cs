@@ -7,11 +7,15 @@ namespace Glasspage.UnitySync
     internal sealed class UnitySyncWindow : EditorWindow
     {
         private const string DisplayNamePreference = "Glasspage.UnitySync.DisplayName";
+        private const string ColorPreference = "Glasspage.UnitySync.Color";
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
         private const int DefaultPort = 47832;
 
+        private static readonly Color ActiveSessionColor = new Color(1f, 0.55f, 0.15f);
+
         private string _displayName;
+        private Color _color;
         private string _hostAddress;
         private int _port;
         private string _joinCodeInput = string.Empty;
@@ -19,6 +23,11 @@ namespace Glasspage.UnitySync
         private Vector2 _scroll;
         private bool _showHostControls;
         private bool _showJoinControls;
+        private bool _showHostingControls = true;
+        private bool _showJoinedControls = true;
+        private UnitySyncSessionState _previousSessionState;
+
+        private static GUIStyle _activeSessionFoldoutStyle;
 
         [MenuItem("UnitySync/Session", false, 0)]
         private static void Open()
@@ -37,6 +46,8 @@ namespace Glasspage.UnitySync
                 _displayName = "Collaborator";
             }
 
+            _color = LoadColor();
+
             _hostAddress = EditorPrefs.GetString(HostAddressPreference, string.Empty);
             if (string.IsNullOrWhiteSpace(_hostAddress))
             {
@@ -54,6 +65,7 @@ namespace Glasspage.UnitySync
 
         private void OnGUI()
         {
+            UpdateActiveFoldoutState();
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
 
             EditorGUILayout.Space(8f);
@@ -63,11 +75,8 @@ namespace Glasspage.UnitySync
             DrawStatus();
             EditorGUILayout.Space(8f);
 
-            using (new EditorGUI.DisabledScope(UnitySyncSession.IsActive))
-            {
-                DrawIdentity();
-                EditorGUILayout.Space(10f);
-            }
+            DrawIdentity();
+            EditorGUILayout.Space(10f);
 
             if (UnitySyncSession.State == UnitySyncSessionState.Idle)
             {
@@ -125,16 +134,33 @@ namespace Glasspage.UnitySync
 
         private void DrawIdentity()
         {
+            using (new EditorGUI.DisabledScope(UnitySyncSession.IsActive))
+            {
+                EditorGUI.BeginChangeCheck();
+                _displayName = EditorGUILayout.TextField(new GUIContent("Username", "Shown above your viewport gizmo."), _displayName);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    if (_displayName.Length > 32)
+                    {
+                        _displayName = _displayName.Substring(0, 32);
+                    }
+
+                    EditorPrefs.SetString(DisplayNamePreference, _displayName);
+                }
+            }
+
             EditorGUI.BeginChangeCheck();
-            _displayName = EditorGUILayout.TextField(new GUIContent("Display name", "Shown above your viewport gizmo."), _displayName);
+            _color = EditorGUILayout.ColorField(
+                new GUIContent("Color", "Used for your viewport marker on other collaborators' screens."),
+                _color,
+                true,
+                false,
+                false);
             if (EditorGUI.EndChangeCheck())
             {
-                if (_displayName.Length > 32)
-                {
-                    _displayName = _displayName.Substring(0, 32);
-                }
-
-                EditorPrefs.SetString(DisplayNamePreference, _displayName);
+                _color = NormalizeColor(_color);
+                EditorPrefs.SetString(ColorPreference, "#" + ColorUtility.ToHtmlStringRGB(_color));
+                UnitySyncSession.SetLocalColor(_color);
             }
         }
 
@@ -167,7 +193,7 @@ namespace Glasspage.UnitySync
                     if (GUILayout.Button("Start Hosting"))
                     {
                         _error = string.Empty;
-                        if (!UnitySyncSession.StartHost(_hostAddress, _port, _displayName, out _error))
+                        if (!UnitySyncSession.StartHost(_hostAddress, _port, _displayName, _color, out _error))
                         {
                             Repaint();
                         }
@@ -191,7 +217,7 @@ namespace Glasspage.UnitySync
                     if (GUILayout.Button("Connect"))
                     {
                         _error = string.Empty;
-                        if (!UnitySyncSession.Connect(_joinCodeInput, _displayName, out _error))
+                        if (!UnitySyncSession.Connect(_joinCodeInput, _displayName, _color, out _error))
                         {
                             Repaint();
                         }
@@ -204,7 +230,35 @@ namespace Glasspage.UnitySync
 
         private void DrawActiveControls()
         {
-            if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
+            bool isHosting = UnitySyncSession.State == UnitySyncSessionState.Hosting;
+            string categoryName = isHosting
+                ? "Hosting a session"
+                : UnitySyncSession.State == UnitySyncSessionState.Connecting
+                    ? "Joining a session"
+                    : "In a session";
+            bool expanded = isHosting ? _showHostingControls : _showJoinedControls;
+            expanded = EditorGUILayout.Foldout(
+                expanded,
+                categoryName,
+                true,
+                ActiveSessionFoldoutStyle);
+
+            if (isHosting)
+            {
+                _showHostingControls = expanded;
+            }
+            else
+            {
+                _showJoinedControls = expanded;
+            }
+
+            if (!expanded)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            if (isHosting)
             {
                 EditorGUILayout.LabelField("Share this join code", EditorStyles.boldLabel);
                 GUIStyle codeStyle = new GUIStyle(EditorStyles.textArea)
@@ -229,6 +283,76 @@ namespace Glasspage.UnitySync
                 _error = string.Empty;
                 UnitySyncSession.Stop();
             }
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void UpdateActiveFoldoutState()
+        {
+            UnitySyncSessionState state = UnitySyncSession.State;
+            if (state == _previousSessionState)
+            {
+                return;
+            }
+
+            if (state == UnitySyncSessionState.Hosting)
+            {
+                _showHostingControls = true;
+            }
+            else if (state == UnitySyncSessionState.Connecting ||
+                     (state == UnitySyncSessionState.Connected &&
+                      _previousSessionState != UnitySyncSessionState.Connecting))
+            {
+                _showJoinedControls = true;
+            }
+
+            _previousSessionState = state;
+        }
+
+        private static Color LoadColor()
+        {
+            string stored = EditorPrefs.GetString(ColorPreference, string.Empty);
+            if (!string.IsNullOrEmpty(stored) && ColorUtility.TryParseHtmlString(stored, out Color color))
+            {
+                return NormalizeColor(color);
+            }
+
+            return UnitySyncSession.DefaultColor;
+        }
+
+        private static Color NormalizeColor(Color color)
+        {
+            return new Color(
+                Mathf.Clamp01(color.r),
+                Mathf.Clamp01(color.g),
+                Mathf.Clamp01(color.b),
+                1f);
+        }
+
+        private static GUIStyle ActiveSessionFoldoutStyle
+        {
+            get
+            {
+                if (_activeSessionFoldoutStyle == null)
+                {
+                    _activeSessionFoldoutStyle = new GUIStyle(EditorStyles.foldout);
+                    SetTextColor(_activeSessionFoldoutStyle.normal, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.hover, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.active, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.focused, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.onNormal, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.onHover, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.onActive, ActiveSessionColor);
+                    SetTextColor(_activeSessionFoldoutStyle.onFocused, ActiveSessionColor);
+                }
+
+                return _activeSessionFoldoutStyle;
+            }
+        }
+
+        private static void SetTextColor(GUIStyleState state, Color color)
+        {
+            state.textColor = color;
         }
 
         private static void DrawParticipants()

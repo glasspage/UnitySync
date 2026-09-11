@@ -17,6 +17,7 @@ namespace Glasspage.UnitySync
     {
         internal readonly Guid PlayerId;
         internal readonly string DisplayName;
+        internal readonly Color Color;
         internal readonly Vector3 Position;
         internal readonly Quaternion Rotation;
         internal readonly Vector3 Pivot;
@@ -28,6 +29,7 @@ namespace Glasspage.UnitySync
         internal UnitySyncViewportState(
             Guid playerId,
             string displayName,
+            Color color,
             Vector3 position,
             Quaternion rotation,
             Vector3 pivot,
@@ -38,6 +40,7 @@ namespace Glasspage.UnitySync
         {
             PlayerId = playerId;
             DisplayName = displayName;
+            Color = color;
             Position = position;
             Rotation = rotation;
             Pivot = pivot;
@@ -66,7 +69,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 1;
+        internal const int Version = 2;
         internal const int MaximumFrameSize = 64 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
 
@@ -97,6 +100,7 @@ namespace Glasspage.UnitySync
                 writer.Write((byte)UnitySyncMessageType.Viewport);
                 WriteGuid(writer, state.PlayerId);
                 WriteString(writer, state.DisplayName);
+                WriteColor(writer, state.Color);
                 WriteVector3(writer, state.Position);
                 WriteQuaternion(writer, state.Rotation);
                 WriteVector3(writer, state.Pivot);
@@ -153,6 +157,7 @@ namespace Glasspage.UnitySync
                             UnitySyncViewportState viewport = new UnitySyncViewportState(
                                 playerId,
                                 displayName,
+                                ReadColor(reader),
                                 ReadVector3(reader),
                                 ReadQuaternion(reader),
                                 ReadVector3(reader),
@@ -252,6 +257,18 @@ namespace Glasspage.UnitySync
         private static Vector3 ReadVector3(BinaryReader reader)
         {
             return new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
+        }
+
+        private static void WriteColor(BinaryWriter writer, Color value)
+        {
+            writer.Write(value.r);
+            writer.Write(value.g);
+            writer.Write(value.b);
+        }
+
+        private static Color ReadColor(BinaryReader reader)
+        {
+            return new Color(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), 1f);
         }
 
         private static void WriteQuaternion(BinaryWriter writer, Quaternion value)
