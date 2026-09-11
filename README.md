@@ -42,7 +42,7 @@ Treat a join code like a temporary password: anyone who has it can connect while
 - Direct host/client TCP networking
 - Multiple clients per host
 - Encrypted and authenticated messages
-- Live display name, camera position, camera rotation, projection, and Scene view pivot
+- Live username, chosen viewport color, camera position, camera rotation, projection, and Scene view pivot
 - Automatic cleanup when peers disconnect or the session stops
 
 Not implemented:

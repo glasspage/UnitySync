@@ -603,6 +603,7 @@ namespace Glasspage.UnitySync
             return new UnitySyncViewportState(
                 viewport.PlayerId,
                 displayName,
+                viewport.Color,
                 viewport.Position,
                 viewport.Rotation,
                 viewport.Pivot,
@@ -624,6 +625,9 @@ namespace Glasspage.UnitySync
                    IsFinite(viewport.Pivot.x) &&
                    IsFinite(viewport.Pivot.y) &&
                    IsFinite(viewport.Pivot.z) &&
+                   IsValidColorComponent(viewport.Color.r) &&
+                   IsValidColorComponent(viewport.Color.g) &&
+                   IsValidColorComponent(viewport.Color.b) &&
                    IsFinite(viewport.FieldOfView) &&
                    viewport.FieldOfView > 0f &&
                    viewport.FieldOfView < 180f &&
@@ -636,6 +640,11 @@ namespace Glasspage.UnitySync
         private static bool IsFinite(float value)
         {
             return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private static bool IsValidColorComponent(float value)
+        {
+            return IsFinite(value) && value >= 0f && value <= 1f;
         }
 
         private void Enqueue(UnitySyncTransportEventKind kind, string message)

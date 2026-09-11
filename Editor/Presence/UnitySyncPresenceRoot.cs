@@ -37,6 +37,7 @@ namespace Glasspage.UnitySync
             internal void Apply(UnitySyncViewportState viewport)
             {
                 DisplayName = viewport.DisplayName;
+                Color = viewport.Color;
                 TargetPivot = viewport.Pivot;
                 TargetPosition = viewport.Position;
                 TargetRotation = viewport.Rotation.normalized;
@@ -137,7 +138,7 @@ namespace Glasspage.UnitySync
                 marker = new ViewportMarker(
                     markerObject,
                     viewport.DisplayName,
-                    ColorFor(viewport.PlayerId));
+                    viewport.Color);
                 Markers[viewport.PlayerId] = marker;
             }
 
@@ -423,17 +424,5 @@ namespace Glasspage.UnitySync
             Handles.DrawLine(topLeft, bottomLeft);
         }
 
-        private static Color ColorFor(Guid playerId)
-        {
-            byte[] bytes = playerId.ToByteArray();
-            int hash = 17;
-            for (int i = 0; i < bytes.Length; i++)
-            {
-                hash = unchecked(hash * 31 + bytes[i]);
-            }
-
-            float hue = (uint)hash % 360u / 360f;
-            return Color.HSVToRGB(hue, 0.72f, 1f);
-        }
     }
 }
