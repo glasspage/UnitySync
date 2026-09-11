@@ -25,6 +25,9 @@ namespace Glasspage.UnitySync
         private bool _showJoinControls;
         private bool _showHostingControls = true;
         private bool _showJoinedControls = true;
+        private bool _showDebug;
+        private string _debugDisplayName = "Debug User";
+        private Color _debugColor;
         private UnitySyncSessionState _previousSessionState;
 
         private static GUIStyle _activeSessionFoldoutStyle;
@@ -47,6 +50,7 @@ namespace Glasspage.UnitySync
             }
 
             _color = LoadColor();
+            _debugColor = _color;
 
             _hostAddress = EditorPrefs.GetString(HostAddressPreference, string.Empty);
             if (string.IsNullOrWhiteSpace(_hostAddress))
@@ -97,6 +101,8 @@ namespace Glasspage.UnitySync
             DrawParticipants();
             EditorGUILayout.Space(12f);
             DrawActivity();
+            EditorGUILayout.Space(12f);
+            DrawDebug();
             EditorGUILayout.Space(8f);
 
             EditorGUILayout.EndScrollView();
@@ -386,6 +392,61 @@ namespace Glasspage.UnitySync
             {
                 EditorGUILayout.LabelField(logs[i], EditorStyles.wordWrappedMiniLabel);
             }
+        }
+
+        private void DrawDebug()
+        {
+            _showDebug = EditorGUILayout.Foldout(_showDebug, "Debug", true);
+            if (!_showDebug)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            EditorGUI.BeginChangeCheck();
+            _debugDisplayName = EditorGUILayout.TextField(
+                new GUIContent("Username", "Username shown above the test viewport gizmo."),
+                _debugDisplayName);
+            _debugColor = EditorGUILayout.ColorField(
+                new GUIContent("Color", "Color used by the test viewport gizmo."),
+                _debugColor,
+                true,
+                false,
+                false);
+            if (EditorGUI.EndChangeCheck())
+            {
+                _debugDisplayName = NormalizeDebugDisplayName(_debugDisplayName);
+                _debugColor = NormalizeColor(_debugColor);
+                UnitySyncPresenceRoot.UpdateDebugMarkerAppearance(_debugDisplayName, _debugColor);
+            }
+
+            bool debugMarkerVisible = UnitySyncPresenceRoot.DebugMarkerVisible;
+            if (GUILayout.Button(debugMarkerVisible ? "Destroy Viewport Gizmo" : "Summon Viewport Gizmo"))
+            {
+                if (debugMarkerVisible)
+                {
+                    UnitySyncPresenceRoot.DestroyDebugMarker();
+                }
+                else
+                {
+                    _debugDisplayName = NormalizeDebugDisplayName(_debugDisplayName);
+                    _debugColor = NormalizeColor(_debugColor);
+                    UnitySyncPresenceRoot.SummonDebugMarker(_debugDisplayName, _debugColor);
+                }
+
+                Repaint();
+            }
+
+            EditorGUILayout.LabelField(
+                "The test gizmo is placed at the current Scene view pivot.",
+                EditorStyles.wordWrappedMiniLabel);
+            EditorGUI.indentLevel--;
+        }
+
+        private static string NormalizeDebugDisplayName(string displayName)
+        {
+            string value = string.IsNullOrWhiteSpace(displayName) ? "Debug User" : displayName.Trim();
+            return value.Length <= 32 ? value : value.Substring(0, 32);
         }
     }
 }
