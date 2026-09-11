@@ -17,6 +17,8 @@ namespace Glasspage.UnitySync
         private string _joinCodeInput = string.Empty;
         private string _error = string.Empty;
         private Vector2 _scroll;
+        private bool _showHostControls;
+        private bool _showJoinControls;
 
         [MenuItem("UnitySync/Session", false, 0)]
         private static void Open()
@@ -56,17 +58,9 @@ namespace Glasspage.UnitySync
 
             EditorGUILayout.Space(8f);
             EditorGUILayout.LabelField("UnitySync", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("Encrypted Scene view presence", EditorStyles.miniLabel);
             EditorGUILayout.Space(8f);
 
             DrawStatus();
-            EditorGUILayout.Space(8f);
-
-            if (GUILayout.Button("Visual Options"))
-            {
-                UnitySyncVisualOptionsWindow.Open();
-            }
-
             EditorGUILayout.Space(8f);
 
             using (new EditorGUI.DisabledScope(UnitySyncSession.IsActive))
@@ -146,58 +140,66 @@ namespace Glasspage.UnitySync
 
         private void DrawIdleControls()
         {
-            EditorGUILayout.LabelField("Host a session", EditorStyles.boldLabel);
-
-            EditorGUI.BeginChangeCheck();
-            _hostAddress = EditorGUILayout.TextField(
-                new GUIContent("Host address", "The reachable IPv4 address placed in the join code. For Radmin VPN this is normally the host's 26.x.x.x address."),
-                _hostAddress);
-            _port = EditorGUILayout.IntField(new GUIContent("Port", "TCP port used by UnitySync."), _port);
-            if (EditorGUI.EndChangeCheck())
+            _showHostControls = EditorGUILayout.Foldout(_showHostControls, "Host a session", true);
+            if (_showHostControls)
             {
-                EditorPrefs.SetString(HostAddressPreference, _hostAddress);
-                EditorPrefs.SetInt(PortPreference, _port);
-            }
+                EditorGUI.indentLevel++;
 
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                if (GUILayout.Button("Use Suggested Address"))
+                EditorGUI.BeginChangeCheck();
+                _hostAddress = EditorGUILayout.TextField(
+                    new GUIContent("Host address", "The reachable IPv4 address placed in the join code. For Radmin VPN this is normally the host's 26.x.x.x address."),
+                    _hostAddress);
+                _port = EditorGUILayout.IntField(new GUIContent("Port", "TCP port used by UnitySync."), _port);
+                if (EditorGUI.EndChangeCheck())
                 {
-                    _hostAddress = UnitySyncJoinCode.FindSuggestedAddress();
                     EditorPrefs.SetString(HostAddressPreference, _hostAddress);
+                    EditorPrefs.SetInt(PortPreference, _port);
                 }
 
-                if (GUILayout.Button("Start Hosting"))
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    _error = string.Empty;
-                    if (!UnitySyncSession.StartHost(_hostAddress, _port, _displayName, out _error))
+                    if (GUILayout.Button("Use Suggested Address"))
                     {
-                        Repaint();
+                        _hostAddress = UnitySyncJoinCode.FindSuggestedAddress();
+                        EditorPrefs.SetString(HostAddressPreference, _hostAddress);
+                    }
+
+                    if (GUILayout.Button("Start Hosting"))
+                    {
+                        _error = string.Empty;
+                        if (!UnitySyncSession.StartHost(_hostAddress, _port, _displayName, out _error))
+                        {
+                            Repaint();
+                        }
                     }
                 }
-            }
 
-            EditorGUILayout.Space(16f);
-            EditorGUILayout.LabelField("Join a session", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("Join code", EditorStyles.miniLabel);
-            _joinCodeInput = EditorGUILayout.TextArea(_joinCodeInput, GUILayout.MinHeight(54f));
-
-            using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_joinCodeInput)))
-            {
-                if (GUILayout.Button("Connect"))
-                {
-                    _error = string.Empty;
-                    if (!UnitySyncSession.Connect(_joinCodeInput, _displayName, out _error))
-                    {
-                        Repaint();
-                    }
-                }
+                EditorGUI.indentLevel--;
             }
 
             EditorGUILayout.Space(8f);
-            EditorGUILayout.HelpBox(
-                "The join code contains the session's encryption key. Share it only with collaborators you trust.",
-                MessageType.Warning);
+            _showJoinControls = EditorGUILayout.Foldout(_showJoinControls, "Join a session", true);
+            if (_showJoinControls)
+            {
+                EditorGUI.indentLevel++;
+
+                EditorGUILayout.LabelField("Join code", EditorStyles.miniLabel);
+                _joinCodeInput = EditorGUILayout.TextArea(_joinCodeInput, GUILayout.MinHeight(54f));
+
+                using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_joinCodeInput)))
+                {
+                    if (GUILayout.Button("Connect"))
+                    {
+                        _error = string.Empty;
+                        if (!UnitySyncSession.Connect(_joinCodeInput, _displayName, out _error))
+                        {
+                            Repaint();
+                        }
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+            }
         }
 
         private void DrawActiveControls()
