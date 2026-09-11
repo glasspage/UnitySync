@@ -18,7 +18,7 @@ namespace Glasspage.UnitySync
         private string _error = string.Empty;
         private Vector2 _scroll;
 
-        [MenuItem("Window/UnitySync")]
+        [MenuItem("UnitySync/Session", false, 0)]
         private static void Open()
         {
             UnitySyncWindow window = GetWindow<UnitySyncWindow>();
@@ -60,6 +60,13 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(8f);
 
             DrawStatus();
+            EditorGUILayout.Space(8f);
+
+            if (GUILayout.Button("Visual Options"))
+            {
+                UnitySyncVisualOptionsWindow.Open();
+            }
+
             EditorGUILayout.Space(8f);
 
             using (new EditorGUI.DisabledScope(UnitySyncSession.IsActive))

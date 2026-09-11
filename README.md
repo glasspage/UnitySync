@@ -17,7 +17,7 @@ The current package targets Unity 2021.3 or newer.
 ## Connect through Radmin VPN
 
 1. Put every collaborator on the same Radmin VPN network.
-2. On the host, open **Window > UnitySync**.
+2. On the host, open **UnitySync > Session**.
 3. Set **Host address** to the host's Radmin VPN IPv4 address (normally a `26.x.x.x` address), then select **Start Hosting**.
 4. Allow Unity through the private-network firewall prompt if the operating system asks.
 5. Share the generated join code privately.
@@ -27,7 +27,9 @@ The host listens on all local interfaces. The address field controls the address
 
 ## What appears in the scene
 
-While connected, UnitySync creates a temporary root named `[UnitySync] Collaborators`. Every remote user gets a child GameObject with an `EditorOnly` tag and a Scene view camera gizmo. The generated hierarchy uses `DontSaveInEditor` and is removed when the session stops.
+While connected, UnitySync creates temporary objects under `[UnitySync] > Collaborators`. Every remote user gets a child GameObject named `Username (Viewport)` with an `EditorOnly` tag and a Scene view camera gizmo. The generated hierarchy uses `DontSaveInEditor` and is removed when the session stops.
+
+Open **UnitySync > Visual Options** to change the length of remote viewport direction lines or the opacity of viewport indicators.
 
 ## Security model
 
@@ -58,4 +60,3 @@ Not implemented:
 - Allow the Unity Editor through the firewall on private networks.
 - Confirm no other program is using TCP port `47832`, or choose another port before hosting.
 - Generate a fresh code by stopping and starting the host if a code was shared accidentally.
-

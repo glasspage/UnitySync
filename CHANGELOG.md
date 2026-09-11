@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Moved UnitySync windows into a dedicated top-level UnitySync menu.
+- Grouped all temporary hierarchy objects beneath `[UnitySync]`, with remote viewports under `Collaborators`.
+- Added persistent visual options for viewport direction-line length and viewport opacity.
+- Improved collaborator-name readability with colored bold text and a dark shadow.
+- Smoothed remote viewport position and rotation updates.
+
 ## 0.1.1
 
 - Fixed remote viewport objects multiplying because Unity cannot attach an Editor-assembly MonoBehaviour.
