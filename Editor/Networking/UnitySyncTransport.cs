@@ -22,6 +22,7 @@ namespace Glasspage.UnitySync
         SceneSnapshotRequest,
         SceneSnapshotBegin,
         SceneSnapshotEnd,
+        SceneSettingsChange,
         Log
     }
 
@@ -275,6 +276,31 @@ namespace Glasspage.UnitySync
                 targetPlayerId);
         }
 
+        internal void SendProjectFileBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileBegin(playerId, state),
+                Guid.Empty);
+        }
+
+        internal void SendProjectFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileChunk(playerId, state),
+                Guid.Empty);
+        }
+
+        internal void SendProjectFileDelete(Guid playerId, string path)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileDelete(playerId, path),
+                Guid.Empty);
+        }
+
         internal void SendSceneObjectChange(
             Guid playerId,
             UnitySyncSceneObjectChange change,
@@ -324,6 +350,15 @@ namespace Glasspage.UnitySync
             QueueMessage(
                 UnitySyncProtocol.CreateSceneSnapshotEnd(playerId, snapshotId, isComplete),
                 targetPlayerId);
+        }
+
+        internal void SendSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateSceneSettingsChange(playerId, snapshot),
+                Guid.Empty);
         }
 
         private void QueueMessage(byte[] payload, Guid targetPlayerId)
@@ -626,10 +661,63 @@ namespace Glasspage.UnitySync
                             throw new InvalidDataException(
                                 "A collaborator sent a host-only file sync message.");
 
+                        case UnitySyncMessageType.ProjectFileBegin:
+                        case UnitySyncMessageType.ProjectFileChunk:
+                        case UnitySyncMessageType.ProjectFileDelete:
+                            if (message.FileSync == null)
+                            {
+                                throw new InvalidDataException(
+                                    "A collaborator sent an invalid project file update.");
+                            }
+
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            switch (message.Type)
+                            {
+                                case UnitySyncMessageType.ProjectFileBegin:
+                                    Broadcast(
+                                        UnitySyncProtocol.CreateProjectFileBegin(
+                                            message.PlayerId,
+                                            message.FileSync),
+                                        peer);
+                                    break;
+
+                                case UnitySyncMessageType.ProjectFileChunk:
+                                    Broadcast(
+                                        UnitySyncProtocol.CreateProjectFileChunk(
+                                            message.PlayerId,
+                                            message.FileSync),
+                                        peer);
+                                    break;
+
+                                case UnitySyncMessageType.ProjectFileDelete:
+                                    Broadcast(
+                                        UnitySyncProtocol.CreateProjectFileDelete(
+                                            message.PlayerId,
+                                            message.FileSync.Path),
+                                        peer);
+                                    break;
+                            }
+                            break;
+
                         case UnitySyncMessageType.SceneObjectChange:
                             EnqueueSceneChange(message.PlayerId, message.SceneChange);
                             Broadcast(
                                 UnitySyncProtocol.CreateSceneObjectChange(message.PlayerId, message.SceneChange),
+                                peer);
+                            break;
+
+                        case UnitySyncMessageType.SceneSettingsChange:
+                            if (message.SceneSnapshot == null)
+                            {
+                                throw new InvalidDataException(
+                                    "A collaborator sent invalid scene settings.");
+                            }
+
+                            EnqueueSceneSettingsChange(message.PlayerId, message.SceneSnapshot);
+                            Broadcast(
+                                UnitySyncProtocol.CreateSceneSettingsChange(
+                                    message.PlayerId,
+                                    message.SceneSnapshot),
                                 peer);
                             break;
 
@@ -742,6 +830,18 @@ namespace Glasspage.UnitySync
                             EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
                             break;
 
+                        case UnitySyncMessageType.ProjectFileBegin:
+                        case UnitySyncMessageType.ProjectFileChunk:
+                        case UnitySyncMessageType.ProjectFileDelete:
+                            if (message.PlayerId == Guid.Empty || message.FileSync == null)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid project file update.");
+                            }
+
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
                         case UnitySyncMessageType.FileSyncRequest:
                         case UnitySyncMessageType.FileRequest:
                             throw new InvalidDataException(
@@ -758,6 +858,16 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueSceneChange(message.PlayerId, message.SceneChange);
+                            break;
+
+                        case UnitySyncMessageType.SceneSettingsChange:
+                            if (message.PlayerId == Guid.Empty || message.SceneSnapshot == null)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent invalid scene settings.");
+                            }
+
+                            EnqueueSceneSettingsChange(message.PlayerId, message.SceneSnapshot);
                             break;
 
                         case UnitySyncMessageType.SceneSnapshotBegin:
@@ -1170,6 +1280,22 @@ namespace Glasspage.UnitySync
             {
                 _events.Enqueue(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSnapshotEnd,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    snapshot));
+            }
+        }
+
+        private void EnqueueSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneSettingsChange,
                     default,
                     null,
                     playerId,

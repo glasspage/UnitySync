@@ -93,6 +93,7 @@ namespace Glasspage.UnitySync
                 _nextSelectionSendTime = 0d;
                 _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
+                UnitySyncProjectSynchronizer.BeginSession();
                 AddLog("Hosting on " + advertisedAddress + ":" + port + ".");
                 Changed?.Invoke();
                 return true;
@@ -239,16 +240,33 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.FileSync:
-                        if (!UnitySyncFileSynchronizer.HandleMessage(
+                        bool isProjectUpdate =
+                            transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
+                            transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
+                            transportEvent.MessageType == UnitySyncMessageType.ProjectFileDelete;
+                        string fileSyncError;
+                        bool fileHandled = isProjectUpdate
+                            ? UnitySyncProjectSynchronizer.HandleMessage(
+                                transportEvent.MessageType,
+                                transportEvent.PlayerId,
+                                transportEvent.FileSync,
+                                out fileSyncError)
+                            : UnitySyncFileSynchronizer.HandleMessage(
                                 transport,
                                 LocalPlayerId,
                                 transportEvent.MessageType,
                                 transportEvent.PlayerId,
                                 transportEvent.FileSync,
-                                out string fileSyncError))
+                                out fileSyncError);
+                        if (!fileHandled)
                         {
-                            AddLog("File sync failed: " + fileSyncError);
-                            disconnected = true;
+                            AddLog(
+                                (isProjectUpdate ? "Project sync failed: " : "File sync failed: ") +
+                                fileSyncError);
+                            if (!isProjectUpdate)
+                            {
+                                disconnected = true;
+                            }
                         }
                         else if (!string.IsNullOrEmpty(fileSyncError))
                         {
@@ -301,6 +319,16 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
 
+                    case UnitySyncTransportEventKind.SceneSettingsChange:
+                        if (!UnitySyncSceneSynchronizer.ApplyRemoteSceneSettings(
+                                transportEvent.SceneSnapshot,
+                                out string sceneSettingsError))
+                        {
+                            AddLog("Scene settings sync skipped an update: " + sceneSettingsError);
+                            Changed?.Invoke();
+                        }
+                        break;
+
                     case UnitySyncTransportEventKind.Log:
                         AddLog(transportEvent.Message);
                         Changed?.Invoke();
@@ -325,8 +353,9 @@ namespace Glasspage.UnitySync
             if (UnitySyncFileSynchronizer.ConsumeGuestReadyForSceneSnapshot())
             {
                 UnitySyncSceneSynchronizer.BeginSession();
+                UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
-                AddLog("Host Assets synchronized. Requesting the current scene state.");
+                AddLog("Host Assets synchronized. Live project sync enabled.");
                 Changed?.Invoke();
             }
 
@@ -335,6 +364,7 @@ namespace Glasspage.UnitySync
                 !EditorApplication.isPlayingOrWillChangePlaymode &&
                 (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
             {
+                UnitySyncProjectSynchronizer.Update(transport, LocalPlayerId);
                 SendSelectionIfNeeded(transport);
                 UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
             }
@@ -408,6 +438,7 @@ namespace Glasspage.UnitySync
             _joinCode = string.Empty;
             _guestJoinCode = string.Empty;
             UnitySyncFileSynchronizer.EndSession();
+            UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();

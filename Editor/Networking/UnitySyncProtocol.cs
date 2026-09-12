@@ -22,7 +22,11 @@ namespace Glasspage.UnitySync
         FileManifestEnd = 13,
         FileRequest = 14,
         FileChunk = 15,
-        FileSyncAbort = 16
+        FileSyncAbort = 16,
+        ProjectFileBegin = 17,
+        ProjectFileChunk = 18,
+        ProjectFileDelete = 19,
+        SceneSettingsChange = 20
     }
 
     internal readonly struct UnitySyncViewportState
@@ -124,7 +128,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 11;
+        internal const int Version = 12;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -349,6 +353,68 @@ namespace Glasspage.UnitySync
             });
         }
 
+        internal static byte[] CreateProjectFileBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            if (state.Length < 0 || state.Hash == null || state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid project file update.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileBegin);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Hash);
+            });
+        }
+
+        internal static byte[] CreateProjectFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            byte[] data = state.Data ?? new byte[0];
+            if (state.Length < 0 ||
+                state.Offset < 0 ||
+                state.Offset > state.Length ||
+                data.Length > MaximumFileChunkBytes ||
+                state.Offset + data.Length > state.Length ||
+                state.Hash == null ||
+                state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid project file chunk.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileChunk);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Offset);
+                writer.Write(state.Hash);
+                writer.Write(data.Length);
+                writer.Write(data);
+            });
+        }
+
+        internal static byte[] CreateProjectFileDelete(Guid playerId, string path)
+        {
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileDelete);
+                WriteGuid(writer, playerId);
+                WriteFilePath(writer, path);
+            });
+        }
+
         internal static byte[] CreateSceneObjectChange(Guid playerId, UnitySyncSceneObjectChange change)
         {
             if (change == null || change.Address == null)
@@ -406,6 +472,23 @@ namespace Glasspage.UnitySync
                 WriteGuid(writer, playerId);
                 WriteGuid(writer, snapshotId);
                 writer.Write(isComplete);
+            });
+        }
+
+        internal static byte[] CreateSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.SceneSettingsChange);
+                WriteGuid(writer, playerId);
+                WriteSceneSnapshotBoundary(writer, snapshot, true);
             });
         }
 
@@ -660,6 +743,82 @@ namespace Glasspage.UnitySync
                                 fileAbort);
                             break;
 
+                        case UnitySyncMessageType.ProjectFileBegin:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage projectFileBegin = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            if (projectFileBegin.SyncId == Guid.Empty ||
+                                projectFileBegin.Length < 0)
+                            {
+                                throw new InvalidDataException("Invalid project file update.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                projectFileBegin);
+                            break;
+
+                        case UnitySyncMessageType.ProjectFileChunk:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage projectFileChunk = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Offset = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            int projectChunkLength = reader.ReadInt32();
+                            if (projectFileChunk.SyncId == Guid.Empty ||
+                                projectFileChunk.Length < 0 ||
+                                projectFileChunk.Offset < 0 ||
+                                projectFileChunk.Offset > projectFileChunk.Length ||
+                                projectChunkLength < 0 ||
+                                projectChunkLength > MaximumFileChunkBytes ||
+                                projectFileChunk.Offset + projectChunkLength > projectFileChunk.Length)
+                            {
+                                throw new InvalidDataException("Invalid project file chunk.");
+                            }
+
+                            projectFileChunk.Data = ReadExactBytes(reader, projectChunkLength);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                projectFileChunk);
+                            break;
+
+                        case UnitySyncMessageType.ProjectFileDelete:
+                            playerId = ReadGuid(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                new UnitySyncFileSyncMessage
+                                {
+                                    Path = ReadFilePath(reader)
+                                });
+                            break;
+
                         case UnitySyncMessageType.SceneObjectChange:
                             playerId = ReadGuid(reader);
                             UnitySyncSceneObjectChange sceneChange = ReadSceneObjectChange(reader);
@@ -696,6 +855,19 @@ namespace Glasspage.UnitySync
                                     SnapshotId = ReadGuid(reader),
                                     IsComplete = reader.ReadBoolean()
                                 });
+                            break;
+
+                        case UnitySyncMessageType.SceneSettingsChange:
+                            playerId = ReadGuid(reader);
+                            UnitySyncSceneSnapshotBoundary sceneSettings =
+                                ReadSceneSnapshotBoundary(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                sceneSettings);
                             break;
 
                         default:
@@ -1083,6 +1255,33 @@ namespace Glasspage.UnitySync
                 {
                     WriteObjectReference(writer, scene.SkyboxMaterial);
                 }
+                writer.Write((int)scene.AmbientMode);
+                writer.Write(scene.AmbientIntensity);
+                WriteColorWithAlpha(writer, scene.AmbientLight);
+                WriteColorWithAlpha(writer, scene.AmbientSkyColor);
+                WriteColorWithAlpha(writer, scene.AmbientEquatorColor);
+                WriteColorWithAlpha(writer, scene.AmbientGroundColor);
+                writer.Write((int)scene.DefaultReflectionMode);
+                writer.Write(scene.DefaultReflectionResolution);
+                writer.Write(scene.ReflectionIntensity);
+                writer.Write(scene.ReflectionBounces);
+                writer.Write(scene.CustomReflection != null);
+                if (scene.CustomReflection != null)
+                {
+                    WriteObjectReference(writer, scene.CustomReflection);
+                }
+
+                writer.Write(scene.Fog);
+                WriteColorWithAlpha(writer, scene.FogColor);
+                writer.Write((int)scene.FogMode);
+                writer.Write(scene.FogDensity);
+                writer.Write(scene.FogStartDistance);
+                writer.Write(scene.FogEndDistance);
+                writer.Write(scene.Sun != null);
+                if (scene.Sun != null)
+                {
+                    WriteObjectReference(writer, scene.Sun);
+                }
             }
         }
 
@@ -1115,6 +1314,33 @@ namespace Glasspage.UnitySync
                 if (reader.ReadBoolean())
                 {
                     scene.SkyboxMaterial = ReadObjectReference(reader);
+                }
+
+                scene.AmbientMode = (UnityEngine.Rendering.AmbientMode)reader.ReadInt32();
+                scene.AmbientIntensity = reader.ReadSingle();
+                scene.AmbientLight = ReadColorWithAlpha(reader);
+                scene.AmbientSkyColor = ReadColorWithAlpha(reader);
+                scene.AmbientEquatorColor = ReadColorWithAlpha(reader);
+                scene.AmbientGroundColor = ReadColorWithAlpha(reader);
+                scene.DefaultReflectionMode =
+                    (UnityEngine.Rendering.DefaultReflectionMode)reader.ReadInt32();
+                scene.DefaultReflectionResolution = reader.ReadInt32();
+                scene.ReflectionIntensity = reader.ReadSingle();
+                scene.ReflectionBounces = reader.ReadInt32();
+                if (reader.ReadBoolean())
+                {
+                    scene.CustomReflection = ReadObjectReference(reader);
+                }
+
+                scene.Fog = reader.ReadBoolean();
+                scene.FogColor = ReadColorWithAlpha(reader);
+                scene.FogMode = (FogMode)reader.ReadInt32();
+                scene.FogDensity = reader.ReadSingle();
+                scene.FogStartDistance = reader.ReadSingle();
+                scene.FogEndDistance = reader.ReadSingle();
+                if (reader.ReadBoolean())
+                {
+                    scene.Sun = ReadObjectReference(reader);
                 }
 
                 snapshot.Scenes[index] = scene;
