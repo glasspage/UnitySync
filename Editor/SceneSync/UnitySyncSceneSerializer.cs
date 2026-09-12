@@ -2217,6 +2217,16 @@ namespace Glasspage.UnitySync
                     }
                 }
 
+                if (!TryValidateObjectReferencesWithoutDereferencing(
+                        stagingComponent,
+                        out string invalidStagedProperty))
+                {
+                    error = "Staged " + component.GetType().Name +
+                            " contains an invalid object reference at " +
+                            invalidStagedProperty + "; the live scene component was not changed.";
+                    return false;
+                }
+
                 Undo.RecordObject(component, "Apply UnitySync component settings");
                 if (component is Transform targetTransform && stagingComponent is Transform stagingTransform)
                 {
@@ -2224,6 +2234,16 @@ namespace Glasspage.UnitySync
                 }
                 else
                 {
+                    // The live component can contain stale serialized PPtrs from an older
+                    // local field layout. CopySerialized may dereference those destination
+                    // references before overwriting them, producing errors such as
+                    // "Casting from Material to Mesh". Clear only incompatible raw PPtrs first,
+                    // without reading them through Unity's typed object-reference getter.
+                    if (!ClearInvalidObjectReferencesWithoutDereferencing(component, out error))
+                    {
+                        return false;
+                    }
+
                     EditorUtility.CopySerialized(stagingComponent, component);
                 }
 
@@ -2514,6 +2534,66 @@ namespace Glasspage.UnitySync
             }
 
             return true;
+        }
+
+        private static bool ClearInvalidObjectReferencesWithoutDereferencing(
+            Component component,
+            out string error)
+        {
+            error = string.Empty;
+            if (component == null)
+            {
+                error = "The live component is missing.";
+                return false;
+            }
+
+            try
+            {
+                SerializedObject serializedObject = new SerializedObject(component);
+                serializedObject.UpdateIfRequiredOrScript();
+                SerializedProperty iterator = serializedObject.GetIterator();
+                bool enterChildren = true;
+                bool changed = false;
+                while (iterator.Next(enterChildren))
+                {
+                    enterChildren = true;
+                    if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                    {
+                        continue;
+                    }
+
+                    int instanceId = iterator.objectReferenceInstanceIDValue;
+                    if (instanceId == 0)
+                    {
+                        continue;
+                    }
+
+                    Object value = EditorUtility.InstanceIDToObject(instanceId);
+                    if (value != null &&
+                        IsSerializedReferenceTypeCompatible(iterator.type, value))
+                    {
+                        continue;
+                    }
+
+                    // Assign by raw instance ID so Unity never has to cast/dereference the
+                    // incompatible object currently stored in this typed serialized field.
+                    iterator.objectReferenceInstanceIDValue = 0;
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Could not clear an incompatible local object reference on " +
+                        component.GetType().Name + ": " + exception.Message;
+                return false;
+            }
         }
 
         private static bool TryResolveObjectReferenceAssignments(
