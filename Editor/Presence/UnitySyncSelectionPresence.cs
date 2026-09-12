@@ -27,7 +27,7 @@ namespace Glasspage.UnitySync
         }
 
         private const float BaseOutlinePixels = 2f;
-        private const float StackedOutlinePixels = 1f;
+        private const float StackedOutlinePixels = 2f;
         private const int MaskSupersample = 2;
         private const int SupersamplePixelLimit = 2560 * 1440;
 
@@ -327,6 +327,9 @@ namespace Glasspage.UnitySync
 
             _compositeMaterial.SetTexture("_InnerTex", innerTexture);
             _compositeMaterial.SetColor("_OutlineColor", batch.Color);
+            _compositeMaterial.SetFloat(
+                "_FlipY",
+                SystemInfo.graphicsUVStartsAtTop ? 1f : 0f);
 
             Handles.BeginGUI();
             EditorGUI.DrawPreviewTexture(
