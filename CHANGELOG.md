@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Adopt matching pre-existing GameObjects during the initial host hierarchy snapshot instead of duplicating an already-matching scene hierarchy.
+- Resolve a unique same-path asset with the same type and local file ID as the local equivalent, preventing valid material references from being dropped when project GUID/content metadata differs between collaborators.
+- Apply VRC UdonBehaviour staging data and its Unity object references atomically so OnAfterDeserialize never sees a partially updated public-variable table.
+
 ## 0.3.1
 
 - Add the missing Unity .meta file for the scene object registry so package installs import and compile the registry correctly.
