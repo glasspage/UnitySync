@@ -1067,25 +1067,61 @@ namespace Glasspage.UnitySync
                 using (BinaryWriter writer = new BinaryWriter(stream))
                 using (SHA256 sha = SHA256.Create())
                 {
+                    HashSet<int> fingerprintedSceneHandles = new HashSet<int>();
                     for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
                     {
                         Scene scene = SceneManager.GetSceneAt(sceneIndex);
-                        if (!scene.IsValid() ||
-                            !scene.isLoaded ||
-                            EditorSceneManager.IsPreviewScene(scene) ||
-                            !SceneManager.SetActiveScene(scene))
+                        if (!IsEnvironmentSceneCandidate(scene))
                         {
                             continue;
                         }
 
-                        SerializedObject renderSettings = GetSerializedRenderSettings();
-                        renderSettings?.Update();
+                        if (!IsSceneCurrentlyActive(scene) && !SceneManager.SetActiveScene(scene))
+                        {
+                            continue;
+                        }
 
-                        writer.Write(scene.path ?? string.Empty);
-                        writer.Write(scene.name ?? string.Empty);
-                        writer.Write(sceneIndex);
+                        WriteRenderSettingsFingerprintForActiveScene(
+                            writer,
+                            scene,
+                            sceneIndex);
+                        fingerprintedSceneHandles.Add(scene.handle);
+                    }
 
-                        writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
+                    if (IsEnvironmentSceneCandidate(previousActiveScene) &&
+                        !fingerprintedSceneHandles.Contains(previousActiveScene.handle) &&
+                        (IsSceneCurrentlyActive(previousActiveScene) ||
+                         SceneManager.SetActiveScene(previousActiveScene)))
+                    {
+                        WriteRenderSettingsFingerprintForActiveScene(
+                            writer,
+                            previousActiveScene,
+                            FindLoadedSceneIndex(previousActiveScene));
+                    }
+
+                    writer.Flush();
+                    return Convert.ToBase64String(sha.ComputeHash(stream.ToArray()));
+                }
+            }
+            finally
+            {
+                RestoreActiveScene(previousActiveScene);
+            }
+        }
+
+        private static void WriteRenderSettingsFingerprintForActiveScene(
+            BinaryWriter writer,
+            Scene scene,
+            int sceneIndex)
+        {
+            SerializedObject renderSettings = GetSerializedRenderSettings();
+            renderSettings?.Update();
+
+            writer.Write(scene.path ?? string.Empty);
+            writer.Write(scene.name ?? string.Empty);
+            writer.Write(sceneIndex);
+
+            writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
                         WriteSignatureColor(
                             writer,
                             GetColor(renderSettings, "m_FogColor", RenderSettings.fogColor));
@@ -1162,25 +1198,12 @@ namespace Glasspage.UnitySync
                             renderSettings,
                             "m_ReflectionBounces",
                             RenderSettings.reflectionBounces));
-                        WriteRenderSettingsObjectFingerprint(
-                            writer,
-                            GetObjectReference(
-                                renderSettings,
-                                "m_CustomReflection",
-                                RenderSettings.customReflection));
-                    }
-
-                    writer.Flush();
-                    return Convert.ToBase64String(sha.ComputeHash(stream.ToArray()));
-                }
-            }
-            finally
-            {
-                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
-                {
-                    SceneManager.SetActiveScene(previousActiveScene);
-                }
-            }
+            WriteRenderSettingsObjectFingerprint(
+                writer,
+                GetObjectReference(
+                    renderSettings,
+                    "m_CustomReflection",
+                    RenderSettings.customReflection));
         }
 
         private static void WriteRenderSettingsObjectFingerprint(
