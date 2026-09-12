@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Remember the receiver's actual post-apply component state instead of the sender's serialized hash, preventing remotely applied Transform and component changes from being echoed back as fresh local edits and rubber-banding the active editor.
+- Resolve one unambiguous same-path, same-type, same-name asset even when its local file ID or serialized file hash differs between editors, improving material reference synchronization without using ambiguous name-only matching across the project.
+
 ## 0.3.2
 
 - Adopt matching pre-existing GameObjects during the initial host hierarchy snapshot instead of duplicating an already-matching scene hierarchy.
