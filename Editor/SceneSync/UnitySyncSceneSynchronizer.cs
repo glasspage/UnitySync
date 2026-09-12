@@ -57,6 +57,7 @@ namespace Glasspage.UnitySync
 
         private const double FlushIntervalSeconds = 0.05;
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
+        private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
         private const int SnapshotObjectsPerUpdate = 8;
 
@@ -73,7 +74,9 @@ namespace Glasspage.UnitySync
         private static bool _applyingRemoteChange;
         private static double _nextFlushTime;
         private static double _nextSceneSettingsCheckTime;
+        private static double _sceneSettingsSendAfterTime;
         private static string _knownSceneSettingsSignature = string.Empty;
+        private static string _pendingSceneSettingsSignature = string.Empty;
         private static RemoteSnapshot _remoteSnapshot;
 
         static UnitySyncSceneSynchronizer()
@@ -88,7 +91,9 @@ namespace Glasspage.UnitySync
             _active = true;
             _nextFlushTime = 0d;
             _nextSceneSettingsCheckTime = 0d;
+            _sceneSettingsSendAfterTime = 0d;
             _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
+            _pendingSceneSettingsSignature = string.Empty;
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
@@ -101,7 +106,9 @@ namespace Glasspage.UnitySync
         {
             _active = false;
             _knownSceneSettingsSignature = string.Empty;
+            _pendingSceneSettingsSignature = string.Empty;
             _nextSceneSettingsCheckTime = 0d;
+            _sceneSettingsSendAfterTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
@@ -117,11 +124,12 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            // Force the next settings flush even if Unity has not yet propagated a reliable
-            // dirty-file signal for RenderSettings. The snapshot itself is captured later
-            // from the main editor update after the inspector modification has completed.
-            _knownSceneSettingsSignature = string.Empty;
+            // RenderSettings Inspector edits can fire repeatedly while dragging controls.
+            // Keep checking promptly, but delay transmission until one second after the
+            // latest edit so only the settled value is synchronized.
             _nextSceneSettingsCheckTime = 0d;
+            _sceneSettingsSendAfterTime =
+                EditorApplication.timeSinceStartup + SceneSettingsSyncDelaySeconds;
         }
 
         private static void OnSceneDirtied(Scene scene)
@@ -226,6 +234,8 @@ namespace Glasspage.UnitySync
 
                 _knownSceneSettingsSignature =
                     UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
+                _pendingSceneSettingsSignature = string.Empty;
+                _sceneSettingsSendAfterTime = 0d;
 
                 return UnitySyncSceneSerializer.PruneSnapshot(
                     completedSnapshot.Boundary,
@@ -280,6 +290,8 @@ namespace Glasspage.UnitySync
 
                 _knownSceneSettingsSignature =
                     UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
+                _pendingSceneSettingsSignature = string.Empty;
+                _sceneSettingsSendAfterTime = 0d;
                 return true;
             }
             catch (Exception exception)
@@ -307,6 +319,29 @@ namespace Glasspage.UnitySync
             string signature = UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
             if (string.Equals(signature, _knownSceneSettingsSignature, StringComparison.Ordinal))
             {
+                _pendingSceneSettingsSignature = string.Empty;
+                _sceneSettingsSendAfterTime = 0d;
+                return;
+            }
+
+            if (!string.Equals(
+                    signature,
+                    _pendingSceneSettingsSignature,
+                    StringComparison.Ordinal))
+            {
+                _pendingSceneSettingsSignature = signature;
+                _sceneSettingsSendAfterTime = now + SceneSettingsSyncDelaySeconds;
+                return;
+            }
+
+            if (_sceneSettingsSendAfterTime <= 0d)
+            {
+                _sceneSettingsSendAfterTime = now + SceneSettingsSyncDelaySeconds;
+                return;
+            }
+
+            if (now < _sceneSettingsSendAfterTime)
+            {
                 return;
             }
 
@@ -327,6 +362,8 @@ namespace Glasspage.UnitySync
                 Scenes = new[] { activeScene }
             };
             _knownSceneSettingsSignature = signature;
+            _pendingSceneSettingsSignature = string.Empty;
+            _sceneSettingsSendAfterTime = 0d;
             transport.SendSceneSettingsChange(localPlayerId, settings);
             transport.LogLocal(
                 "Sent scene environment settings update for active scene " +
