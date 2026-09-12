@@ -197,6 +197,8 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            int fileCount = PendingFileDownloadCount;
+            long downloadBytes = PendingFileDownloadBytes;
             if (!UnitySyncFileSynchronizer.ContinueGuestSync(_transport, out error))
             {
                 return false;
@@ -204,9 +206,9 @@ namespace Glasspage.UnitySync
 
             AddLog(
                 "Continuing host file download: " +
-                PendingFileDownloadCount +
+                fileCount +
                 " file(s), " +
-                PendingFileDownloadBytes +
+                downloadBytes +
                 " byte(s).");
             Changed?.Invoke();
             return true;
