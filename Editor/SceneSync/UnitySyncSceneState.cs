@@ -79,6 +79,7 @@ namespace Glasspage.UnitySync
         internal string ScenePath = string.Empty;
         internal string SceneName = string.Empty;
         internal int SceneIndex;
+        internal UnitySyncObjectReferenceState SkyboxMaterial;
     }
 
     internal sealed class UnitySyncSceneSnapshotBoundary
