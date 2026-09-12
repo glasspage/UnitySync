@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using UnityEditor;
 using UnityEngine;
 
@@ -55,7 +56,7 @@ namespace Glasspage.UnitySync
                 OrthographicSize = 5f;
             }
 
-            internal void Apply(UnitySyncViewportState viewport)
+            internal void Apply(UnitySyncViewportState viewport, double sampleTime)
             {
                 DisplayName = viewport.DisplayName;
                 Color = viewport.Color;
@@ -65,8 +66,13 @@ namespace Glasspage.UnitySync
                 OrthographicSize = viewport.OrthographicSize;
 
                 GameObject.name = DisplayName + " (Viewport)";
+                if (sampleTime <= 0d)
+                {
+                    sampleTime = GetMonotonicSeconds();
+                }
+
                 TransformSample sample = new TransformSample(
-                    EditorApplication.timeSinceStartup,
+                    sampleTime,
                     viewport.Pivot,
                     viewport.Position,
                     viewport.Rotation.normalized);
@@ -130,6 +136,17 @@ namespace Glasspage.UnitySync
                 transform.SetPositionAndRotation(position, rotation);
                 return true;
             }
+
+            internal bool HasPendingInterpolation(double currentTime)
+            {
+                if (_transformSamples.Count < 2)
+                {
+                    return false;
+                }
+
+                double renderTime = currentTime - TransformInterpolationBufferSeconds;
+                return renderTime < _transformSamples[_transformSamples.Count - 1].Time;
+            }
         }
 
         private const string CollaboratorsContainerName = "Collaborators";
@@ -171,14 +188,17 @@ namespace Glasspage.UnitySync
             UnitySyncVisualSettings.Changed += SceneView.RepaintAll;
         }
 
-        internal static void Apply(UnitySyncViewportState viewport, Guid localPlayerId)
+        internal static void Apply(
+            UnitySyncViewportState viewport,
+            Guid localPlayerId,
+            double receivedAtSeconds)
         {
             if (viewport.PlayerId == localPlayerId)
             {
                 return;
             }
 
-            ApplyMarker(viewport, false);
+            ApplyMarker(viewport, false, receivedAtSeconds);
         }
 
         internal static bool DebugMarkerVisible
@@ -236,7 +256,7 @@ namespace Glasspage.UnitySync
                 aspect,
                 orthographic,
                 orthographicSize);
-            ApplyMarker(viewport, true);
+            ApplyMarker(viewport, true, GetMonotonicSeconds());
             SceneView.RepaintAll();
         }
 
@@ -259,7 +279,10 @@ namespace Glasspage.UnitySync
             SceneView.RepaintAll();
         }
 
-        private static void ApplyMarker(UnitySyncViewportState viewport, bool isDebug)
+        private static void ApplyMarker(
+            UnitySyncViewportState viewport,
+            bool isDebug,
+            double sampleTime)
         {
             if (!Markers.TryGetValue(viewport.PlayerId, out ViewportMarker marker) ||
                 marker.GameObject == null)
@@ -280,7 +303,7 @@ namespace Glasspage.UnitySync
                 Markers[viewport.PlayerId] = marker;
             }
 
-            marker.Apply(viewport);
+            marker.Apply(viewport, sampleTime);
         }
 
         internal static void Remove(Guid playerId)
@@ -375,8 +398,9 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double now = EditorApplication.timeSinceStartup;
+            double now = GetMonotonicSeconds();
             bool changed = false;
+            bool needsContinuousUpdate = false;
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
             {
@@ -393,6 +417,7 @@ namespace Glasspage.UnitySync
                 }
 
                 changed |= marker.Interpolate(now);
+                needsContinuousUpdate |= marker.HasPendingInterpolation(now);
             }
 
             if (staleIds != null)
@@ -405,10 +430,20 @@ namespace Glasspage.UnitySync
                 DestroyCollaboratorsContainerIfEmpty();
             }
 
+            if (needsContinuousUpdate)
+            {
+                EditorApplication.QueuePlayerLoopUpdate();
+            }
+
             if (changed)
             {
                 SceneView.RepaintAll();
             }
+        }
+
+        private static double GetMonotonicSeconds()
+        {
+            return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
         }
 
         private static void OnSceneGUI(SceneView sceneView)
