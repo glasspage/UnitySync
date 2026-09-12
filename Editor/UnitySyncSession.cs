@@ -174,7 +174,13 @@ namespace Glasspage.UnitySync
 
         internal static void SetLocalColor(Color color)
         {
-            _color = NormalizeColor(color);
+            Color normalizedColor = NormalizeColor(color);
+            if (ColorsEqual(_color, normalizedColor))
+            {
+                return;
+            }
+
+            _color = normalizedColor;
             _nextSendTime = 0d;
             _hasLastViewportState = false;
             _hasLastSelectionState = false;
