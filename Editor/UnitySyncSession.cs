@@ -43,6 +43,14 @@ namespace Glasspage.UnitySync
         private static Color _lastSelectionColor = Color.white;
         private static int _fileSyncResumeAttempts;
         private static double _nextFileSyncResumeAttemptTime;
+        private static Guid _spectatingPlayerId = Guid.Empty;
+        private static SceneView _spectatedSceneView;
+        private static bool _hasSavedSceneViewState;
+        private static Vector3 _savedSceneViewPivot;
+        private static Quaternion _savedSceneViewRotation = Quaternion.identity;
+        private static float _savedSceneViewSize;
+        private static bool _savedSceneViewOrthographic;
+        private static float _savedSceneViewFieldOfView;
 
         internal static event Action Changed;
 
@@ -51,6 +59,7 @@ namespace Glasspage.UnitySync
         internal static bool IsActive => _transport != null;
         internal static bool IsFileSyncing => UnitySyncFileSynchronizer.IsGuestSyncing;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
+        internal static Guid SpectatingPlayerId => _spectatingPlayerId;
 
         static UnitySyncSession()
         {
@@ -202,8 +211,67 @@ namespace Glasspage.UnitySync
             return UnitySyncPresenceRoot.GetParticipants();
         }
 
+        internal static bool CanSpectate(Guid playerId)
+        {
+            if (_transport == null ||
+                playerId == Guid.Empty ||
+                playerId == LocalPlayerId ||
+                !UnitySyncPresenceRoot.TryGetViewport(playerId, out UnitySyncViewportState viewport))
+            {
+                return false;
+            }
+
+            return viewport.SpectatingPlayerId != LocalPlayerId;
+        }
+
+        internal static bool StartSpectating(Guid playerId)
+        {
+            if (!CanSpectate(playerId))
+            {
+                return false;
+            }
+
+            if (_spectatingPlayerId == playerId)
+            {
+                return true;
+            }
+
+            if (_spectatingPlayerId == Guid.Empty ||
+                !_hasSavedSceneViewState ||
+                _spectatedSceneView == null)
+            {
+                SceneView sceneView = SceneView.lastActiveSceneView;
+                Camera camera = sceneView != null ? sceneView.camera : null;
+                if (camera == null)
+                {
+                    return false;
+                }
+
+                _spectatedSceneView = sceneView;
+                _savedSceneViewPivot = sceneView.pivot;
+                _savedSceneViewRotation = sceneView.rotation;
+                _savedSceneViewSize = sceneView.size;
+                _savedSceneViewOrthographic = sceneView.orthographic;
+                _savedSceneViewFieldOfView = camera.fieldOfView;
+                _hasSavedSceneViewState = true;
+            }
+
+            _spectatingPlayerId = playerId;
+            ForceViewportSend();
+            ApplySpectatedSceneView();
+            Changed?.Invoke();
+            return true;
+        }
+
+        internal static void StopSpectating()
+        {
+            StopSpectatingInternal(true, true);
+        }
+
         private static void Update()
         {
+            UpdateSpectatedSceneView();
+
             UnitySyncTransport transport = _transport;
             if (transport == null)
             {
@@ -233,6 +301,12 @@ namespace Glasspage.UnitySync
                             transportEvent.Viewport,
                             LocalPlayerId,
                             transportEvent.ReceivedAtSeconds);
+                        if (_spectatingPlayerId == transportEvent.Viewport.PlayerId &&
+                            transportEvent.Viewport.SpectatingPlayerId == LocalPlayerId)
+                        {
+                            StopSpectatingInternal(true, false);
+                        }
+
                         SceneView.RepaintAll();
                         Changed?.Invoke();
                         break;
@@ -243,6 +317,11 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        if (_spectatingPlayerId == transportEvent.PlayerId)
+                        {
+                            StopSpectatingInternal(true, false);
+                        }
+
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
                         UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
                         UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
@@ -411,7 +490,9 @@ namespace Glasspage.UnitySync
                 camera.fieldOfView,
                 camera.aspect,
                 camera.orthographic,
-                camera.orthographicSize);
+                camera.orthographicSize,
+                sceneView.size,
+                _spectatingPlayerId);
             if (_hasLastViewportState && ViewportStatesEqual(viewport, _lastViewportState))
             {
                 return;
@@ -465,7 +546,123 @@ namespace Glasspage.UnitySync
                    Mathf.Approximately(left.FieldOfView, right.FieldOfView) &&
                    Mathf.Approximately(left.Aspect, right.Aspect) &&
                    left.Orthographic == right.Orthographic &&
-                   Mathf.Approximately(left.OrthographicSize, right.OrthographicSize);
+                   Mathf.Approximately(left.OrthographicSize, right.OrthographicSize) &&
+                   Mathf.Approximately(left.SceneViewSize, right.SceneViewSize) &&
+                   left.SpectatingPlayerId == right.SpectatingPlayerId;
+        }
+
+        private static void UpdateSpectatedSceneView()
+        {
+            if (_spectatingPlayerId == Guid.Empty)
+            {
+                return;
+            }
+
+            if (_spectatedSceneView == null ||
+                !_hasSavedSceneViewState ||
+                !UnitySyncPresenceRoot.TryGetViewport(
+                    _spectatingPlayerId,
+                    out UnitySyncViewportState viewport))
+            {
+                StopSpectatingInternal(true, true);
+                return;
+            }
+
+            if (viewport.SpectatingPlayerId == LocalPlayerId)
+            {
+                StopSpectatingInternal(true, true);
+                return;
+            }
+
+            ApplyViewportToSceneView(_spectatedSceneView, viewport);
+        }
+
+        private static void ApplySpectatedSceneView()
+        {
+            if (_spectatingPlayerId == Guid.Empty ||
+                _spectatedSceneView == null ||
+                !UnitySyncPresenceRoot.TryGetViewport(
+                    _spectatingPlayerId,
+                    out UnitySyncViewportState viewport))
+            {
+                return;
+            }
+
+            ApplyViewportToSceneView(_spectatedSceneView, viewport);
+        }
+
+        private static void ApplyViewportToSceneView(
+            SceneView sceneView,
+            UnitySyncViewportState viewport)
+        {
+            Camera camera = sceneView != null ? sceneView.camera : null;
+            if (camera == null)
+            {
+                return;
+            }
+
+            float size = Mathf.Max(0.0001f, viewport.SceneViewSize);
+            float fieldOfView = Mathf.Clamp(viewport.FieldOfView, 1f, 179f);
+            bool matches =
+                (sceneView.pivot - viewport.Pivot).sqrMagnitude <= 0.00000001f &&
+                Quaternion.Angle(sceneView.rotation, viewport.Rotation) <= 0.001f &&
+                Mathf.Approximately(sceneView.size, size) &&
+                sceneView.orthographic == viewport.Orthographic &&
+                Mathf.Approximately(camera.fieldOfView, fieldOfView);
+            if (matches)
+            {
+                return;
+            }
+
+            camera.fieldOfView = fieldOfView;
+            sceneView.LookAtDirect(
+                viewport.Pivot,
+                viewport.Rotation,
+                size,
+                viewport.Orthographic);
+            sceneView.Repaint();
+        }
+
+        private static void StopSpectatingInternal(
+            bool forceViewportSend,
+            bool notifyChanged)
+        {
+            bool wasSpectating = _spectatingPlayerId != Guid.Empty;
+            _spectatingPlayerId = Guid.Empty;
+
+            if (_hasSavedSceneViewState && _spectatedSceneView != null)
+            {
+                Camera camera = _spectatedSceneView.camera;
+                if (camera != null)
+                {
+                    camera.fieldOfView = _savedSceneViewFieldOfView;
+                    _spectatedSceneView.LookAtDirect(
+                        _savedSceneViewPivot,
+                        _savedSceneViewRotation,
+                        Mathf.Max(0.0001f, _savedSceneViewSize),
+                        _savedSceneViewOrthographic);
+                    _spectatedSceneView.Repaint();
+                }
+            }
+
+            _spectatedSceneView = null;
+            _hasSavedSceneViewState = false;
+
+            if (wasSpectating && forceViewportSend)
+            {
+                ForceViewportSend();
+            }
+
+            if (wasSpectating && notifyChanged)
+            {
+                Changed?.Invoke();
+            }
+        }
+
+        private static void ForceViewportSend()
+        {
+            _nextSendTime = 0d;
+            _hasLastViewportState = false;
         }
 
         private static bool ColorsEqual(Color left, Color right)
@@ -478,6 +675,8 @@ namespace Glasspage.UnitySync
 
         private static void StopInternal(bool addLog)
         {
+            StopSpectatingInternal(false, false);
+
             UnitySyncTransport transport = _transport;
             _transport = null;
             transport?.Dispose();
