@@ -16,6 +16,10 @@ namespace Glasspage.UnitySync
             "gradientValue",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        private static readonly PropertyInfo TransformConstrainProportionsProperty = typeof(Transform).GetProperty(
+            "constrainProportionsScale",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
         private static readonly HashSet<string> IgnoredPropertyPaths = new HashSet<string>
         {
             "m_ObjectHideFlags",
@@ -607,11 +611,83 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            return ApplyComponentThroughStaging(component, state, out error);
+        }
+
+        private static bool ApplyComponentThroughStaging(
+            Component component,
+            UnitySyncComponentState state,
+            out string error)
+        {
+            error = string.Empty;
+            GameObject stagingObject = null;
+            try
+            {
+                if (!TryCreateStagingComponent(component.GetType(), out stagingObject, out Component stagingComponent))
+                {
+                    error = "Could not create a staging " + component.GetType().Name + ".";
+                    return false;
+                }
+
+                // A valid target is the best source for hidden/non-editable defaults. A target
+                // containing a broken PPtr is deliberately not copied into the staging object;
+                // the complete incoming component state can repair it from clean defaults.
+                if (TryValidateObjectReferences(component, out _))
+                {
+                    EditorUtility.CopySerialized(component, stagingComponent);
+                }
+
+                if (!ApplySerializedProperties(stagingComponent, state, out error))
+                {
+                    return false;
+                }
+
+                if (!TryValidateObjectReferences(stagingComponent, out string invalidProperty))
+                {
+                    error = "Staged " + component.GetType().Name + " contains an invalid object reference at " +
+                            invalidProperty + "; the live scene component was not changed.";
+                    return false;
+                }
+
+                Undo.RecordObject(component, "Apply UnitySync component settings");
+                if (component is Transform targetTransform && stagingComponent is Transform stagingTransform)
+                {
+                    CopyTransformSettings(stagingTransform, targetTransform);
+                }
+                else
+                {
+                    EditorUtility.CopySerialized(stagingComponent, component);
+                }
+
+                PrefabUtility.RecordPrefabInstancePropertyModifications(component);
+                EditorUtility.SetDirty(component);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Could not stage " + component.GetType().Name + ": " + exception.Message;
+                return false;
+            }
+            finally
+            {
+                if (stagingObject != null)
+                {
+                    Object.DestroyImmediate(stagingObject);
+                }
+            }
+        }
+
+        private static bool ApplySerializedProperties(
+            Component component,
+            UnitySyncComponentState state,
+            out string error)
+        {
+            error = string.Empty;
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
-            Undo.RecordObject(component, "Apply UnitySync component settings");
 
-            foreach (UnitySyncSerializedPropertyState propertyState in state.Properties)
+            foreach (UnitySyncSerializedPropertyState propertyState in
+                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
                 if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
                 {
@@ -634,7 +710,8 @@ namespace Glasspage.UnitySync
 
             serializedObject.UpdateIfRequiredOrScript();
 
-            foreach (UnitySyncSerializedPropertyState propertyState in state.Properties)
+            foreach (UnitySyncSerializedPropertyState propertyState in
+                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
                 if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
                 {
@@ -663,9 +740,93 @@ namespace Glasspage.UnitySync
             }
 
             serializedObject.ApplyModifiedPropertiesWithoutUndo();
-            PrefabUtility.RecordPrefabInstancePropertyModifications(component);
-            EditorUtility.SetDirty(component);
             return true;
+        }
+
+        private static bool TryCreateStagingComponent(
+            Type componentType,
+            out GameObject stagingObject,
+            out Component stagingComponent)
+        {
+            stagingObject = null;
+            stagingComponent = null;
+
+            if (componentType == typeof(RectTransform))
+            {
+                stagingObject = new GameObject("[UnitySync Component Staging]", typeof(RectTransform));
+                stagingObject.hideFlags = HideFlags.HideAndDontSave;
+                stagingObject.SetActive(false);
+                stagingComponent = stagingObject.transform;
+                return true;
+            }
+
+            stagingObject = new GameObject("[UnitySync Component Staging]");
+            stagingObject.hideFlags = HideFlags.HideAndDontSave;
+            stagingObject.SetActive(false);
+            if (componentType == typeof(Transform))
+            {
+                stagingComponent = stagingObject.transform;
+                return true;
+            }
+
+            stagingComponent = stagingObject.AddComponent(componentType);
+            return stagingComponent != null;
+        }
+
+        private static bool TryValidateObjectReferences(Component component, out string invalidProperty)
+        {
+            invalidProperty = string.Empty;
+            SerializedObject serializedObject = new SerializedObject(component);
+            serializedObject.UpdateIfRequiredOrScript();
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                int instanceId = iterator.objectReferenceInstanceIDValue;
+                if (instanceId == 0)
+                {
+                    continue;
+                }
+
+                Object value = EditorUtility.InstanceIDToObject(instanceId);
+                if (value == null || !IsSerializedReferenceTypeCompatible(iterator.type, value))
+                {
+                    invalidProperty = iterator.propertyPath;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static void CopyTransformSettings(Transform source, Transform destination)
+        {
+            if (source is RectTransform sourceRect && destination is RectTransform destinationRect)
+            {
+                destinationRect.anchorMin = sourceRect.anchorMin;
+                destinationRect.anchorMax = sourceRect.anchorMax;
+                destinationRect.pivot = sourceRect.pivot;
+                destinationRect.sizeDelta = sourceRect.sizeDelta;
+                destinationRect.anchoredPosition3D = sourceRect.anchoredPosition3D;
+            }
+            else
+            {
+                destination.localPosition = source.localPosition;
+            }
+
+            destination.localRotation = source.localRotation;
+            destination.localScale = source.localScale;
+            if (TransformConstrainProportionsProperty != null)
+            {
+                object constrained = TransformConstrainProportionsProperty.GetValue(source, null);
+                TransformConstrainProportionsProperty.SetValue(destination, constrained, null);
+            }
         }
 
         private static bool ApplyProperty(
@@ -1038,7 +1199,9 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            property.objectReferenceValue = objectReference;
+            property.objectReferenceInstanceIDValue = objectReference != null
+                ? objectReference.GetInstanceID()
+                : 0;
             return true;
         }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4
+
+- Apply incoming component data to a hidden disposable staging component instead of mutating the live scene component through `SerializedObject`.
+- Validate every staged object reference through its raw instance ID before copying any values into the scene.
+- Copy validated component state into the destination in one operation, while transforms use explicit hierarchy-safe value assignments.
+- Rebuild already-corrupted components from clean staged defaults instead of copying their invalid PPtrs forward.
+
 ## 0.2.3
 
 - Preserve matching local object references instead of rewriting their serialized pointers.
