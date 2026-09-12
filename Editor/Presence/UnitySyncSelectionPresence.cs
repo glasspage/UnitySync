@@ -175,7 +175,7 @@ namespace Glasspage.UnitySync
                 List<RemoteSelection> selectors = pair.Value;
                 selectors.Sort((left, right) => left.PlayerId.CompareTo(right.PlayerId));
 
-                int localOffset = localSelection.Contains(gameObject) ? 1 : 0;
+                int localOffset = IsCoveredByLocalSelection(gameObject, localSelection) ? 1 : 0;
                 for (int selectorIndex = 0; selectorIndex < selectors.Count; selectorIndex++)
                 {
                     RemoteSelection selector = selectors[selectorIndex];
@@ -197,6 +197,24 @@ namespace Glasspage.UnitySync
             }
 
             return new List<RingBatch>(batchByKey.Values);
+        }
+
+        private static bool IsCoveredByLocalSelection(
+            GameObject gameObject,
+            HashSet<GameObject> localSelection)
+        {
+            Transform current = gameObject != null ? gameObject.transform : null;
+            while (current != null)
+            {
+                if (localSelection.Contains(current.gameObject))
+                {
+                    return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
         }
 
         private static void AddRenderers(GameObject gameObject, RingBatch batch)
