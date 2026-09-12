@@ -294,27 +294,35 @@ namespace Glasspage.UnitySync
             Rect viewportRect,
             RingBatch batch)
         {
-            RenderMask(camera, batch.Renderers);
-
-            int innerRadius = batch.RingIndex <= 0
-                ? 0
-                : Mathf.RoundToInt(
-                    BaseOutlinePixels + (batch.RingIndex - 1) * StackedOutlinePixels);
-            int outerRadius = batch.RingIndex <= 0
-                ? Mathf.RoundToInt(BaseOutlinePixels)
-                : Mathf.RoundToInt(
-                    BaseOutlinePixels + batch.RingIndex * StackedOutlinePixels);
-
-            Dilate(_mask, _outerHorizontal, _outer, outerRadius);
+            RenderTexture previousActive = RenderTexture.active;
             RenderTexture innerTexture;
-            if (innerRadius <= 0)
+            try
             {
-                innerTexture = _mask;
+                RenderMask(camera, batch.Renderers);
+
+                int innerRadius = batch.RingIndex <= 0
+                    ? 0
+                    : Mathf.RoundToInt(
+                        BaseOutlinePixels + (batch.RingIndex - 1) * StackedOutlinePixels);
+                int outerRadius = batch.RingIndex <= 0
+                    ? Mathf.RoundToInt(BaseOutlinePixels)
+                    : Mathf.RoundToInt(
+                        BaseOutlinePixels + batch.RingIndex * StackedOutlinePixels);
+
+                Dilate(_mask, _outerHorizontal, _outer, outerRadius);
+                if (innerRadius <= 0)
+                {
+                    innerTexture = _mask;
+                }
+                else
+                {
+                    Dilate(_mask, _innerHorizontal, _inner, innerRadius);
+                    innerTexture = _inner;
+                }
             }
-            else
+            finally
             {
-                Dilate(_mask, _innerHorizontal, _inner, innerRadius);
-                innerTexture = _inner;
+                RenderTexture.active = previousActive;
             }
 
             _compositeMaterial.SetTexture("_InnerTex", innerTexture);
