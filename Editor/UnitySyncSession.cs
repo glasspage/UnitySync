@@ -258,7 +258,7 @@ namespace Glasspage.UnitySync
             string[] neededPaths,
             long totalBytes)
         {
-            if (neededPaths == null || neededPaths.Length == 0)
+            if (neededPaths == null)
             {
                 return;
             }
@@ -269,9 +269,13 @@ namespace Glasspage.UnitySync
                 " file(s) to download (" +
                 totalBytes +
                 " byte(s)).");
-            AddLog(
-                "Files needed from host:\n" +
-                string.Join("\n", neededPaths));
+            if (neededPaths.Length > 0)
+            {
+                AddLog(
+                    "Files needed from host:\n" +
+                    string.Join("\n", neededPaths));
+            }
+
             Changed?.Invoke();
         }
 
