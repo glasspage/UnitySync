@@ -2217,7 +2217,7 @@ namespace Glasspage.UnitySync
                     }
                 }
 
-                if (!TryValidateObjectReferencesWithoutDereferencing(
+                if (!TryValidateStagedObjectReferences(
                         stagingComponent,
                         out string invalidStagedProperty))
                 {
@@ -2527,6 +2527,46 @@ namespace Glasspage.UnitySync
 
                 Object value = EditorUtility.InstanceIDToObject(instanceId);
                 if (value == null || !IsSerializedReferenceTypeCompatible(iterator.type, value))
+                {
+                    invalidProperty = iterator.propertyPath;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryValidateStagedObjectReferences(
+            Component component,
+            out string invalidProperty)
+        {
+            invalidProperty = string.Empty;
+            SerializedObject serializedObject = new SerializedObject(component);
+            serializedObject.UpdateIfRequiredOrScript();
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                int instanceId = iterator.objectReferenceInstanceIDValue;
+                if (instanceId == 0)
+                {
+                    continue;
+                }
+
+                // Staging references have already passed UnitySync's cross-editor identity
+                // and field-type checks. Read them through Unity's typed property accessor
+                // instead of trying to reconstruct temporary/array PPtrs from raw instance IDs.
+                // The raw-ID path is intentionally reserved for validating/clearing the live
+                // destination, where a stale incompatible PPtr must never be dereferenced.
+                Object value = iterator.objectReferenceValue;
+                if (value == null ||
+                    !IsSerializedReferenceTypeCompatible(iterator.type, value))
                 {
                     invalidProperty = iterator.propertyPath;
                     return false;
