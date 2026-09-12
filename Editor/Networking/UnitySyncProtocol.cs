@@ -22,7 +22,11 @@ namespace Glasspage.UnitySync
         FileManifestEnd = 13,
         FileRequest = 14,
         FileChunk = 15,
-        FileSyncAbort = 16
+        FileSyncAbort = 16,
+        ProjectFileBegin = 17,
+        ProjectFileChunk = 18,
+        ProjectFileDelete = 19,
+        SceneSettingsChange = 20
     }
 
     internal readonly struct UnitySyncViewportState
@@ -124,7 +128,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 11;
+        internal const int Version = 12;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
