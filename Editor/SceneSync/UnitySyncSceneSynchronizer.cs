@@ -85,8 +85,6 @@ namespace Glasspage.UnitySync
             _nextFlushTime = 0d;
             _nextSceneSettingsCheckTime = 0d;
             _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetSceneSettingsSignature();
-            _knownSceneSettingsSignature = string.Empty;
-            _nextSceneSettingsCheckTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
@@ -98,6 +96,8 @@ namespace Glasspage.UnitySync
         internal static void EndSession()
         {
             _active = false;
+            _knownSceneSettingsSignature = string.Empty;
+            _nextSceneSettingsCheckTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
