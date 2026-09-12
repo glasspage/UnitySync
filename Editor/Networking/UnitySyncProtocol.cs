@@ -353,6 +353,68 @@ namespace Glasspage.UnitySync
             });
         }
 
+        internal static byte[] CreateProjectFileBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            if (state.Length < 0 || state.Hash == null || state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid project file update.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileBegin);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Hash);
+            });
+        }
+
+        internal static byte[] CreateProjectFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            byte[] data = state.Data ?? new byte[0];
+            if (state.Length < 0 ||
+                state.Offset < 0 ||
+                state.Offset > state.Length ||
+                data.Length > MaximumFileChunkBytes ||
+                state.Offset + data.Length > state.Length ||
+                state.Hash == null ||
+                state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid project file chunk.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileChunk);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Offset);
+                writer.Write(state.Hash);
+                writer.Write(data.Length);
+                writer.Write(data);
+            });
+        }
+
+        internal static byte[] CreateProjectFileDelete(Guid playerId, string path)
+        {
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.ProjectFileDelete);
+                WriteGuid(writer, playerId);
+                WriteFilePath(writer, path);
+            });
+        }
+
         internal static byte[] CreateSceneObjectChange(Guid playerId, UnitySyncSceneObjectChange change)
         {
             if (change == null || change.Address == null)
@@ -410,6 +472,23 @@ namespace Glasspage.UnitySync
                 WriteGuid(writer, playerId);
                 WriteGuid(writer, snapshotId);
                 writer.Write(isComplete);
+            });
+        }
+
+        internal static byte[] CreateSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.SceneSettingsChange);
+                WriteGuid(writer, playerId);
+                WriteSceneSnapshotBoundary(writer, snapshot, true);
             });
         }
 
