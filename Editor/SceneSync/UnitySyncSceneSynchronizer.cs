@@ -80,6 +80,7 @@ namespace Glasspage.UnitySync
         {
             ObjectChangeEvents.changesPublished += OnChangesPublished;
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
+            EditorSceneManager.sceneSaved += OnSceneSaved;
         }
 
         internal static void BeginSession()
@@ -87,7 +88,7 @@ namespace Glasspage.UnitySync
             _active = true;
             _nextFlushTime = 0d;
             _nextSceneSettingsCheckTime = 0d;
-            _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetSceneSettingsSignature();
+            _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
@@ -134,6 +135,11 @@ namespace Glasspage.UnitySync
             // signature check here. A real RenderSettings Undo modification uses the stronger
             // MarkSceneSettingsChanged path above.
             _nextSceneSettingsCheckTime = 0d;
+        }
+
+        private static void OnSceneSaved(Scene scene)
+        {
+            MarkSceneSettingsChanged();
         }
 
         internal static void QueueFullSceneSnapshot(Guid targetPlayerId)
@@ -219,7 +225,7 @@ namespace Glasspage.UnitySync
                 }
 
                 _knownSceneSettingsSignature =
-                    UnitySyncSceneSerializer.GetSceneSettingsSignature();
+                    UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
 
                 return UnitySyncSceneSerializer.PruneSnapshot(
                     completedSnapshot.Boundary,
@@ -273,7 +279,7 @@ namespace Glasspage.UnitySync
                 }
 
                 _knownSceneSettingsSignature =
-                    UnitySyncSceneSerializer.GetSceneSettingsSignature();
+                    UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
                 return true;
             }
             catch (Exception exception)
@@ -298,7 +304,7 @@ namespace Glasspage.UnitySync
             }
 
             _nextSceneSettingsCheckTime = now + SceneSettingsCheckIntervalSeconds;
-            string signature = UnitySyncSceneSerializer.GetSceneSettingsSignature();
+            string signature = UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
             if (string.Equals(signature, _knownSceneSettingsSignature, StringComparison.Ordinal))
             {
                 return;
@@ -311,6 +317,7 @@ namespace Glasspage.UnitySync
             };
             _knownSceneSettingsSignature = signature;
             transport.SendSceneSettingsChange(localPlayerId, settings);
+            transport.LogLocal("Sent scene environment settings update.");
         }
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)

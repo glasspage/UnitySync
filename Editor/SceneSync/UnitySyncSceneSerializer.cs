@@ -316,12 +316,30 @@ namespace Glasspage.UnitySync
                             "m_ReflectionBounces",
                             RenderSettings.reflectionBounces),
                         CustomReflection = customReflectionReference,
-                        Fog = RenderSettings.fog,
-                        FogColor = RenderSettings.fogColor,
-                        FogMode = RenderSettings.fogMode,
-                        FogDensity = RenderSettings.fogDensity,
-                        FogStartDistance = RenderSettings.fogStartDistance,
-                        FogEndDistance = RenderSettings.fogEndDistance,
+                        Fog = GetBool(
+                            renderSettings,
+                            "m_Fog",
+                            RenderSettings.fog),
+                        FogColor = GetColor(
+                            renderSettings,
+                            "m_FogColor",
+                            RenderSettings.fogColor),
+                        FogMode = (FogMode)GetInt(
+                            renderSettings,
+                            "m_FogMode",
+                            (int)RenderSettings.fogMode),
+                        FogDensity = GetFloat(
+                            renderSettings,
+                            "m_FogDensity",
+                            RenderSettings.fogDensity),
+                        FogStartDistance = GetFloat(
+                            renderSettings,
+                            "m_LinearFogStart",
+                            RenderSettings.fogStartDistance),
+                        FogEndDistance = GetFloat(
+                            renderSettings,
+                            "m_LinearFogEnd",
+                            RenderSettings.fogEndDistance),
                         Sun = sunReference
                     });
                 }
@@ -415,6 +433,18 @@ namespace Glasspage.UnitySync
                             renderSettings,
                             "m_ReflectionBounces",
                             descriptor.ReflectionBounces);
+                        SetBool(renderSettings, "m_Fog", descriptor.Fog);
+                        SetColor(renderSettings, "m_FogColor", descriptor.FogColor);
+                        SetInt(renderSettings, "m_FogMode", (int)descriptor.FogMode);
+                        SetFloat(renderSettings, "m_FogDensity", descriptor.FogDensity);
+                        SetFloat(
+                            renderSettings,
+                            "m_LinearFogStart",
+                            descriptor.FogStartDistance);
+                        SetFloat(
+                            renderSettings,
+                            "m_LinearFogEnd",
+                            descriptor.FogEndDistance);
 
                         if (skyboxResolved)
                         {
@@ -438,6 +468,10 @@ namespace Glasspage.UnitySync
                         }
 
                         renderSettings.ApplyModifiedPropertiesWithoutUndo();
+                        if (renderSettings.targetObject != null)
+                        {
+                            EditorUtility.SetDirty(renderSettings.targetObject);
+                        }
                     }
 
                     // Keep the public runtime facade in sync as well. The serialized backing
@@ -511,6 +545,15 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool GetBool(
+            SerializedObject serializedObject,
+            string propertyName,
+            bool fallback)
+        {
+            SerializedProperty property = serializedObject?.FindProperty(propertyName);
+            return property != null ? property.boolValue : fallback;
+        }
+
         private static int GetInt(
             SerializedObject serializedObject,
             string propertyName,
@@ -545,6 +588,18 @@ namespace Glasspage.UnitySync
         {
             SerializedProperty property = serializedObject?.FindProperty(propertyName);
             return property != null ? property.objectReferenceValue : fallback;
+        }
+
+        private static void SetBool(
+            SerializedObject serializedObject,
+            string propertyName,
+            bool value)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property != null)
+            {
+                property.boolValue = value;
+            }
         }
 
         private static void SetInt(
@@ -593,6 +648,166 @@ namespace Glasspage.UnitySync
             {
                 property.objectReferenceValue = value;
             }
+        }
+
+        internal static string GetRenderSettingsFingerprint()
+        {
+            Scene previousActiveScene = SceneManager.GetActiveScene();
+            try
+            {
+                using (MemoryStream stream = new MemoryStream())
+                using (BinaryWriter writer = new BinaryWriter(stream))
+                using (SHA256 sha = SHA256.Create())
+                {
+                    for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+                    {
+                        Scene scene = SceneManager.GetSceneAt(sceneIndex);
+                        if (!scene.IsValid() ||
+                            !scene.isLoaded ||
+                            EditorSceneManager.IsPreviewScene(scene) ||
+                            !SceneManager.SetActiveScene(scene))
+                        {
+                            continue;
+                        }
+
+                        SerializedObject renderSettings = GetSerializedRenderSettings();
+                        renderSettings?.Update();
+
+                        writer.Write(scene.path ?? string.Empty);
+                        writer.Write(scene.name ?? string.Empty);
+                        writer.Write(sceneIndex);
+
+                        writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(renderSettings, "m_FogColor", RenderSettings.fogColor));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_FogMode",
+                            (int)RenderSettings.fogMode));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_FogDensity",
+                            RenderSettings.fogDensity));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_LinearFogStart",
+                            RenderSettings.fogStartDistance));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_LinearFogEnd",
+                            RenderSettings.fogEndDistance));
+
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_AmbientMode",
+                            (int)RenderSettings.ambientMode));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientSkyColor",
+                                RenderSettings.ambientSkyColor));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientEquatorColor",
+                                RenderSettings.ambientEquatorColor));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientGroundColor",
+                                RenderSettings.ambientGroundColor));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_AmbientIntensity",
+                            RenderSettings.ambientIntensity));
+
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_SkyboxMaterial",
+                                RenderSettings.skybox));
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_Sun",
+                                RenderSettings.sun));
+
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionMode",
+                            (int)RenderSettings.defaultReflectionMode));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionResolution",
+                            RenderSettings.defaultReflectionResolution));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_ReflectionIntensity",
+                            RenderSettings.reflectionIntensity));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_ReflectionBounces",
+                            RenderSettings.reflectionBounces));
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_CustomReflection",
+                                RenderSettings.customReflection));
+                    }
+
+                    writer.Flush();
+                    return Convert.ToBase64String(sha.ComputeHash(stream.ToArray()));
+                }
+            }
+            finally
+            {
+                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
+                {
+                    SceneManager.SetActiveScene(previousActiveScene);
+                }
+            }
+        }
+
+        private static void WriteRenderSettingsObjectFingerprint(
+            BinaryWriter writer,
+            Object value)
+        {
+            writer.Write(value != null);
+            if (value == null)
+            {
+                return;
+            }
+
+            writer.Write(GetStableTypeName(value.GetType()));
+            if (EditorUtility.IsPersistent(value))
+            {
+                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+                writer.Write(assetPath);
+                if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                        value,
+                        out string guid,
+                        out long localFileId))
+                {
+                    writer.Write(guid ?? string.Empty);
+                    writer.Write(localFileId);
+                }
+                else
+                {
+                    writer.Write(string.Empty);
+                    writer.Write(0L);
+                }
+
+                return;
+            }
+
+            writer.Write(value.GetInstanceID());
         }
 
         internal static string GetSceneSettingsSignature()
