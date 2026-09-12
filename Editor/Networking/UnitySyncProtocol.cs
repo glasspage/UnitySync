@@ -743,6 +743,82 @@ namespace Glasspage.UnitySync
                                 fileAbort);
                             break;
 
+                        case UnitySyncMessageType.ProjectFileBegin:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage projectFileBegin = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            if (projectFileBegin.SyncId == Guid.Empty ||
+                                projectFileBegin.Length < 0)
+                            {
+                                throw new InvalidDataException("Invalid project file update.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                projectFileBegin);
+                            break;
+
+                        case UnitySyncMessageType.ProjectFileChunk:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage projectFileChunk = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Offset = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            int projectChunkLength = reader.ReadInt32();
+                            if (projectFileChunk.SyncId == Guid.Empty ||
+                                projectFileChunk.Length < 0 ||
+                                projectFileChunk.Offset < 0 ||
+                                projectFileChunk.Offset > projectFileChunk.Length ||
+                                projectChunkLength < 0 ||
+                                projectChunkLength > MaximumFileChunkBytes ||
+                                projectFileChunk.Offset + projectChunkLength > projectFileChunk.Length)
+                            {
+                                throw new InvalidDataException("Invalid project file chunk.");
+                            }
+
+                            projectFileChunk.Data = ReadExactBytes(reader, projectChunkLength);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                projectFileChunk);
+                            break;
+
+                        case UnitySyncMessageType.ProjectFileDelete:
+                            playerId = ReadGuid(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                new UnitySyncFileSyncMessage
+                                {
+                                    Path = ReadFilePath(reader)
+                                });
+                            break;
+
                         case UnitySyncMessageType.SceneObjectChange:
                             playerId = ReadGuid(reader);
                             UnitySyncSceneObjectChange sceneChange = ReadSceneObjectChange(reader);
@@ -779,6 +855,19 @@ namespace Glasspage.UnitySync
                                     SnapshotId = ReadGuid(reader),
                                     IsComplete = reader.ReadBoolean()
                                 });
+                            break;
+
+                        case UnitySyncMessageType.SceneSettingsChange:
+                            playerId = ReadGuid(reader);
+                            UnitySyncSceneSnapshotBoundary sceneSettings =
+                                ReadSceneSnapshotBoundary(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                sceneSettings);
                             break;
 
                         default:
