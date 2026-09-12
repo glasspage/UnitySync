@@ -1920,26 +1920,44 @@ namespace Glasspage.UnitySync
                 }
             }
 
-            if (allowPathEquivalent && reference.LocalFileId != 0)
+            if (allowPathEquivalent)
             {
-                Object uniquePathCandidate = null;
-                int pathCandidateCount = 0;
+                Object uniqueLocalIdCandidateAtPath = null;
+                int localIdCandidateCountAtPath = 0;
+                Object uniqueNamedCandidateAtPath = null;
+                int namedCandidateCountAtPath = 0;
+
                 foreach (Object candidate in candidates)
                 {
                     if (candidate == null ||
-                        !TypeMatches(candidate.GetType(), reference.ObjectTypeName) ||
-                        !LocalFileIdMatches(candidate, reference.LocalFileId))
+                        !TypeMatches(candidate.GetType(), reference.ObjectTypeName))
                     {
                         continue;
                     }
 
-                    uniquePathCandidate = candidate;
-                    pathCandidateCount++;
+                    if (reference.LocalFileId != 0 &&
+                        LocalFileIdMatches(candidate, reference.LocalFileId))
+                    {
+                        uniqueLocalIdCandidateAtPath = candidate;
+                        localIdCandidateCountAtPath++;
+                    }
+
+                    if (candidate.name == reference.AssetName)
+                    {
+                        uniqueNamedCandidateAtPath = candidate;
+                        namedCandidateCountAtPath++;
+                    }
                 }
 
-                if (pathCandidateCount == 1)
+                if (localIdCandidateCountAtPath == 1)
                 {
-                    value = uniquePathCandidate;
+                    value = uniqueLocalIdCandidateAtPath;
+                    return true;
+                }
+
+                if (namedCandidateCountAtPath == 1)
+                {
+                    value = uniqueNamedCandidateAtPath;
                     return true;
                 }
             }

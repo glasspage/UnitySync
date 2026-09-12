@@ -249,7 +249,7 @@ namespace Glasspage.UnitySync
                     _remoteSnapshot.RepresentedObjectIds.Add(change.Address.ObjectId);
                 }
 
-                Remember(change);
+                RememberAppliedState(change);
                 return true;
             }
             catch (Exception exception)
@@ -645,6 +645,51 @@ namespace Glasspage.UnitySync
 
                 default:
                     return false;
+            }
+        }
+
+        private static void RememberAppliedState(UnitySyncSceneObjectChange receivedChange)
+        {
+            if (receivedChange == null ||
+                receivedChange.Address == null ||
+                receivedChange.Kind == UnitySyncSceneChangeKind.Destroy ||
+                receivedChange.HierarchyOnly)
+            {
+                return;
+            }
+
+            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(receivedChange.Address);
+            if (gameObject == null)
+            {
+                return;
+            }
+
+            UnitySyncSceneObjectChange appliedChange = null;
+            if (receivedChange.ReconcileComponents)
+            {
+                UnitySyncSceneSerializer.TryCaptureFullObject(gameObject, out appliedChange);
+            }
+            else if (receivedChange.GameObject != null)
+            {
+                UnitySyncSceneSerializer.TryCaptureGameObject(gameObject, out appliedChange);
+            }
+            else if (receivedChange.Components != null && receivedChange.Components.Length > 0)
+            {
+                int componentIndex = receivedChange.Components[0].ComponentIndex;
+                Component[] components = gameObject.GetComponents<Component>();
+                if (componentIndex >= 0 &&
+                    componentIndex < components.Length &&
+                    components[componentIndex] != null)
+                {
+                    UnitySyncSceneSerializer.TryCaptureComponent(
+                        components[componentIndex],
+                        out appliedChange);
+                }
+            }
+
+            if (appliedChange != null)
+            {
+                Remember(appliedChange);
             }
         }
 
