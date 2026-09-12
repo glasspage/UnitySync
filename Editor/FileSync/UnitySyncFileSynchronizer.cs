@@ -93,6 +93,7 @@ namespace Glasspage.UnitySync
         private static long _guestDownloadBytesReceived;
         private static string _guestTempRoot = string.Empty;
         private static bool _guestReadyForSceneSnapshot;
+        private static string _guestFailure = string.Empty;
         private static double _guestImportEarliestComplete;
 
         internal static bool IsGuestSyncing => _guestPhase != GuestPhase.None;
@@ -207,7 +208,7 @@ namespace Glasspage.UnitySync
                     error = string.IsNullOrEmpty(message.Error)
                         ? "The host aborted file synchronization."
                         : message.Error;
-                    FailGuestSync();
+                    FailGuestSync(error);
                     return false;
 
                 default:
@@ -246,6 +247,18 @@ namespace Glasspage.UnitySync
             }
 
             _guestReadyForSceneSnapshot = false;
+            return true;
+        }
+
+        internal static bool ConsumeGuestFailure(out string error)
+        {
+            error = _guestFailure;
+            if (string.IsNullOrEmpty(error))
+            {
+                return false;
+            }
+
+            _guestFailure = string.Empty;
             return true;
         }
 
@@ -589,7 +602,7 @@ namespace Glasspage.UnitySync
                 message.TotalBytes < 0)
             {
                 error = "The host started an invalid file manifest.";
-                FailGuestSync();
+                FailGuestSync(error);
                 return false;
             }
 
@@ -622,7 +635,7 @@ namespace Glasspage.UnitySync
                 GuestManifestByPath.ContainsKey(message.Path))
             {
                 error = "The host sent an invalid file manifest entry.";
-                FailGuestSync();
+                FailGuestSync(error);
                 return false;
             }
 
@@ -650,7 +663,7 @@ namespace Glasspage.UnitySync
                 GuestManifest.Count != _guestExpectedFileCount)
             {
                 error = "The host ended an incomplete file manifest.";
-                FailGuestSync();
+                FailGuestSync(error);
                 return false;
             }
 
@@ -693,8 +706,7 @@ namespace Glasspage.UnitySync
                 exception is UnauthorizedAccessException ||
                 exception is CryptographicException)
             {
-                FailGuestSync();
-                UnitySyncSession.ReportSceneSyncIssue(
+                FailGuestSync(
                     "File sync failed while comparing Assets: " + exception.Message);
                 return;
             }
@@ -770,7 +782,7 @@ namespace Glasspage.UnitySync
                 message.Data.Length > UnitySyncProtocol.MaximumFileChunkBytes)
             {
                 error = "The host sent an invalid synchronized file chunk.";
-                FailGuestSync();
+                FailGuestSync(error);
                 return false;
             }
 
@@ -781,7 +793,7 @@ namespace Glasspage.UnitySync
                     if (message.Offset != 0)
                     {
                         error = "A synchronized file started at an invalid offset.";
-                        FailGuestSync();
+                        FailGuestSync(error);
                         return false;
                     }
 
@@ -805,7 +817,7 @@ namespace Glasspage.UnitySync
                     transfer.Received + message.Data.Length > entry.Length)
                 {
                     error = "A synchronized file chunk arrived out of order.";
-                    FailGuestSync();
+                    FailGuestSync(error);
                     return false;
                 }
 
@@ -826,14 +838,14 @@ namespace Glasspage.UnitySync
                 if (!HashesEqual(ComputeHash(transfer.TempPath), entry.Hash))
                 {
                     error = "A synchronized file failed its final hash check: " + entry.Path;
-                    FailGuestSync();
+                    FailGuestSync(error);
                     return false;
                 }
 
                 if (!TryGetFullAssetPath(entry.Path, out string targetPath))
                 {
                     error = "A synchronized file had an unsafe target path: " + entry.Path;
-                    FailGuestSync();
+                    FailGuestSync(error);
                     return false;
                 }
 
@@ -870,7 +882,7 @@ namespace Glasspage.UnitySync
                 exception is CryptographicException)
             {
                 error = "Could not write a synchronized file: " + exception.Message;
-                FailGuestSync();
+                FailGuestSync(error);
                 return false;
             }
         }
@@ -938,12 +950,15 @@ namespace Glasspage.UnitySync
             EditorUtility.ClearProgressBar();
         }
 
-        private static void FailGuestSync()
+        private static void FailGuestSync(string error)
         {
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             _guestPhase = GuestPhase.None;
             _guestReadyForSceneSnapshot = false;
+            _guestFailure = string.IsNullOrEmpty(error)
+                ? "File synchronization failed."
+                : error;
             EditorUtility.ClearProgressBar();
         }
 
@@ -953,6 +968,7 @@ namespace Glasspage.UnitySync
             DeleteGuestTempRoot();
 
             _guestPhase = GuestPhase.None;
+            _guestFailure = string.Empty;
             _guestHostPlayerId = Guid.Empty;
             _guestSyncId = Guid.Empty;
             _guestExpectedFileCount = 0;
