@@ -74,6 +74,7 @@ namespace Glasspage.UnitySync
                 _joinCode = code;
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
+                UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Hosting on " + advertisedAddress + ":" + port + ".");
                 Changed?.Invoke();
                 return true;
@@ -118,6 +119,7 @@ namespace Glasspage.UnitySync
                 _transport.StartClient(data.Address, data.Port);
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
+                UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -175,6 +177,7 @@ namespace Glasspage.UnitySync
                 {
                     case UnitySyncTransportEventKind.Connected:
                         _state = UnitySyncSessionState.Connected;
+                        transport.RequestSceneSnapshot();
                         AddLog(transportEvent.Message);
                         Changed?.Invoke();
                         break;
@@ -196,6 +199,22 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
 
+                    case UnitySyncTransportEventKind.SceneObjectChange:
+                        if (!UnitySyncSceneSynchronizer.ApplyRemoteChange(
+                                transportEvent.SceneChange,
+                                out string sceneError))
+                        {
+                            AddLog("Scene sync skipped an update: " + sceneError);
+                            Changed?.Invoke();
+                        }
+                        break;
+
+                    case UnitySyncTransportEventKind.SceneSnapshotRequest:
+                        UnitySyncSceneSynchronizer.QueueFullSceneSnapshot(transportEvent.PlayerId);
+                        AddLog("Sending the current scene state to a collaborator.");
+                        Changed?.Invoke();
+                        break;
+
                     case UnitySyncTransportEventKind.Log:
                         AddLog(transportEvent.Message);
                         Changed?.Invoke();
@@ -207,6 +226,12 @@ namespace Glasspage.UnitySync
             {
                 StopInternal(false);
                 return;
+            }
+
+            if (!EditorApplication.isPlayingOrWillChangePlaymode &&
+                (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
+            {
+                UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
             }
 
             if (EditorApplication.timeSinceStartup < _nextSendTime ||
@@ -246,6 +271,7 @@ namespace Glasspage.UnitySync
 
             _state = UnitySyncSessionState.Idle;
             _joinCode = string.Empty;
+            UnitySyncSceneSynchronizer.EndSession();
             UnitySyncPresenceRoot.Clear();
             SceneView.RepaintAll();
 

@@ -2,7 +2,7 @@
 
 UnitySync is an experimental real-time collaboration add-on for the Unity Editor.
 
-Version 0.1 establishes the connection and presence foundation only. A host can create an encrypted session, collaborators can join with a compact code, and everyone can see one another's Scene view camera as temporary gizmos. It does **not** sync scene edits or files yet.
+Version 0.2 adds the first scene-edit synchronization layer. A host can create an encrypted session, collaborators can join with a compact code, everyone can see one another's Scene view camera, and edits to matching scene objects are replicated in real time.
 
 DISCLAIMER: The code in this repository was created with assistance from AI tools. I made the architecture, design and implementation decisions; AI was used to write the code based on them.
 
@@ -27,6 +27,8 @@ The current package targets Unity 2021.3 or newer.
 
 The host listens on all local interfaces. The address field controls the address embedded in the join code, so it should be the address other collaborators can actually reach.
 
+When a collaborator connects, the host sends its current loaded-scene state to that collaborator. The host's scene is therefore the starting authority for a session.
+
 ## What appears in the scene
 
 While connected, UnitySync creates temporary objects under `[UnitySync] > Collaborators`. Every remote user gets a child GameObject named `Username (Viewport)` with an `EditorOnly` tag and a Scene view camera gizmo. The generated hierarchy uses `DontSaveInEditor` and is removed when the session stops.
@@ -45,15 +47,26 @@ Treat a join code like a temporary password: anyone who has it can connect while
 - Multiple clients per host
 - Encrypted and authenticated messages
 - Live username, chosen viewport color, camera position, camera rotation, projection, and Scene view pivot
+- Live transforms and GameObject settings for existing scene objects
+- Serialized settings for Unity and third-party components, including UdonBehaviours, PhysBones, custom MonoBehaviours, scene references, and asset references
+- Component add, remove, and reorder synchronization on existing GameObjects
+- Initial scene alignment from the host when a collaborator joins
 - Automatic cleanup when peers disconnect or the session stops
 
 Not implemented:
 
-- Scene or prefab edits
+- Creating, deleting, reparenting, or reordering GameObjects
+- Prefab asset editing
 - Asset or file transfer
 - Project settings synchronization
 - Relay servers or internet matchmaking
-- Conflict resolution or version history
+- Conflict resolution beyond last received edit wins, or version history
+
+## Scene matching requirement
+
+This first scene-sync version assumes collaborators open the same scenes with the same non-UnitySync GameObjects in the same hierarchy order. Objects are matched by loaded scene and sibling-index path; names may change without breaking the match. UnitySync's temporary `[UnitySync]` hierarchy is ignored when calculating these paths.
+
+Component settings are synchronized through Unity's generic editor serialization layer rather than a list of supported component types. Both projects must have the same third-party packages and referenced assets installed. Properties Unity does not expose through `SerializedProperty`, and transient runtime-only state, are not synchronized.
 
 ## Troubleshooting
 

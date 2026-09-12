@@ -53,6 +53,24 @@ namespace Glasspage.UnitySync
             SetEditorOnlyTag(gameObject);
         }
 
+        internal static bool IsUnitySyncObject(GameObject gameObject)
+        {
+            Transform current = gameObject != null ? gameObject.transform : null;
+            while (current != null)
+            {
+                GameObject currentObject = current.gameObject;
+                if (currentObject.name == RootName &&
+                    (currentObject.hideFlags & HideFlags.DontSaveInEditor) != 0)
+                {
+                    return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
+        }
+
         private static void EnsureRoot()
         {
             if (_root != null)
