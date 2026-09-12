@@ -210,23 +210,110 @@ namespace Glasspage.UnitySync
         internal static UnitySyncSceneDescriptor[] GetLoadedSceneDescriptors()
         {
             List<UnitySyncSceneDescriptor> scenes = new List<UnitySyncSceneDescriptor>();
-            for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            Scene previousActiveScene = SceneManager.GetActiveScene();
+            try
             {
-                Scene scene = SceneManager.GetSceneAt(sceneIndex);
-                if (!scene.IsValid() || !scene.isLoaded || EditorSceneManager.IsPreviewScene(scene))
+                for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
                 {
-                    continue;
-                }
+                    Scene scene = SceneManager.GetSceneAt(sceneIndex);
+                    if (!scene.IsValid() || !scene.isLoaded || EditorSceneManager.IsPreviewScene(scene))
+                    {
+                        continue;
+                    }
 
-                scenes.Add(new UnitySyncSceneDescriptor
+                    UnitySyncObjectReferenceState skyboxReference = null;
+                    if (SceneManager.SetActiveScene(scene) &&
+                        TryCaptureObjectReference(RenderSettings.skybox, out skyboxReference))
+                    {
+                        skyboxReference.SerializedPropertyTypeName = "PPtr<Material>";
+                    }
+
+                    scenes.Add(new UnitySyncSceneDescriptor
+                    {
+                        ScenePath = scene.path ?? string.Empty,
+                        SceneName = scene.name ?? string.Empty,
+                        SceneIndex = sceneIndex,
+                        SkyboxMaterial = skyboxReference
+                    });
+                }
+            }
+            finally
+            {
+                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
                 {
-                    ScenePath = scene.path ?? string.Empty,
-                    SceneName = scene.name ?? string.Empty,
-                    SceneIndex = sceneIndex
-                });
+                    SceneManager.SetActiveScene(previousActiveScene);
+                }
             }
 
             return scenes.ToArray();
+        }
+
+        internal static bool ApplySceneSettings(
+            UnitySyncSceneSnapshotBoundary snapshot,
+            out string error)
+        {
+            error = string.Empty;
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                error = "The scene snapshot did not contain a valid ID.";
+                return false;
+            }
+
+            Scene previousActiveScene = SceneManager.GetActiveScene();
+            try
+            {
+                foreach (UnitySyncSceneDescriptor descriptor in
+                         snapshot.Scenes ?? new UnitySyncSceneDescriptor[0])
+                {
+                    if (descriptor == null ||
+                        !TryResolveScene(
+                            descriptor.ScenePath,
+                            descriptor.SceneName,
+                            descriptor.SceneIndex,
+                            out Scene scene))
+                    {
+                        continue;
+                    }
+
+                    if (descriptor.SkyboxMaterial == null)
+                    {
+                        continue;
+                    }
+
+                    if (!SceneManager.SetActiveScene(scene))
+                    {
+                        error = "Could not activate scene " + scene.name +
+                                " while applying scene settings.";
+                        return false;
+                    }
+
+                    if (!TryResolveObjectReference(
+                            descriptor.SkyboxMaterial,
+                            out Object skyboxObject) ||
+                        (skyboxObject != null && !(skyboxObject is Material)))
+                    {
+                        error = "The skybox material for scene " + scene.name +
+                                " could not be resolved.";
+                        return false;
+                    }
+
+                    Material skybox = skyboxObject as Material;
+                    if (RenderSettings.skybox != skybox)
+                    {
+                        RenderSettings.skybox = skybox;
+                        EditorSceneManager.MarkSceneDirty(scene);
+                    }
+                }
+
+                return true;
+            }
+            finally
+            {
+                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
+                {
+                    SceneManager.SetActiveScene(previousActiveScene);
+                }
+            }
         }
 
         internal static bool Apply(UnitySyncSceneObjectChange change, out string error)
