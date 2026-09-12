@@ -3,7 +3,7 @@
 UnitySync is an experimental real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same project with live scene editing, project asset syncing, shared Scene view presence, and spectating.
 
 > [!WARNING]
-> UnitySync can modify scenes and project files on connected computers. Use version control or another backup while testing it.
+> UnitySync is *not* considered a fully-functioning add-on yet and issues are expected. ***Use a backup project for testing!***
 
 ## Install
 
@@ -15,11 +15,12 @@ https://github.com/glasspage/UnitySync.git
 
 Git must be installed on the computer running Unity.
 
-After installation, UnitySync adds a **UnitySync** menu to the Unity Editor.
+After installation, a **UnitySync** menu is added to the top bar of the Unity Editor.
 
 ## Network setup
 
-UnitySync connects collaborators directly to the host over IPv4. Everyone must be able to reach the host through the same local network, a VPN such as Radmin VPN (recommended), or another direct network setup.
+UnitySync connects collaborators directly to the host over IPv4.
+[Radmin VPN](https://www.radmin-vpn.com/) is the simplest way to connect users together, but other direct network setups work as well.
 
 The default port is **47832**.
 
