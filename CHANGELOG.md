@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.9
+
+- Resolve and type-check every incoming object reference before changing a component, then apply references directly to the real component after staging its non-reference values.
+- Stop storing scene-object and asset references on detached staging components, fixing object-reference arrays such as renderer materials and scene-descriptor spawn transforms.
+- Add cached source-file SHA-256 identities to the scene-sync protocol and require exact content identity for cross-path asset searches.
+- Remove name-only asset fallback matching so a collaborator never receives a different same-type asset when the requested asset cannot be proven identical.
+- Reject a component capture instead of silently omitting a non-null object reference that has no stable cross-editor identity.
+
 ## 0.2.8
 
 - Validate object references on disposable staging components through Unity's typed object-reference getter, preventing valid references inside arrays from being rejected.

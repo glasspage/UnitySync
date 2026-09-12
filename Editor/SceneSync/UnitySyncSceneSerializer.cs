@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEditorInternal;
@@ -12,6 +14,24 @@ namespace Glasspage.UnitySync
 {
     internal static class UnitySyncSceneSerializer
     {
+        private sealed class ResolvedObjectReferenceAssignment
+        {
+            internal string Path = string.Empty;
+            internal UnitySyncSerializedValueKind Kind;
+            internal UnitySyncObjectReferenceState Reference;
+            internal Object Value;
+        }
+
+        private sealed class AssetFileHashCacheEntry
+        {
+            internal long Length;
+            internal long LastWriteTicks;
+            internal string Hash = string.Empty;
+        }
+
+        private static readonly Dictionary<string, AssetFileHashCacheEntry> AssetFileHashCache =
+            new Dictionary<string, AssetFileHashCacheEntry>(StringComparer.OrdinalIgnoreCase);
+
         private static readonly PropertyInfo GradientValueProperty = typeof(SerializedProperty).GetProperty(
             "gradientValue",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -64,10 +84,15 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            if (!TryCaptureComponentState(component, componentIndex, out UnitySyncComponentState componentState))
+            {
+                return false;
+            }
+
             change = new UnitySyncSceneObjectChange
             {
                 Address = address,
-                Components = new[] { CaptureComponent(component, componentIndex) }
+                Components = new[] { componentState }
             };
             return true;
         }
@@ -84,7 +109,10 @@ namespace Glasspage.UnitySync
             UnitySyncComponentState[] componentStates = new UnitySyncComponentState[components.Length];
             for (int index = 0; index < components.Length; index++)
             {
-                componentStates[index] = CaptureComponent(components[index], index);
+                if (!TryCaptureComponentState(components[index], index, out componentStates[index]))
+                {
+                    return false;
+                }
             }
 
             change = new UnitySyncSceneObjectChange
@@ -256,9 +284,12 @@ namespace Glasspage.UnitySync
             };
         }
 
-        private static UnitySyncComponentState CaptureComponent(Component component, int componentIndex)
+        private static bool TryCaptureComponentState(
+            Component component,
+            int componentIndex,
+            out UnitySyncComponentState state)
         {
-            UnitySyncComponentState state = new UnitySyncComponentState
+            state = new UnitySyncComponentState
             {
                 ComponentIndex = componentIndex,
                 TypeName = component != null ? GetStableTypeName(component.GetType()) : string.Empty
@@ -266,7 +297,7 @@ namespace Glasspage.UnitySync
 
             if (component == null)
             {
-                return state;
+                return true;
             }
 
             SerializedObject serializedObject = new SerializedObject(component);
@@ -286,11 +317,24 @@ namespace Glasspage.UnitySync
                 if (TryCaptureProperty(iterator, out UnitySyncSerializedPropertyState propertyState))
                 {
                     properties.Add(propertyState);
+                    continue;
+                }
+
+                if (iterator.propertyType == SerializedPropertyType.ObjectReference ||
+                    iterator.propertyType == SerializedPropertyType.ExposedReference)
+                {
+                    string captureError = "Scene sync skipped a local " + component.GetType().Name +
+                                          " update: object reference " + iterator.propertyPath +
+                                          " has no stable cross-editor identity.";
+                    UnitySyncSession.ReportSceneSyncIssue(captureError);
+                    Debug.LogWarning(
+                        "[UnitySync] " + captureError);
+                    return false;
                 }
             }
 
             state.Properties = properties.ToArray();
-            return state;
+            return true;
         }
 
         private static bool TryCaptureProperty(
@@ -547,6 +591,7 @@ namespace Glasspage.UnitySync
                 reference.AssetGuid = guid ?? string.Empty;
                 reference.AssetPath = assetPath;
                 reference.AssetName = value.name ?? string.Empty;
+                reference.AssetContentHash = GetAssetContentHash(assetPath);
                 reference.LocalFileId = localFileId;
                 return true;
             }
@@ -642,10 +687,12 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
-                if (!TryValidateStagedObjectReferences(stagingComponent, out string invalidProperty))
+                if (!TryResolveObjectReferenceAssignments(
+                        stagingComponent,
+                        state,
+                        out List<ResolvedObjectReferenceAssignment> referenceAssignments,
+                        out error))
                 {
-                    error = "Staged " + component.GetType().Name + " contains an invalid object reference at " +
-                            invalidProperty + "; the live scene component was not changed.";
                     return false;
                 }
 
@@ -657,6 +704,11 @@ namespace Glasspage.UnitySync
                 else
                 {
                     EditorUtility.CopySerialized(stagingComponent, component);
+                }
+
+                if (!ApplyResolvedObjectReferences(component, referenceAssignments, out error))
+                {
+                    return false;
                 }
 
                 PrefabUtility.RecordPrefabInstancePropertyModifications(component);
@@ -719,7 +771,8 @@ namespace Glasspage.UnitySync
                 }
 
                 if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
-                    propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference)
+                    propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
+                    IsObjectReferenceKind(propertyState.Kind))
                 {
                     continue;
                 }
@@ -727,15 +780,7 @@ namespace Glasspage.UnitySync
                 SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
                 if (property != null)
                 {
-                    if (!ApplyProperty(property, propertyState) &&
-                        (propertyState.Kind == UnitySyncSerializedValueKind.ObjectReference ||
-                         propertyState.Kind == UnitySyncSerializedValueKind.ExposedReference))
-                    {
-                        error = "Object reference " + propertyState.Path +
-                                " could not be resolved safely for local field type " +
-                                property.type + " on " + component.GetType().Name + ".";
-                        return false;
-                    }
+                    ApplyProperty(property, propertyState);
                 }
             }
 
@@ -807,42 +852,137 @@ namespace Glasspage.UnitySync
             return true;
         }
 
-        private static bool TryValidateStagedObjectReferences(
-            Component component,
-            out string invalidProperty)
+        private static bool TryResolveObjectReferenceAssignments(
+            Component layoutComponent,
+            UnitySyncComponentState state,
+            out List<ResolvedObjectReferenceAssignment> assignments,
+            out string error)
         {
-            invalidProperty = string.Empty;
+            assignments = new List<ResolvedObjectReferenceAssignment>();
+            error = string.Empty;
+            SerializedObject serializedObject = new SerializedObject(layoutComponent);
+            serializedObject.UpdateIfRequiredOrScript();
+
+            foreach (UnitySyncSerializedPropertyState propertyState in
+                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            {
+                if (propertyState == null ||
+                    IsIgnoredPropertyPath(propertyState.Path) ||
+                    !IsObjectReferenceKind(propertyState.Kind))
+                {
+                    continue;
+                }
+
+                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
+                if (property == null ||
+                    !IsSerializedPropertyKindCompatible(property, propertyState.Kind) ||
+                    !CanApplyObjectReference(property, propertyState.ObjectReference))
+                {
+                    error = "Object reference " + propertyState.Path +
+                            " does not match the local serialized layout on " +
+                            layoutComponent.GetType().Name + ".";
+                    return false;
+                }
+
+                if (!TryResolveObjectReference(propertyState.ObjectReference, out Object value) ||
+                    !IsSerializedReferenceTypeCompatible(property.type, value))
+                {
+                    error = "Object reference " + propertyState.Path +
+                            " could not be matched safely for local field type " +
+                            property.type + " on " + layoutComponent.GetType().Name + ".";
+                    return false;
+                }
+
+                assignments.Add(new ResolvedObjectReferenceAssignment
+                {
+                    Path = propertyState.Path,
+                    Kind = propertyState.Kind,
+                    Reference = propertyState.ObjectReference,
+                    Value = value
+                });
+            }
+
+            return true;
+        }
+
+        private static bool ApplyResolvedObjectReferences(
+            Component component,
+            List<ResolvedObjectReferenceAssignment> assignments,
+            out string error)
+        {
+            error = string.Empty;
+            if (assignments == null || assignments.Count == 0)
+            {
+                return true;
+            }
+
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
-            SerializedProperty iterator = serializedObject.GetIterator();
-            bool enterChildren = true;
-            while (iterator.Next(enterChildren))
+            foreach (ResolvedObjectReferenceAssignment assignment in assignments)
             {
-                enterChildren = true;
-                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                SerializedProperty property = serializedObject.FindProperty(assignment.Path);
+                if (property == null ||
+                    !IsSerializedPropertyKindCompatible(property, assignment.Kind) ||
+                    !CanApplyObjectReference(property, assignment.Reference))
                 {
-                    continue;
+                    error = "Object reference " + assignment.Path +
+                            " no longer matches the live serialized layout on " +
+                            component.GetType().Name + ".";
+                    return false;
                 }
 
-                int instanceId = iterator.objectReferenceInstanceIDValue;
-                if (instanceId == 0)
+                if (assignment.Kind == UnitySyncSerializedValueKind.ExposedReference)
                 {
-                    continue;
+                    property.exposedReferenceValue = assignment.Value;
+                }
+                else
+                {
+                    property.objectReferenceValue = assignment.Value;
+                }
+            }
+
+            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            serializedObject.UpdateIfRequiredOrScript();
+            foreach (ResolvedObjectReferenceAssignment assignment in assignments)
+            {
+                SerializedProperty property = serializedObject.FindProperty(assignment.Path);
+                if (property == null)
+                {
+                    error = "Object reference " + assignment.Path +
+                            " disappeared from the live serialized layout on " +
+                            component.GetType().Name + ".";
+                    return false;
                 }
 
-                // The staging component only receives references through Unity's typed
-                // objectReferenceValue setter. Reading that same typed value correctly
-                // validates array elements, whose raw instance IDs cannot always be
-                // reconstructed through EditorUtility.InstanceIDToObject.
-                Object value = iterator.objectReferenceValue;
-                if (value == null || !IsSerializedReferenceTypeCompatible(iterator.type, value))
+                Object appliedValue = assignment.Kind == UnitySyncSerializedValueKind.ExposedReference
+                    ? property.exposedReferenceValue
+                    : property.objectReferenceValue;
+                if (appliedValue != assignment.Value)
                 {
-                    invalidProperty = iterator.propertyPath;
+                    error = "Object reference " + assignment.Path + " on " +
+                            component.GetType().Name +
+                            " did not retain the resolved local object.";
                     return false;
                 }
             }
 
             return true;
+        }
+
+        private static bool IsObjectReferenceKind(UnitySyncSerializedValueKind kind)
+        {
+            return kind == UnitySyncSerializedValueKind.ObjectReference ||
+                   kind == UnitySyncSerializedValueKind.ExposedReference;
+        }
+
+        private static bool IsSerializedPropertyKindCompatible(
+            SerializedProperty property,
+            UnitySyncSerializedValueKind kind)
+        {
+            return (kind == UnitySyncSerializedValueKind.ObjectReference &&
+                    property.propertyType == SerializedPropertyType.ObjectReference) ||
+                   (kind == UnitySyncSerializedValueKind.ExposedReference &&
+                    property.propertyType == SerializedPropertyType.ExposedReference);
         }
 
         private static void CopyTransformSettings(Transform source, Transform destination)
@@ -901,7 +1041,7 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ObjectReference:
-                        return TryApplyObjectReference(property, state.ObjectReference);
+                        return false;
 
                     case UnitySyncSerializedValueKind.LayerMask:
                         property.intValue = (int)state.IntegerValue;
@@ -966,10 +1106,7 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ExposedReference:
-                        if (!CanApplyObjectReference(property, state.ObjectReference) ||
-                            !TryResolveObjectReference(state.ObjectReference, out Object exposedReference)) return false;
-                        property.exposedReferenceValue = exposedReference;
-                        return true;
+                        return false;
 
                     case UnitySyncSerializedValueKind.Vector2Int:
                         if (!HasIntegers(state, 2)) return false;
@@ -1202,11 +1339,13 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            Object uniqueNamedCandidate = null;
-            int namedCandidateCount = 0;
-            foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(assetPath))
+            Object uniqueLocalIdCandidate = null;
+            int localIdCandidateCount = 0;
+            Object[] candidates = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            foreach (Object candidate in candidates)
             {
-                if (!BasicAssetCandidateMatches(candidate, reference))
+                if (candidate == null ||
+                    !TypeMatches(candidate.GetType(), reference.ObjectTypeName))
                 {
                     continue;
                 }
@@ -1216,14 +1355,30 @@ namespace Glasspage.UnitySync
                     value = candidate;
                     return true;
                 }
-
-                uniqueNamedCandidate = candidate;
-                namedCandidateCount++;
             }
 
-            if (namedCandidateCount == 1)
+            if (!AssetContentHashMatches(assetPath, reference.AssetContentHash))
             {
-                value = uniqueNamedCandidate;
+                return false;
+            }
+
+            foreach (Object candidate in candidates)
+            {
+                if (!BasicAssetCandidateMatches(candidate, reference))
+                {
+                    continue;
+                }
+
+                if (LocalFileIdMatches(candidate, reference.LocalFileId))
+                {
+                    uniqueLocalIdCandidate = candidate;
+                    localIdCandidateCount++;
+                }
+            }
+
+            if (localIdCandidateCount == 1)
+            {
+                value = uniqueLocalIdCandidate;
                 return true;
             }
 
@@ -1238,16 +1393,16 @@ namespace Glasspage.UnitySync
             Type assetType = ResolveType(reference.ObjectTypeName);
             if (assetType == null ||
                 !typeof(Object).IsAssignableFrom(assetType) ||
-                string.IsNullOrEmpty(reference.AssetName))
+                string.IsNullOrEmpty(reference.AssetName) ||
+                string.IsNullOrEmpty(reference.AssetContentHash))
             {
                 return false;
             }
 
-            string expectedFileName = GetAssetFileName(reference.AssetPath);
-            Object uniqueFileNameCandidate = null;
-            int fileNameCandidateCount = 0;
-            Object uniqueProjectCandidate = null;
-            int projectCandidateCount = 0;
+            Object uniqueLocalIdCandidate = null;
+            int localIdCandidateCount = 0;
+            Object uniqueContentCandidate = null;
+            int contentCandidateCount = 0;
             HashSet<int> visitedCandidates = new HashSet<int>();
 
             string[] candidateGuids = AssetDatabase.FindAssets("t:" + assetType.Name);
@@ -1260,6 +1415,11 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
+                if (!AssetContentHashMatches(candidatePath, reference.AssetContentHash))
+                {
+                    continue;
+                }
+
                 foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(candidatePath))
                 {
                     if (!BasicAssetCandidateMatches(candidate, reference) ||
@@ -1268,29 +1428,25 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    uniqueProjectCandidate = candidate;
-                    projectCandidateCount++;
-                    if (!string.IsNullOrEmpty(expectedFileName) &&
-                        string.Equals(
-                            GetAssetFileName(candidatePath),
-                            expectedFileName,
-                            StringComparison.OrdinalIgnoreCase))
+                    uniqueContentCandidate = candidate;
+                    contentCandidateCount++;
+                    if (LocalFileIdMatches(candidate, reference.LocalFileId))
                     {
-                        uniqueFileNameCandidate = candidate;
-                        fileNameCandidateCount++;
+                        uniqueLocalIdCandidate = candidate;
+                        localIdCandidateCount++;
                     }
                 }
             }
 
-            if (fileNameCandidateCount == 1)
+            if (localIdCandidateCount == 1)
             {
-                value = uniqueFileNameCandidate;
+                value = uniqueLocalIdCandidate;
                 return true;
             }
 
-            if (projectCandidateCount == 1)
+            if (contentCandidateCount == 1)
             {
-                value = uniqueProjectCandidate;
+                value = uniqueContentCandidate;
                 return true;
             }
 
@@ -1475,6 +1631,16 @@ namespace Glasspage.UnitySync
                    candidateFileId == reference.LocalFileId;
         }
 
+        private static bool LocalFileIdMatches(Object candidate, long expectedLocalFileId)
+        {
+            return candidate != null &&
+                   AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                       candidate,
+                       out string _,
+                       out long candidateFileId) &&
+                   candidateFileId == expectedLocalFileId;
+        }
+
         private static bool BuiltinAssetCandidateMatches(
             Object candidate,
             UnitySyncObjectReferenceState reference)
@@ -1498,86 +1664,6 @@ namespace Glasspage.UnitySync
                    IsBuiltinAssetGuid(candidateGuid);
         }
 
-        private static bool TryApplyObjectReference(
-            SerializedProperty property,
-            UnitySyncObjectReferenceState reference)
-        {
-            if (!CanApplyObjectReference(property, reference))
-            {
-                return false;
-            }
-
-            // Avoid rewriting an identical local PPtr. Unity can have several loaded editor
-            // resources with the same display name but different native identities.
-            if (ExistingObjectReferenceMatches(property, reference))
-            {
-                return true;
-            }
-
-            if (!TryResolveObjectReference(reference, out Object objectReference) ||
-                !IsSerializedReferenceTypeCompatible(property.type, objectReference))
-            {
-                return false;
-            }
-
-            // This property belongs to UnitySync's disposable staging component. Using the
-            // typed setter lets Unity create the correct native PPtr for built-in assets;
-            // writing a raw instance ID here can reinterpret a built-in Mesh as another type.
-            property.objectReferenceValue = objectReference;
-            return true;
-        }
-
-        private static bool ExistingObjectReferenceMatches(
-            SerializedProperty property,
-            UnitySyncObjectReferenceState reference)
-        {
-            int instanceId = property.objectReferenceInstanceIDValue;
-            if (reference.Kind == UnitySyncObjectReferenceKind.Null)
-            {
-                return instanceId == 0;
-            }
-
-            Object candidate = EditorUtility.InstanceIDToObject(instanceId);
-            if (candidate == null ||
-                !IsSerializedReferenceTypeCompatible(property.type, candidate) ||
-                !TypeMatches(candidate.GetType(), reference.ObjectTypeName))
-            {
-                return false;
-            }
-
-            if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
-            {
-                return AssetReferenceMatches(candidate, reference);
-            }
-
-            if (reference.Kind != UnitySyncObjectReferenceKind.SceneObject)
-            {
-                return false;
-            }
-
-            GameObject referencedGameObject;
-            int componentIndex;
-            if (candidate is GameObject gameObject)
-            {
-                referencedGameObject = gameObject;
-                componentIndex = -1;
-            }
-            else if (candidate is Component component)
-            {
-                referencedGameObject = component.gameObject;
-                componentIndex = GetComponentIndex(referencedGameObject, component);
-            }
-            else
-            {
-                return false;
-            }
-
-            return componentIndex == reference.ComponentIndex &&
-                   reference.SceneObject != null &&
-                   TryCreateAddress(referencedGameObject, out UnitySyncSceneObjectAddress address) &&
-                   address.Key == reference.SceneObject.Key;
-        }
-
         private static bool IsBuiltinAssetReference(UnitySyncObjectReferenceState reference)
         {
             return reference != null &&
@@ -1598,16 +1684,112 @@ namespace Glasspage.UnitySync
                    normalized.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static string GetAssetContentHash(string assetPath)
+        {
+            try
+            {
+                if (!TryGetAssetFileSystemPath(assetPath, out string fileSystemPath))
+                {
+                    return string.Empty;
+                }
+
+                FileInfo fileInfo = new FileInfo(fileSystemPath);
+                long length = fileInfo.Length;
+                long lastWriteTicks = fileInfo.LastWriteTimeUtc.Ticks;
+                if (AssetFileHashCache.TryGetValue(fileSystemPath, out AssetFileHashCacheEntry cached) &&
+                    cached.Length == length &&
+                    cached.LastWriteTicks == lastWriteTicks)
+                {
+                    return cached.Hash;
+                }
+
+                string hash;
+                using (FileStream stream = new FileStream(
+                           fileSystemPath,
+                           FileMode.Open,
+                           FileAccess.Read,
+                           FileShare.ReadWrite))
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    hash = Convert.ToBase64String(sha256.ComputeHash(stream));
+                }
+
+                AssetFileHashCache[fileSystemPath] = new AssetFileHashCacheEntry
+                {
+                    Length = length,
+                    LastWriteTicks = lastWriteTicks,
+                    Hash = hash
+                };
+                return hash;
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException ||
+                exception is IOException ||
+                exception is NotSupportedException ||
+                exception is UnauthorizedAccessException)
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool TryGetAssetFileSystemPath(string assetPath, out string fileSystemPath)
+        {
+            fileSystemPath = string.Empty;
+            string normalized = NormalizeAssetPath(assetPath);
+            if (normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                if (string.IsNullOrEmpty(projectRoot))
+                {
+                    return false;
+                }
+
+                fileSystemPath = Path.GetFullPath(Path.Combine(
+                    projectRoot,
+                    normalized.Replace('/', Path.DirectorySeparatorChar)));
+                return File.Exists(fileSystemPath);
+            }
+
+            if (!normalized.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            UnityEditor.PackageManager.PackageInfo package =
+                UnityEditor.PackageManager.PackageInfo.FindForAssetPath(normalized);
+            if (package == null || string.IsNullOrEmpty(package.resolvedPath))
+            {
+                return false;
+            }
+
+            string packagePrefix = "Packages/" + package.name;
+            if (!normalized.StartsWith(packagePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string relativePath = normalized.Substring(packagePrefix.Length).TrimStart('/');
+            fileSystemPath = Path.GetFullPath(Path.Combine(
+                package.resolvedPath,
+                relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            return File.Exists(fileSystemPath);
+        }
+
+        private static bool AssetContentHashMatches(string assetPath, string expectedHash)
+        {
+            if (string.IsNullOrEmpty(expectedHash))
+            {
+                return true;
+            }
+
+            string localHash = GetAssetContentHash(assetPath);
+            return !string.IsNullOrEmpty(localHash) &&
+                   string.Equals(localHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string NormalizeAssetPath(string assetPath)
         {
             return (assetPath ?? string.Empty).Replace('\\', '/').Trim();
-        }
-
-        private static string GetAssetFileName(string assetPath)
-        {
-            string normalized = NormalizeAssetPath(assetPath);
-            int separator = normalized.LastIndexOf('/');
-            return separator >= 0 ? normalized.Substring(separator + 1) : normalized;
         }
 
         private static bool IsBuiltinAssetPath(string assetPath)
