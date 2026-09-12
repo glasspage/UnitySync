@@ -24,6 +24,10 @@ namespace Glasspage.UnitySync
             internal float OrthographicSize;
 
             private bool _hasTransform;
+            private Vector3 _interpolationStartPivot;
+            private Vector3 _interpolationStartPosition;
+            private Quaternion _interpolationStartRotation;
+            private double _interpolationStartTime;
 
             internal ViewportMarker(GameObject gameObject, string displayName, Color color, bool isDebug)
             {
@@ -49,60 +53,60 @@ namespace Glasspage.UnitySync
                 OrthographicSize = viewport.OrthographicSize;
 
                 GameObject.name = DisplayName + " (Viewport)";
+                Transform transform = GameObject.transform;
                 if (!_hasTransform)
                 {
                     Pivot = TargetPivot;
-                    GameObject.transform.SetPositionAndRotation(TargetPosition, TargetRotation);
+                    transform.SetPositionAndRotation(TargetPosition, TargetRotation);
+                    _interpolationStartPivot = TargetPivot;
+                    _interpolationStartPosition = TargetPosition;
+                    _interpolationStartRotation = TargetRotation;
+                    _interpolationStartTime = EditorApplication.timeSinceStartup;
                     _hasTransform = true;
+                    return;
                 }
+
+                _interpolationStartPivot = Pivot;
+                _interpolationStartPosition = transform.position;
+                _interpolationStartRotation = transform.rotation;
+                _interpolationStartTime = EditorApplication.timeSinceStartup;
             }
 
-            internal bool Interpolate(float amount)
+            internal bool Interpolate(double currentTime)
             {
                 Transform transform = GameObject.transform;
-                Vector3 position = transform.position;
-                Quaternion rotation = transform.rotation;
+                float amount = Mathf.Clamp01(
+                    (float)((currentTime - _interpolationStartTime) / TransformInterpolationDuration));
+                Vector3 position = Vector3.Lerp(
+                    _interpolationStartPosition,
+                    TargetPosition,
+                    amount);
+                Quaternion rotation = Quaternion.Slerp(
+                    _interpolationStartRotation,
+                    TargetRotation,
+                    amount);
+                Vector3 pivot = Vector3.Lerp(
+                    _interpolationStartPivot,
+                    TargetPivot,
+                    amount);
 
-                bool positionChanged = (position - TargetPosition).sqrMagnitude > 0.00000001f;
-                bool rotationChanged = Quaternion.Angle(rotation, TargetRotation) > 0.01f;
-                bool pivotChanged = (Pivot - TargetPivot).sqrMagnitude > 0.00000001f;
+                bool positionChanged = (transform.position - position).sqrMagnitude > 0.00000001f;
+                bool rotationChanged = Quaternion.Angle(transform.rotation, rotation) > 0.01f;
+                bool pivotChanged = (Pivot - pivot).sqrMagnitude > 0.00000001f;
                 if (!positionChanged && !rotationChanged && !pivotChanged)
                 {
                     return false;
                 }
 
-                position = positionChanged
-                    ? Vector3.Lerp(position, TargetPosition, amount)
-                    : TargetPosition;
-                rotation = rotationChanged
-                    ? Quaternion.Slerp(rotation, TargetRotation, amount)
-                    : TargetRotation;
-                Pivot = pivotChanged
-                    ? Vector3.Lerp(Pivot, TargetPivot, amount)
-                    : TargetPivot;
-
-                if ((position - TargetPosition).sqrMagnitude <= 0.00000001f)
-                {
-                    position = TargetPosition;
-                }
-
-                if (Quaternion.Angle(rotation, TargetRotation) <= 0.01f)
-                {
-                    rotation = TargetRotation;
-                }
-
-                if ((Pivot - TargetPivot).sqrMagnitude <= 0.00000001f)
-                {
-                    Pivot = TargetPivot;
-                }
-
+                Pivot = pivot;
                 transform.SetPositionAndRotation(position, rotation);
                 return true;
             }
         }
 
         private const string CollaboratorsContainerName = "Collaborators";
-        private const float TransformInterpolationSpeed = 18f;
+        private const double TransformInterpolationDuration = 0.1d;
+        private const float DirectionLineOpacityMultiplier = 0.6f;
         private const float ForegroundStrokeWidth = 1f;
         private const float OutlineStrokeWidth = 3f;
         private const float NeutralOutlineSwitchValue = 0.35f;
@@ -130,7 +134,6 @@ namespace Glasspage.UnitySync
         private static GameObject _collaboratorsRoot;
         private static GUIStyle _labelStyle;
         private static GUIStyle _labelOutlineStyle;
-        private static double _lastInterpolationTime;
 
         static UnitySyncPresenceRoot()
         {
@@ -338,21 +341,12 @@ namespace Glasspage.UnitySync
 
         private static void UpdateInterpolatedTransforms()
         {
+            if (Markers.Count == 0)
+            {
+                return;
+            }
+
             double now = EditorApplication.timeSinceStartup;
-            if (_lastInterpolationTime <= 0d)
-            {
-                _lastInterpolationTime = now;
-                return;
-            }
-
-            float deltaTime = (float)Math.Min(now - _lastInterpolationTime, 0.1d);
-            _lastInterpolationTime = now;
-            if (deltaTime <= 0f || Markers.Count == 0)
-            {
-                return;
-            }
-
-            float amount = 1f - Mathf.Exp(-TransformInterpolationSpeed * deltaTime);
             bool changed = false;
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
@@ -369,7 +363,7 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                changed |= marker.Interpolate(amount);
+                changed |= marker.Interpolate(now);
             }
 
             if (staleIds != null)
@@ -441,25 +435,24 @@ namespace Glasspage.UnitySync
 
                 if (directionLineDistance > 0f)
                 {
+                    float directionLineOpacity = opacity * DirectionLineOpacityMultiplier;
+                    Color directionLineColor = WithAlpha(marker.Color, directionLineOpacity);
+                    Color directionLineOutlineColor = CalculateOutlineColor(
+                        marker.Color,
+                        directionLineOpacity);
                     DrawOutlinedLine(
                         Vector3.zero,
                         Vector3.forward * directionLineDistance,
-                        outlineColor,
-                        foregroundColor);
+                        directionLineOutlineColor,
+                        directionLineColor);
                     DrawOutlinedDisc(
                         Vector3.forward * directionLineDistance,
                         0.04f,
-                        outlineColor,
-                        foregroundColor);
+                        directionLineOutlineColor,
+                        directionLineColor);
                 }
 
                 Handles.matrix = previousMatrix;
-                Handles.color = new Color(
-                    marker.Color.r,
-                    marker.Color.g,
-                    marker.Color.b,
-                    0.55f * opacity);
-                Handles.DrawDottedLine(markerTransform.position, marker.Pivot, 4f);
                 DrawDisplayName(sceneView, marker, markerTransform, opacity);
             }
 
