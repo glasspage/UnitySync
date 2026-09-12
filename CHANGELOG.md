@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.6
+
+- Assign staged object references through Unity's typed `objectReferenceValue` API instead of writing raw instance IDs into serialized PPtrs.
+- Resolve Unity primitive meshes by creating the matching local primitive and reading the mesh Unity assigned to it.
+- Resolve Unity's default material from a local primitive rather than guessing a built-in resource filename.
+- Identify project and package assets by normalized path, concrete type, subasset name, and local file ID instead of requiring matching GUIDs.
+- Search deterministically for a unique type/name/file match when collaborators store the same asset at different paths.
+- Remove the receiver-local built-in asset cache and reflection-based resource loading workaround.
+
 ## 0.2.5
 
 - Preserve validated built-in asset identities locally before synchronized fields are cleared.
