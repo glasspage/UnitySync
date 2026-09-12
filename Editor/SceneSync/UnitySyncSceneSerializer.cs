@@ -40,6 +40,10 @@ namespace Glasspage.UnitySync
             "constrainProportionsScale",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        private static readonly MethodInfo GetRenderSettingsMethod = typeof(RenderSettings).GetMethod(
+            "GetRenderSettings",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
         private static readonly HashSet<string> IgnoredPropertyPaths = new HashSet<string>
         {
             "m_ObjectHideFlags",
@@ -226,25 +230,50 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    TryCaptureObjectReference(RenderSettings.skybox, out UnitySyncObjectReferenceState skyboxReference);
+                    SerializedObject renderSettings = GetSerializedRenderSettings();
+                    renderSettings?.Update();
+
+                    Object skyboxValue = GetObjectReference(
+                        renderSettings,
+                        "m_SkyboxMaterial",
+                        RenderSettings.skybox);
+                    Object reflectionValue = GetObjectReference(
+                        renderSettings,
+                        "m_CustomReflection",
+                        RenderSettings.customReflection);
+                    Object sunValue = GetObjectReference(
+                        renderSettings,
+                        "m_Sun",
+                        RenderSettings.sun);
+
+                    TryCaptureObjectReference(
+                        skyboxValue,
+                        out UnitySyncObjectReferenceState skyboxReference);
                     if (skyboxReference != null)
                     {
                         skyboxReference.SerializedPropertyTypeName = "PPtr<Material>";
                     }
 
                     TryCaptureObjectReference(
-                        RenderSettings.customReflection,
+                        reflectionValue,
                         out UnitySyncObjectReferenceState customReflectionReference);
                     if (customReflectionReference != null)
                     {
                         customReflectionReference.SerializedPropertyTypeName = "PPtr<Cubemap>";
                     }
 
-                    TryCaptureObjectReference(RenderSettings.sun, out UnitySyncObjectReferenceState sunReference);
+                    TryCaptureObjectReference(
+                        sunValue,
+                        out UnitySyncObjectReferenceState sunReference);
                     if (sunReference != null)
                     {
                         sunReference.SerializedPropertyTypeName = "PPtr<Light>";
                     }
+
+                    Color ambientSky = GetColor(
+                        renderSettings,
+                        "m_AmbientSkyColor",
+                        RenderSettings.ambientSkyColor);
 
                     scenes.Add(new UnitySyncSceneDescriptor
                     {
@@ -252,16 +281,40 @@ namespace Glasspage.UnitySync
                         SceneName = scene.name ?? string.Empty,
                         SceneIndex = sceneIndex,
                         SkyboxMaterial = skyboxReference,
-                        AmbientMode = RenderSettings.ambientMode,
-                        AmbientIntensity = RenderSettings.ambientIntensity,
-                        AmbientLight = RenderSettings.ambientLight,
-                        AmbientSkyColor = RenderSettings.ambientSkyColor,
-                        AmbientEquatorColor = RenderSettings.ambientEquatorColor,
-                        AmbientGroundColor = RenderSettings.ambientGroundColor,
-                        DefaultReflectionMode = RenderSettings.defaultReflectionMode,
-                        DefaultReflectionResolution = RenderSettings.defaultReflectionResolution,
-                        ReflectionIntensity = RenderSettings.reflectionIntensity,
-                        ReflectionBounces = RenderSettings.reflectionBounces,
+                        AmbientMode = (UnityEngine.Rendering.AmbientMode)GetInt(
+                            renderSettings,
+                            "m_AmbientMode",
+                            (int)RenderSettings.ambientMode),
+                        AmbientIntensity = GetFloat(
+                            renderSettings,
+                            "m_AmbientIntensity",
+                            RenderSettings.ambientIntensity),
+                        AmbientLight = ambientSky,
+                        AmbientSkyColor = ambientSky,
+                        AmbientEquatorColor = GetColor(
+                            renderSettings,
+                            "m_AmbientEquatorColor",
+                            RenderSettings.ambientEquatorColor),
+                        AmbientGroundColor = GetColor(
+                            renderSettings,
+                            "m_AmbientGroundColor",
+                            RenderSettings.ambientGroundColor),
+                        DefaultReflectionMode = (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionMode",
+                            (int)RenderSettings.defaultReflectionMode),
+                        DefaultReflectionResolution = GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionResolution",
+                            RenderSettings.defaultReflectionResolution),
+                        ReflectionIntensity = GetFloat(
+                            renderSettings,
+                            "m_ReflectionIntensity",
+                            RenderSettings.reflectionIntensity),
+                        ReflectionBounces = GetInt(
+                            renderSettings,
+                            "m_ReflectionBounces",
+                            RenderSettings.reflectionBounces),
                         CustomReflection = customReflectionReference,
                         Fog = RenderSettings.fog,
                         FogColor = RenderSettings.fogColor,
@@ -331,12 +384,67 @@ namespace Glasspage.UnitySync
                         out Object sunObject) &&
                         (sunObject == null || sunObject is Light);
 
-                    // Apply scalar/color environment settings independently from optional
-                    // object references. One stale scene-object reference must not prevent
-                    // ambient, fog, reflection, or other environment settings from syncing.
+                    SerializedObject renderSettings = GetSerializedRenderSettings();
+                    if (renderSettings != null)
+                    {
+                        renderSettings.Update();
+                        SetInt(renderSettings, "m_AmbientMode", (int)descriptor.AmbientMode);
+                        SetFloat(renderSettings, "m_AmbientIntensity", descriptor.AmbientIntensity);
+                        SetColor(renderSettings, "m_AmbientSkyColor", descriptor.AmbientSkyColor);
+                        SetColor(
+                            renderSettings,
+                            "m_AmbientEquatorColor",
+                            descriptor.AmbientEquatorColor);
+                        SetColor(
+                            renderSettings,
+                            "m_AmbientGroundColor",
+                            descriptor.AmbientGroundColor);
+                        SetInt(
+                            renderSettings,
+                            "m_DefaultReflectionMode",
+                            (int)descriptor.DefaultReflectionMode);
+                        SetInt(
+                            renderSettings,
+                            "m_DefaultReflectionResolution",
+                            descriptor.DefaultReflectionResolution);
+                        SetFloat(
+                            renderSettings,
+                            "m_ReflectionIntensity",
+                            descriptor.ReflectionIntensity);
+                        SetInt(
+                            renderSettings,
+                            "m_ReflectionBounces",
+                            descriptor.ReflectionBounces);
+
+                        if (skyboxResolved)
+                        {
+                            SetObjectReference(
+                                renderSettings,
+                                "m_SkyboxMaterial",
+                                skyboxObject);
+                        }
+
+                        if (reflectionResolved)
+                        {
+                            SetObjectReference(
+                                renderSettings,
+                                "m_CustomReflection",
+                                reflectionObject);
+                        }
+
+                        if (sunResolved)
+                        {
+                            SetObjectReference(renderSettings, "m_Sun", sunObject);
+                        }
+
+                        renderSettings.ApplyModifiedPropertiesWithoutUndo();
+                    }
+
+                    // Keep the public runtime facade in sync as well. The serialized backing
+                    // object above is what Unity's Lighting window edits and what persists.
                     RenderSettings.ambientMode = descriptor.AmbientMode;
                     RenderSettings.ambientIntensity = descriptor.AmbientIntensity;
-                    RenderSettings.ambientLight = descriptor.AmbientLight;
+                    RenderSettings.ambientLight = descriptor.AmbientSkyColor;
                     RenderSettings.ambientSkyColor = descriptor.AmbientSkyColor;
                     RenderSettings.ambientEquatorColor = descriptor.AmbientEquatorColor;
                     RenderSettings.ambientGroundColor = descriptor.AmbientGroundColor;
@@ -379,6 +487,111 @@ namespace Glasspage.UnitySync
                 {
                     SceneManager.SetActiveScene(previousActiveScene);
                 }
+            }
+        }
+
+        private static SerializedObject GetSerializedRenderSettings()
+        {
+            if (GetRenderSettingsMethod == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                Object target = GetRenderSettingsMethod.Invoke(null, null) as Object;
+                return target != null ? new SerializedObject(target) : null;
+            }
+            catch (Exception exception) when (
+                exception is TargetInvocationException ||
+                exception is MethodAccessException ||
+                exception is ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static int GetInt(
+            SerializedObject serializedObject,
+            string propertyName,
+            int fallback)
+        {
+            SerializedProperty property = serializedObject?.FindProperty(propertyName);
+            return property != null ? property.intValue : fallback;
+        }
+
+        private static float GetFloat(
+            SerializedObject serializedObject,
+            string propertyName,
+            float fallback)
+        {
+            SerializedProperty property = serializedObject?.FindProperty(propertyName);
+            return property != null ? property.floatValue : fallback;
+        }
+
+        private static Color GetColor(
+            SerializedObject serializedObject,
+            string propertyName,
+            Color fallback)
+        {
+            SerializedProperty property = serializedObject?.FindProperty(propertyName);
+            return property != null ? property.colorValue : fallback;
+        }
+
+        private static Object GetObjectReference(
+            SerializedObject serializedObject,
+            string propertyName,
+            Object fallback)
+        {
+            SerializedProperty property = serializedObject?.FindProperty(propertyName);
+            return property != null ? property.objectReferenceValue : fallback;
+        }
+
+        private static void SetInt(
+            SerializedObject serializedObject,
+            string propertyName,
+            int value)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property != null)
+            {
+                property.intValue = value;
+            }
+        }
+
+        private static void SetFloat(
+            SerializedObject serializedObject,
+            string propertyName,
+            float value)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property != null)
+            {
+                property.floatValue = value;
+            }
+        }
+
+        private static void SetColor(
+            SerializedObject serializedObject,
+            string propertyName,
+            Color value)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property != null)
+            {
+                property.colorValue = value;
+            }
+        }
+
+        private static void SetObjectReference(
+            SerializedObject serializedObject,
+            string propertyName,
+            Object value)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property != null)
+            {
+                property.objectReferenceValue = value;
             }
         }
 
