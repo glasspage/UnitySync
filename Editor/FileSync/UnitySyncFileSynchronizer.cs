@@ -784,6 +784,12 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            if (GuestMismatches.Count == 0)
+            {
+                CompleteGuestSync();
+                return;
+            }
+
             _guestDownloadTotalBytes = 0;
             string[] neededPaths = new string[GuestMismatches.Count];
             for (int index = 0; index < GuestMismatches.Count; index++)
