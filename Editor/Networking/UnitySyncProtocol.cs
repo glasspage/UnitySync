@@ -41,6 +41,8 @@ namespace Glasspage.UnitySync
         internal readonly float Aspect;
         internal readonly bool Orthographic;
         internal readonly float OrthographicSize;
+        internal readonly float SceneViewSize;
+        internal readonly Guid SpectatingPlayerId;
 
         internal UnitySyncViewportState(
             Guid playerId,
@@ -52,7 +54,9 @@ namespace Glasspage.UnitySync
             float fieldOfView,
             float aspect,
             bool orthographic,
-            float orthographicSize)
+            float orthographicSize,
+            float sceneViewSize,
+            Guid spectatingPlayerId)
         {
             PlayerId = playerId;
             DisplayName = displayName;
@@ -64,6 +68,8 @@ namespace Glasspage.UnitySync
             Aspect = aspect;
             Orthographic = orthographic;
             OrthographicSize = orthographicSize;
+            SceneViewSize = sceneViewSize;
+            SpectatingPlayerId = spectatingPlayerId;
         }
     }
 
@@ -128,7 +134,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 12;
+        internal const int Version = 13;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -177,6 +183,8 @@ namespace Glasspage.UnitySync
                 writer.Write(state.Aspect);
                 writer.Write(state.Orthographic);
                 writer.Write(state.OrthographicSize);
+                writer.Write(state.SceneViewSize);
+                WriteGuid(writer, state.SpectatingPlayerId);
             });
         }
 
@@ -536,7 +544,9 @@ namespace Glasspage.UnitySync
                                 reader.ReadSingle(),
                                 reader.ReadSingle(),
                                 reader.ReadBoolean(),
-                                reader.ReadSingle());
+                                reader.ReadSingle(),
+                                reader.ReadSingle(),
+                                ReadGuid(reader));
                             message = new UnitySyncMessage(type, playerId, displayName, viewport);
                             break;
 
