@@ -197,9 +197,9 @@ namespace Glasspage.UnitySync
             AddLog(message);
         }
 
-        internal static string[] GetParticipantNames()
+        internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
         {
-            return UnitySyncPresenceRoot.GetParticipantNames();
+            return UnitySyncPresenceRoot.GetParticipants();
         }
 
         private static void Update()
