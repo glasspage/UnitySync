@@ -632,7 +632,7 @@ namespace Glasspage.UnitySync
                 // A valid target is the best source for hidden/non-editable defaults. A target
                 // containing a broken PPtr is deliberately not copied into the staging object;
                 // the complete incoming component state can repair it from clean defaults.
-                if (TryValidateObjectReferences(component, out _))
+                if (TryValidateObjectReferencesWithoutDereferencing(component, out _))
                 {
                     EditorUtility.CopySerialized(component, stagingComponent);
                 }
@@ -642,7 +642,7 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
-                if (!TryValidateObjectReferences(stagingComponent, out string invalidProperty))
+                if (!TryValidateStagedObjectReferences(stagingComponent, out string invalidProperty))
                 {
                     error = "Staged " + component.GetType().Name + " contains an invalid object reference at " +
                             invalidProperty + "; the live scene component was not changed.";
@@ -773,7 +773,9 @@ namespace Glasspage.UnitySync
             return stagingComponent != null;
         }
 
-        private static bool TryValidateObjectReferences(Component component, out string invalidProperty)
+        private static bool TryValidateObjectReferencesWithoutDereferencing(
+            Component component,
+            out string invalidProperty)
         {
             invalidProperty = string.Empty;
             SerializedObject serializedObject = new SerializedObject(component);
@@ -795,6 +797,44 @@ namespace Glasspage.UnitySync
                 }
 
                 Object value = EditorUtility.InstanceIDToObject(instanceId);
+                if (value == null || !IsSerializedReferenceTypeCompatible(iterator.type, value))
+                {
+                    invalidProperty = iterator.propertyPath;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryValidateStagedObjectReferences(
+            Component component,
+            out string invalidProperty)
+        {
+            invalidProperty = string.Empty;
+            SerializedObject serializedObject = new SerializedObject(component);
+            serializedObject.UpdateIfRequiredOrScript();
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                int instanceId = iterator.objectReferenceInstanceIDValue;
+                if (instanceId == 0)
+                {
+                    continue;
+                }
+
+                // The staging component only receives references through Unity's typed
+                // objectReferenceValue setter. Reading that same typed value correctly
+                // validates array elements, whose raw instance IDs cannot always be
+                // reconstructed through EditorUtility.InstanceIDToObject.
+                Object value = iterator.objectReferenceValue;
                 if (value == null || !IsSerializedReferenceTypeCompatible(iterator.type, value))
                 {
                     invalidProperty = iterator.propertyPath;
