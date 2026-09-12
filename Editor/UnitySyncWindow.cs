@@ -12,7 +12,7 @@ namespace Glasspage.UnitySync
         private const string PortPreference = "Glasspage.UnitySync.Port";
         // Keep this in sync with package.json when releasing a new UnitySync version.
         private const string Version = "0.5.0";
-        private const string WindowTitle = "UnitySync v" + Version;
+        private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
 
         private static readonly Color ActiveSessionColor = new Color(1f, 0.55f, 0.15f);
@@ -40,14 +40,14 @@ namespace Glasspage.UnitySync
         private static void Open()
         {
             UnitySyncWindow window = GetWindow<UnitySyncWindow>();
-            window.titleContent = new GUIContent(WindowTitle);
+            window.titleContent = new GUIContent("UnitySync");
             window.minSize = new Vector2(360f, 420f);
             window.Show();
         }
 
         private void OnEnable()
         {
-            titleContent = new GUIContent("UnitySync v0.5.0");
+            titleContent = new GUIContent("UnitySync");
 
             _displayName = EditorPrefs.GetString(DisplayNamePreference, Environment.UserName);
             if (string.IsNullOrWhiteSpace(_displayName))
@@ -79,7 +79,7 @@ namespace Glasspage.UnitySync
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
 
             EditorGUILayout.Space(8f);
-            EditorGUILayout.LabelField("UnitySync", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(HeaderTitle, EditorStyles.boldLabel);
             EditorGUILayout.Space(8f);
 
             DrawStatus();
