@@ -12,7 +12,9 @@ namespace Glasspage.UnitySync
         Viewport = 3,
         PeerLeft = 4,
         SceneObjectChange = 5,
-        SceneSnapshotRequest = 6
+        SceneSnapshotRequest = 6,
+        SceneSnapshotBegin = 7,
+        SceneSnapshotEnd = 8
     }
 
     internal readonly struct UnitySyncViewportState
@@ -60,29 +62,33 @@ namespace Glasspage.UnitySync
         internal readonly string DisplayName;
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSceneObjectChange SceneChange;
+        internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
             Guid playerId,
             string displayName,
             UnitySyncViewportState viewport,
-            UnitySyncSceneObjectChange sceneChange = null)
+            UnitySyncSceneObjectChange sceneChange = null,
+            UnitySyncSceneSnapshotBoundary sceneSnapshot = null)
         {
             Type = type;
             PlayerId = playerId;
             DisplayName = displayName;
             Viewport = viewport;
             SceneChange = sceneChange;
+            SceneSnapshot = sceneSnapshot;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 6;
+        internal const int Version = 8;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
         private const int MaximumHierarchyDepth = 256;
+        private const int MaximumScenesPerSnapshot = 256;
         private const int MaximumComponentsPerObject = 1024;
         private const int MaximumPropertiesPerComponent = 65536;
         private const int MaximumArrayElements = 65536;
@@ -158,6 +164,42 @@ namespace Glasspage.UnitySync
             });
         }
 
+        internal static byte[] CreateSceneSnapshotBegin(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.SceneSnapshotBegin);
+                WriteGuid(writer, playerId);
+                WriteSceneSnapshotBoundary(writer, snapshot, true);
+            });
+        }
+
+        internal static byte[] CreateSceneSnapshotEnd(
+            Guid playerId,
+            Guid snapshotId,
+            bool isComplete)
+        {
+            if (snapshotId == Guid.Empty)
+            {
+                throw new ArgumentException("A scene snapshot ID is required.", nameof(snapshotId));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.SceneSnapshotEnd);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, snapshotId);
+                writer.Write(isComplete);
+            });
+        }
+
         internal static bool TryRead(byte[] payload, out UnitySyncMessage message)
         {
             message = default;
@@ -220,6 +262,33 @@ namespace Glasspage.UnitySync
                         case UnitySyncMessageType.SceneSnapshotRequest:
                             playerId = ReadGuid(reader);
                             message = new UnitySyncMessage(type, playerId, string.Empty, default);
+                            break;
+
+                        case UnitySyncMessageType.SceneSnapshotBegin:
+                            playerId = ReadGuid(reader);
+                            UnitySyncSceneSnapshotBoundary snapshot = ReadSceneSnapshotBoundary(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                snapshot);
+                            break;
+
+                        case UnitySyncMessageType.SceneSnapshotEnd:
+                            playerId = ReadGuid(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                new UnitySyncSceneSnapshotBoundary
+                                {
+                                    SnapshotId = ReadGuid(reader),
+                                    IsComplete = reader.ReadBoolean()
+                                });
                             break;
 
                         default:
@@ -300,8 +369,22 @@ namespace Glasspage.UnitySync
 
         private static void WriteSceneObjectChange(BinaryWriter writer, UnitySyncSceneObjectChange change)
         {
+            if (change.Kind != UnitySyncSceneChangeKind.Upsert &&
+                change.Kind != UnitySyncSceneChangeKind.Destroy)
+            {
+                throw new InvalidDataException("Unsupported scene change kind.");
+            }
+
+            writer.Write((byte)change.Kind);
+            WriteGuid(writer, change.SnapshotId);
             WriteSceneAddress(writer, change.Address);
+            writer.Write(change.HierarchyOnly);
             writer.Write(change.ReconcileComponents);
+
+            if (change.Kind == UnitySyncSceneChangeKind.Destroy)
+            {
+                return;
+            }
 
             writer.Write(change.GameObject != null);
             if (change.GameObject != null)
@@ -348,9 +431,28 @@ namespace Glasspage.UnitySync
         {
             UnitySyncSceneObjectChange change = new UnitySyncSceneObjectChange
             {
+                Kind = (UnitySyncSceneChangeKind)reader.ReadByte(),
+                SnapshotId = ReadGuid(reader),
                 Address = ReadSceneAddress(reader),
+                HierarchyOnly = reader.ReadBoolean(),
                 ReconcileComponents = reader.ReadBoolean()
             };
+
+            if (change.Kind != UnitySyncSceneChangeKind.Upsert &&
+                change.Kind != UnitySyncSceneChangeKind.Destroy)
+            {
+                throw new InvalidDataException("Unsupported scene change kind.");
+            }
+
+            if (change.Kind == UnitySyncSceneChangeKind.Destroy)
+            {
+                if (change.HierarchyOnly || change.ReconcileComponents)
+                {
+                    throw new InvalidDataException("Invalid destroyed-object scene change.");
+                }
+
+                return change;
+            }
 
             if (reader.ReadBoolean())
             {
@@ -415,12 +517,26 @@ namespace Glasspage.UnitySync
                 throw new InvalidDataException("A scene object address is required.");
             }
 
+            if (string.IsNullOrEmpty(address.ObjectId) || !Guid.TryParse(address.ObjectId, out _))
+            {
+                throw new InvalidDataException("A scene object session ID is required.");
+            }
+
+            if (!string.IsNullOrEmpty(address.ParentObjectId) &&
+                !Guid.TryParse(address.ParentObjectId, out _))
+            {
+                throw new InvalidDataException("Invalid scene parent session ID.");
+            }
+
+            WriteLimitedString(writer, address.ObjectId);
+            WriteLimitedString(writer, address.ParentObjectId);
+            writer.Write(address.SiblingIndex);
             WriteLimitedString(writer, address.ScenePath);
             WriteLimitedString(writer, address.SceneName);
             writer.Write(address.SceneIndex);
 
             int[] siblingPath = address.SiblingPath ?? new int[0];
-            if (siblingPath.Length == 0 || siblingPath.Length > MaximumHierarchyDepth)
+            if (siblingPath.Length > MaximumHierarchyDepth)
             {
                 throw new InvalidDataException("Invalid scene hierarchy path.");
             }
@@ -441,13 +557,24 @@ namespace Glasspage.UnitySync
         {
             UnitySyncSceneObjectAddress address = new UnitySyncSceneObjectAddress
             {
+                ObjectId = ReadLimitedString(reader),
+                ParentObjectId = ReadLimitedString(reader),
+                SiblingIndex = reader.ReadInt32(),
                 ScenePath = ReadLimitedString(reader),
                 SceneName = ReadLimitedString(reader),
                 SceneIndex = reader.ReadInt32()
             };
 
+            if (!Guid.TryParse(address.ObjectId, out _) ||
+                (!string.IsNullOrEmpty(address.ParentObjectId) &&
+                 !Guid.TryParse(address.ParentObjectId, out _)) ||
+                address.SiblingIndex < -1)
+            {
+                throw new InvalidDataException("Invalid scene object address.");
+            }
+
             int depth = reader.ReadUInt16();
-            if (depth == 0 || depth > MaximumHierarchyDepth)
+            if (depth > MaximumHierarchyDepth)
             {
                 throw new InvalidDataException("Invalid scene hierarchy path.");
             }
@@ -465,6 +592,68 @@ namespace Glasspage.UnitySync
             }
 
             return address;
+        }
+
+        private static void WriteSceneSnapshotBoundary(
+            BinaryWriter writer,
+            UnitySyncSceneSnapshotBoundary snapshot,
+            bool includeScenes)
+        {
+            WriteGuid(writer, snapshot.SnapshotId);
+            if (!includeScenes)
+            {
+                return;
+            }
+
+            UnitySyncSceneDescriptor[] scenes = snapshot.Scenes ?? new UnitySyncSceneDescriptor[0];
+            if (scenes.Length > MaximumScenesPerSnapshot)
+            {
+                throw new InvalidDataException("Too many loaded scenes in a snapshot.");
+            }
+
+            writer.Write((ushort)scenes.Length);
+            foreach (UnitySyncSceneDescriptor scene in scenes)
+            {
+                if (scene == null)
+                {
+                    throw new InvalidDataException("A snapshot contains an invalid scene.");
+                }
+
+                WriteLimitedString(writer, scene.ScenePath);
+                WriteLimitedString(writer, scene.SceneName);
+                writer.Write(scene.SceneIndex);
+            }
+        }
+
+        private static UnitySyncSceneSnapshotBoundary ReadSceneSnapshotBoundary(BinaryReader reader)
+        {
+            UnitySyncSceneSnapshotBoundary snapshot = new UnitySyncSceneSnapshotBoundary
+            {
+                SnapshotId = ReadGuid(reader)
+            };
+            if (snapshot.SnapshotId == Guid.Empty)
+            {
+                throw new InvalidDataException("A scene snapshot ID is required.");
+            }
+
+            int count = reader.ReadUInt16();
+            if (count > MaximumScenesPerSnapshot)
+            {
+                throw new InvalidDataException("Too many loaded scenes in a snapshot.");
+            }
+
+            snapshot.Scenes = new UnitySyncSceneDescriptor[count];
+            for (int index = 0; index < count; index++)
+            {
+                snapshot.Scenes[index] = new UnitySyncSceneDescriptor
+                {
+                    ScenePath = ReadLimitedString(reader),
+                    SceneName = ReadLimitedString(reader),
+                    SceneIndex = reader.ReadInt32()
+                };
+            }
+
+            return snapshot;
         }
 
         private static void WriteProperty(BinaryWriter writer, UnitySyncSerializedPropertyState property)

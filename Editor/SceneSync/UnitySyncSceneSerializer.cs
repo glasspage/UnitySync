@@ -63,8 +63,61 @@ namespace Glasspage.UnitySync
 
             change = new UnitySyncSceneObjectChange
             {
+                Kind = UnitySyncSceneChangeKind.Upsert,
                 Address = address,
                 GameObject = CaptureGameObjectSettings(gameObject)
+            };
+            return true;
+        }
+
+        internal static bool TryCaptureHierarchy(GameObject gameObject, out UnitySyncSceneObjectChange change)
+        {
+            change = null;
+            if (!TryCreateAddress(gameObject, out UnitySyncSceneObjectAddress address))
+            {
+                return false;
+            }
+
+            Component[] components = gameObject.GetComponents<Component>();
+            UnitySyncComponentState[] componentStates = new UnitySyncComponentState[components.Length];
+            for (int index = 0; index < components.Length; index++)
+            {
+                componentStates[index] = new UnitySyncComponentState
+                {
+                    ComponentIndex = index,
+                    TypeName = components[index] != null
+                        ? GetStableTypeName(components[index].GetType())
+                        : string.Empty
+                };
+            }
+
+            change = new UnitySyncSceneObjectChange
+            {
+                Kind = UnitySyncSceneChangeKind.Upsert,
+                Address = address,
+                HierarchyOnly = true,
+                ReconcileComponents = true,
+                GameObject = CaptureGameObjectSettings(gameObject),
+                Components = componentStates
+            };
+            return true;
+        }
+
+        internal static bool TryCaptureDestroyedObject(string objectId, out UnitySyncSceneObjectChange change)
+        {
+            change = null;
+            if (!Guid.TryParse(objectId, out _))
+            {
+                return false;
+            }
+
+            change = new UnitySyncSceneObjectChange
+            {
+                Kind = UnitySyncSceneChangeKind.Destroy,
+                Address = new UnitySyncSceneObjectAddress
+                {
+                    ObjectId = objectId
+                }
             };
             return true;
         }
@@ -91,6 +144,7 @@ namespace Glasspage.UnitySync
 
             change = new UnitySyncSceneObjectChange
             {
+                Kind = UnitySyncSceneChangeKind.Upsert,
                 Address = address,
                 Components = new[] { componentState }
             };
@@ -117,6 +171,7 @@ namespace Glasspage.UnitySync
 
             change = new UnitySyncSceneObjectChange
             {
+                Kind = UnitySyncSceneChangeKind.Upsert,
                 Address = address,
                 ReconcileComponents = true,
                 GameObject = CaptureGameObjectSettings(gameObject),
@@ -145,6 +200,35 @@ namespace Glasspage.UnitySync
             return result;
         }
 
+        internal static List<GameObject> GetHierarchyObjects(GameObject root)
+        {
+            List<GameObject> result = new List<GameObject>();
+            AddHierarchy(root, result);
+            return result;
+        }
+
+        internal static UnitySyncSceneDescriptor[] GetLoadedSceneDescriptors()
+        {
+            List<UnitySyncSceneDescriptor> scenes = new List<UnitySyncSceneDescriptor>();
+            for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            {
+                Scene scene = SceneManager.GetSceneAt(sceneIndex);
+                if (!scene.IsValid() || !scene.isLoaded || EditorSceneManager.IsPreviewScene(scene))
+                {
+                    continue;
+                }
+
+                scenes.Add(new UnitySyncSceneDescriptor
+                {
+                    ScenePath = scene.path ?? string.Empty,
+                    SceneName = scene.name ?? string.Empty,
+                    SceneIndex = sceneIndex
+                });
+            }
+
+            return scenes.ToArray();
+        }
+
         internal static bool Apply(UnitySyncSceneObjectChange change, out string error)
         {
             error = string.Empty;
@@ -154,11 +238,41 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            GameObject gameObject = ResolveAddress(change.Address);
-            if (gameObject == null)
+            if (change.Kind == UnitySyncSceneChangeKind.Destroy)
             {
-                error = "No matching object exists at " + Describe(change.Address) + ".";
+                return DestroySceneObject(change.Address, out error);
+            }
+
+            if (change.Kind != UnitySyncSceneChangeKind.Upsert)
+            {
+                error = "The scene update has an unsupported operation.";
                 return false;
+            }
+
+            if (!TryCreateOrUpdateHierarchy(
+                    change.Address,
+                    GetExpectedTransformType(change),
+                    out GameObject gameObject,
+                    out error))
+            {
+                return false;
+            }
+
+            if (change.HierarchyOnly)
+            {
+                if (change.ReconcileComponents &&
+                    !ReconcileComponents(gameObject, change.Components, out error))
+                {
+                    return false;
+                }
+
+                if (change.GameObject != null)
+                {
+                    ApplyGameObjectSettings(gameObject, change.GameObject);
+                }
+
+                EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                return true;
             }
 
             if (change.ReconcileComponents && !ReconcileComponents(gameObject, change.Components, out error))
@@ -210,8 +324,26 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            Transform parent = gameObject.transform.parent;
+            string parentObjectId = string.Empty;
+            if (parent != null && IsEligibleSceneObject(parent.gameObject))
+            {
+                parentObjectId = UnitySyncSceneObjectRegistry.GetOrCreateId(parent.gameObject);
+            }
+
+            string objectId = UnitySyncSceneObjectRegistry.GetOrCreateId(gameObject);
+            UnitySyncSceneObjectRegistry.SetParent(objectId, parentObjectId);
+            int siblingIndex = GetFilteredSiblingIndex(gameObject.transform);
+            if (siblingIndex < 0)
+            {
+                return false;
+            }
+
             address = new UnitySyncSceneObjectAddress
             {
+                ObjectId = objectId,
+                ParentObjectId = parentObjectId,
+                SiblingIndex = siblingIndex,
                 ScenePath = gameObject.scene.path ?? string.Empty,
                 SceneName = gameObject.scene.name ?? string.Empty,
                 SceneIndex = sceneIndex,
@@ -222,42 +354,25 @@ namespace Glasspage.UnitySync
 
         internal static GameObject ResolveAddress(UnitySyncSceneObjectAddress address)
         {
-            if (address == null || address.SiblingPath == null || address.SiblingPath.Length == 0)
+            if (address == null)
             {
                 return null;
             }
 
-            Scene scene = default;
-            if (!string.IsNullOrEmpty(address.ScenePath))
+            if (!string.IsNullOrEmpty(address.ObjectId))
             {
-                scene = SceneManager.GetSceneByPath(address.ScenePath);
+                return UnitySyncSceneObjectRegistry.TryResolve(address.ObjectId, out GameObject resolved) &&
+                       IsEligibleSceneObject(resolved)
+                    ? resolved
+                    : null;
             }
 
-            if (!scene.IsValid() &&
-                address.SceneIndex >= 0 &&
-                address.SceneIndex < SceneManager.sceneCount)
+            if (address.SiblingPath == null || address.SiblingPath.Length == 0)
             {
-                Scene indexedScene = SceneManager.GetSceneAt(address.SceneIndex);
-                if (string.IsNullOrEmpty(address.SceneName) || indexedScene.name == address.SceneName)
-                {
-                    scene = indexedScene;
-                }
+                return null;
             }
 
-            if (!scene.IsValid() && !string.IsNullOrEmpty(address.SceneName))
-            {
-                for (int index = 0; index < SceneManager.sceneCount; index++)
-                {
-                    Scene candidate = SceneManager.GetSceneAt(index);
-                    if (candidate.name == address.SceneName)
-                    {
-                        scene = candidate;
-                        break;
-                    }
-                }
-            }
-
-            if (!scene.IsValid() || !scene.isLoaded)
+            if (!TryResolveScene(address, out Scene scene))
             {
                 return null;
             }
@@ -270,6 +385,228 @@ namespace Glasspage.UnitySync
             }
 
             return IsEligibleSceneObject(currentObject) ? currentObject : null;
+        }
+
+        internal static bool PruneSnapshot(
+            UnitySyncSceneSnapshotBoundary snapshot,
+            ISet<string> representedObjectIds,
+            out string error)
+        {
+            error = string.Empty;
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                error = "The scene snapshot did not contain a valid ID.";
+                return false;
+            }
+
+            ISet<string> represented = representedObjectIds ?? new HashSet<string>(StringComparer.Ordinal);
+            foreach (UnitySyncSceneDescriptor descriptor in snapshot.Scenes ?? new UnitySyncSceneDescriptor[0])
+            {
+                if (descriptor == null ||
+                    !TryResolveScene(descriptor.ScenePath, descriptor.SceneName, descriptor.SceneIndex, out Scene scene))
+                {
+                    // A collaborator may not have one of the host's additive scenes open. Never
+                    // delete an unmatched local scene merely because it could not be identified.
+                    continue;
+                }
+
+                GameObject[] roots = scene.GetRootGameObjects();
+                for (int rootIndex = roots.Length - 1; rootIndex >= 0; rootIndex--)
+                {
+                    PruneUnrepresentedObject(roots[rootIndex], represented);
+                }
+
+                EditorSceneManager.MarkSceneDirty(scene);
+            }
+
+            return true;
+        }
+
+        private static bool TryCreateOrUpdateHierarchy(
+            UnitySyncSceneObjectAddress address,
+            Type expectedTransformType,
+            out GameObject gameObject,
+            out string error)
+        {
+            gameObject = ResolveAddress(address);
+            error = string.Empty;
+            if (!TryResolveScene(address, out Scene targetScene))
+            {
+                error = "No matching loaded scene exists for " + Describe(address) + ".";
+                return false;
+            }
+
+            GameObject parentObject = null;
+            if (!string.IsNullOrEmpty(address.ParentObjectId))
+            {
+                if (!UnitySyncSceneObjectRegistry.TryResolve(address.ParentObjectId, out parentObject) ||
+                    !IsEligibleSceneObject(parentObject))
+                {
+                    error = "Parent " + address.ParentObjectId + " is not available for " +
+                            Describe(address) + ".";
+                    return false;
+                }
+            }
+
+            if (gameObject == null)
+            {
+                gameObject = expectedTransformType == typeof(RectTransform)
+                    ? new GameObject("[UnitySync New Object]", typeof(RectTransform))
+                    : new GameObject("[UnitySync New Object]");
+                Undo.RegisterCreatedObjectUndo(gameObject, "Create UnitySync scene object");
+                Undo.RegisterCompleteObjectUndo(gameObject, "Sync UnitySync hierarchy");
+                if (gameObject.scene.handle != targetScene.handle)
+                {
+                    SceneManager.MoveGameObjectToScene(gameObject, targetScene);
+                }
+
+                UnitySyncSceneObjectRegistry.Assign(gameObject, address.ObjectId);
+            }
+            else
+            {
+                UnitySyncSceneObjectRegistry.Assign(gameObject, address.ObjectId);
+            }
+
+            if (parentObject == null)
+            {
+                if (gameObject.transform.parent != null)
+                {
+                    Undo.SetTransformParent(gameObject.transform, null, "Sync UnitySync hierarchy");
+                }
+
+                if (gameObject.scene.handle != targetScene.handle)
+                {
+                    SceneManager.MoveGameObjectToScene(gameObject, targetScene);
+                }
+            }
+            else
+            {
+                if (gameObject.scene.handle != parentObject.scene.handle)
+                {
+                    if (gameObject.transform.parent != null)
+                    {
+                        Undo.SetTransformParent(gameObject.transform, null, "Sync UnitySync hierarchy");
+                    }
+
+                    SceneManager.MoveGameObjectToScene(gameObject, parentObject.scene);
+                }
+
+                if (gameObject.transform.parent != parentObject.transform)
+                {
+                    Undo.SetTransformParent(
+                        gameObject.transform,
+                        parentObject.transform,
+                        "Sync UnitySync hierarchy");
+                }
+            }
+
+            SetFilteredSiblingIndex(gameObject.transform, address.SiblingIndex);
+            UnitySyncSceneObjectRegistry.SetParent(address.ObjectId, address.ParentObjectId);
+            return true;
+        }
+
+        private static Type GetExpectedTransformType(UnitySyncSceneObjectChange change)
+        {
+            if (change == null ||
+                !change.ReconcileComponents ||
+                change.Components == null ||
+                change.Components.Length == 0 ||
+                change.Components[0] == null ||
+                change.Components[0].ComponentIndex != 0)
+            {
+                return typeof(Transform);
+            }
+
+            Type type = ResolveType(change.Components[0].TypeName);
+            return type == typeof(RectTransform) ? typeof(RectTransform) : typeof(Transform);
+        }
+
+        private static bool DestroySceneObject(UnitySyncSceneObjectAddress address, out string error)
+        {
+            error = string.Empty;
+            if (string.IsNullOrEmpty(address.ObjectId))
+            {
+                error = "The deleted scene object did not contain an ID.";
+                return false;
+            }
+
+            if (!UnitySyncSceneObjectRegistry.TryResolve(address.ObjectId, out GameObject gameObject) ||
+                !IsEligibleSceneObject(gameObject))
+            {
+                UnitySyncSceneObjectRegistry.ForgetHierarchy(address.ObjectId);
+                return true;
+            }
+
+            UnitySyncSceneObjectRegistry.ForgetHierarchy(address.ObjectId);
+            Undo.DestroyObjectImmediate(gameObject);
+            return true;
+        }
+
+        private static void PruneUnrepresentedObject(GameObject gameObject, ISet<string> representedObjectIds)
+        {
+            if (!IsEligibleSceneObject(gameObject))
+            {
+                return;
+            }
+
+            if (!UnitySyncSceneObjectRegistry.TryGetId(gameObject, out string objectId) ||
+                !representedObjectIds.Contains(objectId))
+            {
+                UnitySyncSceneObjectRegistry.ForgetHierarchy(objectId);
+                Undo.DestroyObjectImmediate(gameObject);
+                return;
+            }
+
+            for (int childIndex = gameObject.transform.childCount - 1; childIndex >= 0; childIndex--)
+            {
+                PruneUnrepresentedObject(
+                    gameObject.transform.GetChild(childIndex).gameObject,
+                    representedObjectIds);
+            }
+        }
+
+        private static bool TryResolveScene(UnitySyncSceneObjectAddress address, out Scene scene)
+        {
+            return TryResolveScene(address.ScenePath, address.SceneName, address.SceneIndex, out scene);
+        }
+
+        private static bool TryResolveScene(
+            string scenePath,
+            string sceneName,
+            int sceneIndex,
+            out Scene scene)
+        {
+            scene = default;
+            if (!string.IsNullOrEmpty(scenePath))
+            {
+                scene = SceneManager.GetSceneByPath(scenePath);
+            }
+
+            if (!scene.IsValid() &&
+                sceneIndex >= 0 &&
+                sceneIndex < SceneManager.sceneCount)
+            {
+                Scene indexedScene = SceneManager.GetSceneAt(sceneIndex);
+                if (string.IsNullOrEmpty(sceneName) || indexedScene.name == sceneName)
+                {
+                    scene = indexedScene;
+                }
+            }
+
+            if (!scene.IsValid() && !string.IsNullOrEmpty(sceneName))
+            {
+                for (int index = 0; index < SceneManager.sceneCount; index++)
+                {
+                    Scene candidate = SceneManager.GetSceneAt(index);
+                    if (candidate.name == sceneName)
+                    {
+                        scene = candidate;
+                        break;
+                    }
+                }
+            }
+
+            return scene.IsValid() && scene.isLoaded && !EditorSceneManager.IsPreviewScene(scene);
         }
 
         private static UnitySyncGameObjectState CaptureGameObjectSettings(GameObject gameObject)
@@ -2029,10 +2366,55 @@ namespace Glasspage.UnitySync
             return null;
         }
 
+        private static void SetFilteredSiblingIndex(Transform transform, int filteredIndex)
+        {
+            if (transform == null || filteredIndex < 0)
+            {
+                return;
+            }
+
+            List<Transform> siblings = new List<Transform>();
+            if (transform.parent == null)
+            {
+                foreach (GameObject root in transform.gameObject.scene.GetRootGameObjects())
+                {
+                    if (root.transform != transform && !UnitySyncHierarchy.IsUnitySyncObject(root))
+                    {
+                        siblings.Add(root.transform);
+                    }
+                }
+            }
+            else
+            {
+                for (int index = 0; index < transform.parent.childCount; index++)
+                {
+                    Transform sibling = transform.parent.GetChild(index);
+                    if (sibling != transform && !UnitySyncHierarchy.IsUnitySyncObject(sibling.gameObject))
+                    {
+                        siblings.Add(sibling);
+                    }
+                }
+            }
+
+            int currentIndex = transform.GetSiblingIndex();
+            if (filteredIndex < siblings.Count)
+            {
+                int targetIndex = siblings[filteredIndex].GetSiblingIndex();
+                transform.SetSiblingIndex(currentIndex < targetIndex ? targetIndex - 1 : targetIndex);
+            }
+            else if (siblings.Count > 0)
+            {
+                int lastIndex = siblings[siblings.Count - 1].GetSiblingIndex();
+                transform.SetSiblingIndex(currentIndex < lastIndex ? lastIndex : lastIndex + 1);
+            }
+        }
+
         private static string Describe(UnitySyncSceneObjectAddress address)
         {
             string scene = string.IsNullOrEmpty(address.ScenePath) ? address.SceneName : address.ScenePath;
-            return scene + " [" + string.Join(",", address.SiblingPath) + "]";
+            return string.IsNullOrEmpty(address.ObjectId)
+                ? scene + " [" + string.Join(",", address.SiblingPath) + "]"
+                : scene + " (" + address.ObjectId + ")";
         }
 
         private static bool HasFloats(UnitySyncSerializedPropertyState state, int count)

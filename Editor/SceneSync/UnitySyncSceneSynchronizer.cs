@@ -15,21 +15,42 @@ namespace Glasspage.UnitySync
         {
             GameObject,
             Component,
-            Structure
+            Structure,
+            Destroy
+        }
+
+        private enum HierarchyBatchPhase
+        {
+            BeginSnapshot,
+            Hierarchy,
+            FullState,
+            EndSnapshot
         }
 
         private sealed class PendingChange
         {
             internal int GameObjectInstanceId;
             internal int ComponentIndex;
+            internal string ObjectId = string.Empty;
             internal PendingKind Kind;
         }
 
-        private sealed class SnapshotJob
+        private sealed class HierarchyBatch
         {
             internal Guid TargetPlayerId;
+            internal UnitySyncSceneSnapshotBoundary Snapshot;
             internal List<GameObject> Objects;
             internal int Index;
+            internal HierarchyBatchPhase Phase;
+            internal bool HasCaptureFailure;
+        }
+
+        private sealed class RemoteSnapshot
+        {
+            internal UnitySyncSceneSnapshotBoundary Boundary;
+            internal bool HasApplyFailure;
+            internal readonly HashSet<string> RepresentedObjectIds =
+                new HashSet<string>(StringComparer.Ordinal);
         }
 
         private const double FlushIntervalSeconds = 0.05;
@@ -40,11 +61,15 @@ namespace Glasspage.UnitySync
             new Dictionary<string, PendingChange>();
         private static readonly Dictionary<string, string> KnownHashes =
             new Dictionary<string, string>();
-        private static readonly Queue<SnapshotJob> SnapshotJobs = new Queue<SnapshotJob>();
+        private static readonly Queue<HierarchyBatch> HierarchyBatches =
+            new Queue<HierarchyBatch>();
+        private static readonly HashSet<int> BatchedObjectInstanceIds =
+            new HashSet<int>();
 
         private static bool _active;
         private static bool _applyingRemoteChange;
         private static double _nextFlushTime;
+        private static RemoteSnapshot _remoteSnapshot;
 
         static UnitySyncSceneSynchronizer()
         {
@@ -57,7 +82,10 @@ namespace Glasspage.UnitySync
             _nextFlushTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
-            SnapshotJobs.Clear();
+            HierarchyBatches.Clear();
+            BatchedObjectInstanceIds.Clear();
+            _remoteSnapshot = null;
+            UnitySyncSceneObjectRegistry.Clear();
         }
 
         internal static void EndSession()
@@ -65,7 +93,10 @@ namespace Glasspage.UnitySync
             _active = false;
             Pending.Clear();
             KnownHashes.Clear();
-            SnapshotJobs.Clear();
+            HierarchyBatches.Clear();
+            BatchedObjectInstanceIds.Clear();
+            _remoteSnapshot = null;
+            UnitySyncSceneObjectRegistry.Clear();
         }
 
         internal static void QueueFullSceneSnapshot(Guid targetPlayerId)
@@ -75,12 +106,88 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            SnapshotJobs.Enqueue(new SnapshotJob
+            HierarchyBatches.Enqueue(new HierarchyBatch
             {
                 TargetPlayerId = targetPlayerId,
+                Snapshot = new UnitySyncSceneSnapshotBoundary
+                {
+                    SnapshotId = Guid.NewGuid(),
+                    Scenes = UnitySyncSceneSerializer.GetLoadedSceneDescriptors()
+                },
                 Objects = UnitySyncSceneSerializer.GetAllSceneObjects(),
-                Index = 0
+                Phase = HierarchyBatchPhase.BeginSnapshot
             });
+        }
+
+        internal static bool BeginRemoteSnapshot(
+            UnitySyncSceneSnapshotBoundary snapshot,
+            out string error)
+        {
+            error = string.Empty;
+            if (snapshot == null || snapshot.SnapshotId == Guid.Empty)
+            {
+                error = "The host sent an invalid scene snapshot.";
+                return false;
+            }
+
+            if (_remoteSnapshot != null)
+            {
+                error = "A previous scene snapshot is still being applied.";
+                return false;
+            }
+
+            _remoteSnapshot = new RemoteSnapshot
+            {
+                Boundary = snapshot
+            };
+            return true;
+        }
+
+        internal static bool CompleteRemoteSnapshot(
+            Guid snapshotId,
+            bool hostStateComplete,
+            out string error)
+        {
+            error = string.Empty;
+            if (_remoteSnapshot == null || _remoteSnapshot.Boundary.SnapshotId != snapshotId)
+            {
+                error = "The host ended an unknown scene snapshot.";
+                return false;
+            }
+
+            RemoteSnapshot completedSnapshot = _remoteSnapshot;
+            _remoteSnapshot = null;
+            if (!hostStateComplete)
+            {
+                error = "The host could not serialize one or more objects, so unmatched local " +
+                        "objects were kept instead of being removed.";
+                return false;
+            }
+
+            if (completedSnapshot.HasApplyFailure)
+            {
+                error = "One or more host objects could not be applied, so unmatched local " +
+                        "objects were kept instead of being removed.";
+                return false;
+            }
+
+            _applyingRemoteChange = true;
+            try
+            {
+                return UnitySyncSceneSerializer.PruneSnapshot(
+                    completedSnapshot.Boundary,
+                    completedSnapshot.RepresentedObjectIds,
+                    out error);
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+            finally
+            {
+                _applyingRemoteChange = false;
+            }
         }
 
         internal static void Flush(UnitySyncTransport transport, Guid localPlayerId)
@@ -97,18 +204,49 @@ namespace Glasspage.UnitySync
             }
 
             _nextFlushTime = now + FlushIntervalSeconds;
+            if (FlushHierarchyBatch(transport, localPlayerId))
+            {
+                return;
+            }
+
             FlushPendingChanges(transport, localPlayerId);
-            FlushSnapshot(transport, localPlayerId);
         }
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
         {
+            error = string.Empty;
+            if (change == null)
+            {
+                error = "The scene update was empty.";
+                return false;
+            }
+
+            if (change.SnapshotId != Guid.Empty &&
+                (_remoteSnapshot == null || _remoteSnapshot.Boundary.SnapshotId != change.SnapshotId))
+            {
+                error = "The scene update does not belong to the active host snapshot.";
+                return false;
+            }
+
             _applyingRemoteChange = true;
             try
             {
                 if (!UnitySyncSceneSerializer.Apply(change, out error))
                 {
+                    if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
+                    {
+                        _remoteSnapshot.HasApplyFailure = true;
+                    }
+
                     return false;
+                }
+
+                if (change.SnapshotId != Guid.Empty &&
+                    change.HierarchyOnly &&
+                    change.Address != null &&
+                    !string.IsNullOrEmpty(change.Address.ObjectId))
+                {
+                    _remoteSnapshot.RepresentedObjectIds.Add(change.Address.ObjectId);
                 }
 
                 Remember(change);
@@ -116,6 +254,11 @@ namespace Glasspage.UnitySync
             }
             catch (Exception exception)
             {
+                if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
+                {
+                    _remoteSnapshot.HasApplyFailure = true;
+                }
+
                 error = exception.Message;
                 return false;
             }
@@ -136,6 +279,21 @@ namespace Glasspage.UnitySync
             {
                 switch (stream.GetEventType(eventIndex))
                 {
+                    case ObjectChangeKind.CreateGameObjectHierarchy:
+                        stream.GetCreateGameObjectHierarchyEvent(
+                            eventIndex,
+                            out CreateGameObjectHierarchyEventArgs createEvent);
+                        QueueCreatedHierarchy(
+                            EditorUtility.InstanceIDToObject(createEvent.instanceId) as GameObject);
+                        break;
+
+                    case ObjectChangeKind.DestroyGameObjectHierarchy:
+                        stream.GetDestroyGameObjectHierarchyEvent(
+                            eventIndex,
+                            out DestroyGameObjectHierarchyEventArgs destroyEvent);
+                        MarkDestroyedHierarchy(destroyEvent.instanceId);
+                        break;
+
                     case ObjectChangeKind.ChangeGameObjectOrComponentProperties:
                         stream.GetChangeGameObjectOrComponentPropertiesEvent(
                             eventIndex,
@@ -157,6 +315,14 @@ namespace Glasspage.UnitySync
                             out ChangeGameObjectStructureHierarchyEventArgs hierarchyEvent);
                         MarkHierarchyStructureChanged(
                             EditorUtility.InstanceIDToObject(hierarchyEvent.instanceId) as GameObject);
+                        break;
+
+                    case ObjectChangeKind.ChangeGameObjectParent:
+                        stream.GetChangeGameObjectParentEvent(
+                            eventIndex,
+                            out ChangeGameObjectParentEventArgs parentEvent);
+                        MarkStructureChanged(
+                            EditorUtility.InstanceIDToObject(parentEvent.instanceId) as GameObject);
                         break;
                 }
             }
@@ -205,6 +371,58 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static void QueueCreatedHierarchy(GameObject root)
+        {
+            List<GameObject> objects = UnitySyncSceneSerializer.GetHierarchyObjects(root);
+            if (objects.Count == 0)
+            {
+                return;
+            }
+
+            bool alreadyScheduled = true;
+            foreach (GameObject gameObject in objects)
+            {
+                if (!BatchedObjectInstanceIds.Contains(gameObject.GetInstanceID()))
+                {
+                    alreadyScheduled = false;
+                    break;
+                }
+            }
+
+            if (alreadyScheduled)
+            {
+                return;
+            }
+
+            foreach (GameObject gameObject in objects)
+            {
+                BatchedObjectInstanceIds.Add(gameObject.GetInstanceID());
+                RemovePendingForInstanceId(gameObject.GetInstanceID());
+            }
+
+            HierarchyBatches.Enqueue(new HierarchyBatch
+            {
+                Objects = objects,
+                Phase = HierarchyBatchPhase.Hierarchy
+            });
+        }
+
+        private static void MarkDestroyedHierarchy(int instanceId)
+        {
+            if (!UnitySyncSceneObjectRegistry.TryGetId(instanceId, out string objectId))
+            {
+                return;
+            }
+
+            RemovePendingForInstanceId(instanceId);
+            Pending["d:" + objectId] = new PendingChange
+            {
+                ObjectId = objectId,
+                Kind = PendingKind.Destroy
+            };
+            UnitySyncSceneObjectRegistry.ForgetHierarchy(objectId);
+        }
+
         private static void AddPending(GameObject gameObject, PendingKind kind, int componentIndex)
         {
             if (gameObject == null ||
@@ -222,19 +440,7 @@ namespace Glasspage.UnitySync
 
             if (kind == PendingKind.Structure)
             {
-                List<string> obsoleteKeys = new List<string>();
-                foreach (string key in Pending.Keys)
-                {
-                    if (key.StartsWith(instanceId + ":", StringComparison.Ordinal))
-                    {
-                        obsoleteKeys.Add(key);
-                    }
-                }
-
-                foreach (string key in obsoleteKeys)
-                {
-                    Pending.Remove(key);
-                }
+                RemovePendingForInstanceId(instanceId);
             }
 
             string pendingKey = kind == PendingKind.GameObject
@@ -246,8 +452,116 @@ namespace Glasspage.UnitySync
             {
                 GameObjectInstanceId = instanceId,
                 ComponentIndex = componentIndex,
+                ObjectId = address.ObjectId,
                 Kind = kind
             };
+        }
+
+        private static void RemovePendingForInstanceId(int instanceId)
+        {
+            List<string> obsoleteKeys = new List<string>();
+            string prefix = instanceId + ":";
+            foreach (string key in Pending.Keys)
+            {
+                if (key.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    obsoleteKeys.Add(key);
+                }
+            }
+
+            foreach (string key in obsoleteKeys)
+            {
+                Pending.Remove(key);
+            }
+        }
+
+        private static bool FlushHierarchyBatch(UnitySyncTransport transport, Guid localPlayerId)
+        {
+            if (HierarchyBatches.Count == 0)
+            {
+                return false;
+            }
+
+            HierarchyBatch batch = HierarchyBatches.Peek();
+            if (batch.Phase == HierarchyBatchPhase.BeginSnapshot)
+            {
+                transport.SendSceneSnapshotBegin(localPlayerId, batch.Snapshot, batch.TargetPlayerId);
+                batch.Phase = HierarchyBatchPhase.Hierarchy;
+                return true;
+            }
+
+            if (batch.Phase == HierarchyBatchPhase.EndSnapshot)
+            {
+                transport.SendSceneSnapshotEnd(
+                    localPlayerId,
+                    batch.Snapshot.SnapshotId,
+                    !batch.HasCaptureFailure,
+                    batch.TargetPlayerId);
+                HierarchyBatches.Dequeue();
+                RemoveBatchTracking(batch);
+                return true;
+            }
+
+            int sent = 0;
+            while (batch.Index < batch.Objects.Count && sent < SnapshotObjectsPerUpdate)
+            {
+                GameObject gameObject = batch.Objects[batch.Index++];
+                UnitySyncSceneObjectChange change;
+                bool captured = batch.Phase == HierarchyBatchPhase.Hierarchy
+                    ? UnitySyncSceneSerializer.TryCaptureHierarchy(gameObject, out change)
+                    : UnitySyncSceneSerializer.TryCaptureFullObject(gameObject, out change);
+                if (!captured)
+                {
+                    batch.HasCaptureFailure = true;
+                    continue;
+                }
+
+                if (batch.Snapshot != null)
+                {
+                    change.SnapshotId = batch.Snapshot.SnapshotId;
+                }
+
+                transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
+                sent++;
+            }
+
+            if (batch.Index >= batch.Objects.Count)
+            {
+                batch.Index = 0;
+                if (batch.Phase == HierarchyBatchPhase.Hierarchy)
+                {
+                    batch.Phase = HierarchyBatchPhase.FullState;
+                }
+                else
+                {
+                    batch.Phase = batch.Snapshot != null
+                        ? HierarchyBatchPhase.EndSnapshot
+                        : HierarchyBatchPhase.FullState;
+                    if (batch.Snapshot == null)
+                    {
+                        HierarchyBatches.Dequeue();
+                        RemoveBatchTracking(batch);
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static void RemoveBatchTracking(HierarchyBatch batch)
+        {
+            if (batch.Snapshot != null || batch.Objects == null)
+            {
+                return;
+            }
+
+            foreach (GameObject gameObject in batch.Objects)
+            {
+                if (gameObject != null)
+                {
+                    BatchedObjectInstanceIds.Remove(gameObject.GetInstanceID());
+                }
+            }
         }
 
         private static void FlushPendingChanges(UnitySyncTransport transport, Guid localPlayerId)
@@ -268,21 +582,24 @@ namespace Glasspage.UnitySync
                 }
 
                 Pending.Remove(pendingKey);
-                GameObject gameObject = EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
+                GameObject gameObject = pending.Kind == PendingKind.Destroy
+                    ? null
+                    : EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
                 if (!TryCapture(pending, gameObject, out UnitySyncSceneObjectChange change))
                 {
                     continue;
                 }
 
                 string stateKey = GetStateKey(change);
-                if (TryGetHash(change, out string hash) &&
+                if (change.Kind != UnitySyncSceneChangeKind.Destroy &&
+                    TryGetHash(change, out string hash) &&
                     KnownHashes.TryGetValue(stateKey, out string knownHash) &&
                     knownHash == hash)
                 {
                     continue;
                 }
 
-                if (!string.IsNullOrEmpty(hash))
+                if (change.Kind != UnitySyncSceneChangeKind.Destroy && !string.IsNullOrEmpty(hash))
                 {
                     KnownHashes[stateKey] = hash;
                 }
@@ -297,6 +614,11 @@ namespace Glasspage.UnitySync
             out UnitySyncSceneObjectChange change)
         {
             change = null;
+            if (pending.Kind == PendingKind.Destroy)
+            {
+                return UnitySyncSceneSerializer.TryCaptureDestroyedObject(pending.ObjectId, out change);
+            }
+
             if (gameObject == null)
             {
                 return false;
@@ -324,37 +646,10 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static void FlushSnapshot(UnitySyncTransport transport, Guid localPlayerId)
-        {
-            if (SnapshotJobs.Count == 0)
-            {
-                return;
-            }
-
-            SnapshotJob job = SnapshotJobs.Peek();
-            int sent = 0;
-            while (job.Index < job.Objects.Count && sent < SnapshotObjectsPerUpdate)
-            {
-                GameObject gameObject = job.Objects[job.Index++];
-                if (gameObject != null &&
-                    UnitySyncSceneSerializer.TryCaptureFullObject(
-                        gameObject,
-                        out UnitySyncSceneObjectChange change))
-                {
-                    transport.SendSceneObjectChange(localPlayerId, change, job.TargetPlayerId);
-                    sent++;
-                }
-            }
-
-            if (job.Index >= job.Objects.Count)
-            {
-                SnapshotJobs.Dequeue();
-            }
-        }
-
         private static void Remember(UnitySyncSceneObjectChange change)
         {
-            if (change == null || change.Address == null)
+            if (change == null || change.Address == null ||
+                change.Kind == UnitySyncSceneChangeKind.Destroy || change.HierarchyOnly)
             {
                 return;
             }
@@ -365,6 +660,7 @@ namespace Glasspage.UnitySync
             {
                 UnitySyncSceneObjectChange gameObjectOnly = new UnitySyncSceneObjectChange
                 {
+                    Kind = UnitySyncSceneChangeKind.Upsert,
                     Address = change.Address,
                     GameObject = change.GameObject
                 };
@@ -377,6 +673,7 @@ namespace Glasspage.UnitySync
                 {
                     UnitySyncSceneObjectChange componentOnly = new UnitySyncSceneObjectChange
                     {
+                        Kind = UnitySyncSceneChangeKind.Upsert,
                         Address = change.Address,
                         Components = new[] { component }
                     };
@@ -387,6 +684,16 @@ namespace Glasspage.UnitySync
 
         private static string GetStateKey(UnitySyncSceneObjectChange change)
         {
+            if (change.Kind == UnitySyncSceneChangeKind.Destroy)
+            {
+                return change.Address.Key + "|d";
+            }
+
+            if (change.HierarchyOnly)
+            {
+                return change.Address.Key + "|h";
+            }
+
             if (change.ReconcileComponents)
             {
                 return change.Address.Key + "|s";

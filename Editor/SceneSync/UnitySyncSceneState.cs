@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace Glasspage.UnitySync
@@ -38,8 +39,19 @@ namespace Glasspage.UnitySync
         SceneObject = 2
     }
 
+    internal enum UnitySyncSceneChangeKind : byte
+    {
+        Upsert = 0,
+        Destroy = 1
+    }
+
     internal sealed class UnitySyncSceneObjectAddress
     {
+        // This is a per-session identity, not a Unity instance ID or a value saved to a scene.
+        // Sibling paths are retained only as useful diagnostics and initial layout data.
+        internal string ObjectId = string.Empty;
+        internal string ParentObjectId = string.Empty;
+        internal int SiblingIndex = -1;
         internal string ScenePath = string.Empty;
         internal string SceneName = string.Empty;
         internal int SceneIndex;
@@ -49,12 +61,33 @@ namespace Glasspage.UnitySync
         {
             get
             {
+                if (!string.IsNullOrEmpty(ObjectId))
+                {
+                    return ObjectId;
+                }
+
                 string sceneKey = string.IsNullOrEmpty(ScenePath)
                     ? SceneIndex + ":" + SceneName
                     : ScenePath;
                 return sceneKey + "|" + string.Join(".", SiblingPath);
             }
         }
+    }
+
+    internal sealed class UnitySyncSceneDescriptor
+    {
+        internal string ScenePath = string.Empty;
+        internal string SceneName = string.Empty;
+        internal int SceneIndex;
+    }
+
+    internal sealed class UnitySyncSceneSnapshotBoundary
+    {
+        internal Guid SnapshotId;
+        // Set on the end boundary. An incomplete snapshot may update objects, but it must not
+        // remove unmatched local objects because the host did not provide a complete state.
+        internal bool IsComplete = true;
+        internal UnitySyncSceneDescriptor[] Scenes = new UnitySyncSceneDescriptor[0];
     }
 
     internal sealed class UnitySyncObjectReferenceState
@@ -117,7 +150,10 @@ namespace Glasspage.UnitySync
 
     internal sealed class UnitySyncSceneObjectChange
     {
+        internal UnitySyncSceneChangeKind Kind;
+        internal Guid SnapshotId;
         internal UnitySyncSceneObjectAddress Address;
+        internal bool HierarchyOnly;
         internal bool ReconcileComponents;
         internal UnitySyncGameObjectState GameObject;
         internal UnitySyncComponentState[] Components = new UnitySyncComponentState[0];

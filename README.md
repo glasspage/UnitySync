@@ -47,24 +47,25 @@ Treat a join code like a temporary password: anyone who has it can connect while
 - Multiple clients per host
 - Encrypted and authenticated messages
 - Live username, chosen viewport color, camera position, camera rotation, projection, and Scene view pivot
-- Live transforms and GameObject settings for existing scene objects
+- Live transforms, GameObject settings, hierarchy creation/deletion, parenting, and sibling order
 - Serialized settings for Unity and third-party components, including UdonBehaviours, PhysBones, custom MonoBehaviours, scene references, and asset references
 - Component add, remove, and reorder synchronization on existing GameObjects
-- Initial scene alignment from the host when a collaborator joins
+- Host-authoritative initial hierarchy snapshots that create missing objects and remove extras
 - Automatic cleanup when peers disconnect or the session stops
 
 Not implemented:
 
-- Creating, deleting, reparenting, or reordering GameObjects
 - Prefab asset editing
 - Asset or file transfer
 - Project settings synchronization
 - Relay servers or internet matchmaking
 - Conflict resolution beyond last received edit wins, or version history
 
-## Scene matching requirement
+## Scene hierarchy synchronization
 
-This first scene-sync version assumes collaborators open the same scenes with the same non-UnitySync GameObjects in the same hierarchy order. Objects are matched by loaded scene and sibling-index path; names may change without breaking the match. UnitySync's temporary `[UnitySync]` hierarchy is ignored when calculating these paths.
+UnitySync assigns every synchronized GameObject a session-only ID. It does not add tracking components or save UnitySync IDs into your scenes. When a collaborator joins, the host first sends the full hierarchy and component layout, then sends serialized values and references. This lets scene references resolve even when objects were absent or differently ordered before joining.
+
+The host’s loaded scenes are authoritative during that initial snapshot: in matching loaded scenes, UnitySync creates missing non-UnitySync objects and removes extra non-UnitySync objects after a complete snapshot finishes. If any object cannot be serialized or applied safely, it leaves unmatched local objects in place rather than deleting them. It does not open, close, save, or transfer scene files, so collaborators should still open the same scene files and keep them installed locally. UnitySync's temporary `[UnitySync]` hierarchy is always ignored.
 
 Component settings are synchronized through Unity's generic editor serialization layer rather than a list of supported component types. Both projects must have the same third-party packages and referenced assets installed. Properties Unity does not expose through `SerializedProperty`, and transient runtime-only state, are not synchronized.
 

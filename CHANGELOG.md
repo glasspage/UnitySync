@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Replace sibling-path object identity with per-session IDs, so unrelated hierarchy differences no longer redirect scene updates to the wrong GameObject.
+- Add host-authoritative hierarchy snapshots that create missing GameObjects, synchronize parenting and sibling order, build component layouts before values, and remove extra non-UnitySync objects from matching loaded scenes when the snapshot completes.
+- Keep unmatched local objects when either side cannot serialize or apply a complete host snapshot, avoiding destructive cleanup after a partial update.
+- Synchronize live GameObject creation, deletion, reparenting, scene moves, and reordering, including newly created hierarchy subtrees in a two-pass layout/value update.
+- Resolve scene-object references through the per-session identity map instead of an assumed matching hierarchy path.
+- Keep UnitySync's generated `[UnitySync]` hierarchy outside all snapshot and cleanup operations.
+
 ## 0.2.9
 
 - Resolve and type-check every incoming object reference before changing a component, then apply references directly to the real component after staging its non-reference values.
