@@ -24,6 +24,8 @@ namespace Glasspage.UnitySync
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
         private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
         private const string FileSyncResumeColorKey = "Glasspage.UnitySync.FileSyncResume.Color";
+        private const int MaximumFileSyncResumeAttempts = 8;
+        private const double FileSyncResumeRetrySeconds = 0.5d;
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
@@ -37,6 +39,8 @@ namespace Glasspage.UnitySync
         private static double _nextSendTime;
         private static double _nextSelectionSendTime;
         private static string _lastSelectionSignature = string.Empty;
+        private static int _fileSyncResumeAttempts;
+        private static double _nextFileSyncResumeAttemptTime;
 
         internal static event Action Changed;
 
@@ -52,7 +56,7 @@ namespace Glasspage.UnitySync
             EditorApplication.quitting += Shutdown;
             AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
-            EditorApplication.delayCall += TryResumeAfterFileSyncReload;
+            EditorApplication.delayCall += ScheduleFileSyncResume;
         }
 
         internal static bool StartHost(
@@ -452,10 +456,28 @@ namespace Glasspage.UnitySync
             SessionState.SetString(FileSyncResumeColorKey, string.Empty);
         }
 
+        private static void ScheduleFileSyncResume()
+        {
+            if (!SessionState.GetBool(FileSyncResumePendingKey, false))
+            {
+                return;
+            }
+
+            _fileSyncResumeAttempts = 0;
+            _nextFileSyncResumeAttemptTime = EditorApplication.timeSinceStartup + 0.25d;
+            EditorApplication.update += TryResumeAfterFileSyncReload;
+        }
+
         private static void TryResumeAfterFileSyncReload()
         {
-            if (!SessionState.GetBool(FileSyncResumePendingKey, false) ||
-                _transport != null)
+            if (!SessionState.GetBool(FileSyncResumePendingKey, false))
+            {
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                return;
+            }
+
+            if (_transport != null ||
+                EditorApplication.timeSinceStartup < _nextFileSyncResumeAttemptTime)
             {
                 return;
             }
@@ -470,22 +492,34 @@ namespace Glasspage.UnitySync
             Color color = Color.white;
             ColorUtility.TryParseHtmlString(colorText, out color);
 
-            ClearFileSyncReloadReconnect();
             if (string.IsNullOrWhiteSpace(joinCode))
             {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
                 return;
             }
 
-            if (!Connect(joinCode, displayName, color, out string error))
+            _fileSyncResumeAttempts++;
+            if (Connect(joinCode, displayName, color, out string error))
             {
-                AddLog("Could not resume UnitySync after synchronized scripts reloaded: " + error);
-                Changed?.Invoke();
-            }
-            else
-            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
                 AddLog("Resuming UnitySync after synchronized scripts reloaded.");
                 Changed?.Invoke();
+                return;
             }
+
+            if (_fileSyncResumeAttempts >= MaximumFileSyncResumeAttempts)
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                AddLog("Could not resume UnitySync after synchronized scripts reloaded: " + error);
+                Changed?.Invoke();
+                return;
+            }
+
+            _nextFileSyncResumeAttemptTime =
+                EditorApplication.timeSinceStartup + FileSyncResumeRetrySeconds;
         }
 
         private static Guid LoadOrCreatePlayerId()
