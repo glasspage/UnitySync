@@ -366,151 +366,89 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            UnitySyncSceneDescriptor[] descriptors =
+                snapshot.Scenes ?? new UnitySyncSceneDescriptor[0];
+            if (descriptors.Length == 0)
+            {
+                error = "The environment update did not contain any loaded scenes.";
+                return false;
+            }
+
+            int appliedSceneCount = 0;
             Scene previousActiveScene = SceneManager.GetActiveScene();
             try
             {
-                foreach (UnitySyncSceneDescriptor descriptor in
-                         snapshot.Scenes ?? new UnitySyncSceneDescriptor[0])
+                foreach (UnitySyncSceneDescriptor descriptor in descriptors)
                 {
-                    if (descriptor == null ||
-                        !TryResolveScene(
+                    if (descriptor == null)
+                    {
+                        error = "The environment update contained an invalid scene descriptor.";
+                        return false;
+                    }
+
+                    if (!TryResolveScene(
                             descriptor.ScenePath,
                             descriptor.SceneName,
                             descriptor.SceneIndex,
                             out Scene scene))
                     {
-                        continue;
+                        error = "Could not resolve environment settings target scene: " +
+                                GetSceneDescriptorLabel(descriptor) + ".";
+                        return false;
                     }
 
                     if (!SceneManager.SetActiveScene(scene))
                     {
                         error = "Could not activate scene " + scene.name +
-                                " while applying scene settings.";
+                                " while applying environment settings.";
                         return false;
                     }
 
-                    bool skyboxResolved = TryResolveObjectReference(
-                        descriptor.SkyboxMaterial,
-                        out Object skyboxObject) &&
-                        (skyboxObject == null || skyboxObject is Material);
-                    bool reflectionResolved = TryResolveObjectReference(
-                        descriptor.CustomReflection,
-                        out Object reflectionObject) &&
-                        (reflectionObject == null || reflectionObject is Cubemap);
-                    bool sunResolved = TryResolveObjectReference(
-                        descriptor.Sun,
-                        out Object sunObject) &&
-                        (sunObject == null || sunObject is Light);
-
-                    SerializedObject renderSettings = GetSerializedRenderSettings();
-                    if (renderSettings != null)
+                    if (!TryResolveEnvironmentReferences(
+                            descriptor,
+                            out Material skyboxMaterial,
+                            out Cubemap customReflection,
+                            out Light sun,
+                            out error))
                     {
-                        renderSettings.Update();
-                        SetInt(renderSettings, "m_AmbientMode", (int)descriptor.AmbientMode);
-                        SetFloat(renderSettings, "m_AmbientIntensity", descriptor.AmbientIntensity);
-                        SetColor(renderSettings, "m_AmbientSkyColor", descriptor.AmbientSkyColor);
-                        SetColor(
-                            renderSettings,
-                            "m_AmbientEquatorColor",
-                            descriptor.AmbientEquatorColor);
-                        SetColor(
-                            renderSettings,
-                            "m_AmbientGroundColor",
-                            descriptor.AmbientGroundColor);
-                        SetInt(
-                            renderSettings,
-                            "m_DefaultReflectionMode",
-                            (int)descriptor.DefaultReflectionMode);
-                        SetInt(
-                            renderSettings,
-                            "m_DefaultReflectionResolution",
-                            descriptor.DefaultReflectionResolution);
-                        SetFloat(
-                            renderSettings,
-                            "m_ReflectionIntensity",
-                            descriptor.ReflectionIntensity);
-                        SetInt(
-                            renderSettings,
-                            "m_ReflectionBounces",
-                            descriptor.ReflectionBounces);
-                        SetBool(renderSettings, "m_Fog", descriptor.Fog);
-                        SetColor(renderSettings, "m_FogColor", descriptor.FogColor);
-                        SetInt(renderSettings, "m_FogMode", (int)descriptor.FogMode);
-                        SetFloat(renderSettings, "m_FogDensity", descriptor.FogDensity);
-                        SetFloat(
-                            renderSettings,
-                            "m_LinearFogStart",
-                            descriptor.FogStartDistance);
-                        SetFloat(
-                            renderSettings,
-                            "m_LinearFogEnd",
-                            descriptor.FogEndDistance);
-
-                        if (skyboxResolved)
-                        {
-                            SetObjectReference(
-                                renderSettings,
-                                "m_SkyboxMaterial",
-                                skyboxObject);
-                        }
-
-                        if (reflectionResolved)
-                        {
-                            SetObjectReference(
-                                renderSettings,
-                                "m_CustomReflection",
-                                reflectionObject);
-                        }
-
-                        if (sunResolved)
-                        {
-                            SetObjectReference(renderSettings, "m_Sun", sunObject);
-                        }
-
-                        renderSettings.ApplyModifiedPropertiesWithoutUndo();
-                        if (renderSettings.targetObject != null)
-                        {
-                            EditorUtility.SetDirty(renderSettings.targetObject);
-                        }
+                        return false;
                     }
 
-                    // Keep the public runtime facade in sync as well. The serialized backing
-                    // object above is what Unity's Lighting window edits and what persists.
-                    RenderSettings.ambientMode = descriptor.AmbientMode;
-                    RenderSettings.ambientIntensity = descriptor.AmbientIntensity;
-                    RenderSettings.ambientLight = descriptor.AmbientSkyColor;
-                    RenderSettings.ambientSkyColor = descriptor.AmbientSkyColor;
-                    RenderSettings.ambientEquatorColor = descriptor.AmbientEquatorColor;
-                    RenderSettings.ambientGroundColor = descriptor.AmbientGroundColor;
-                    RenderSettings.defaultReflectionMode = descriptor.DefaultReflectionMode;
-                    RenderSettings.defaultReflectionResolution = descriptor.DefaultReflectionResolution;
-                    RenderSettings.reflectionIntensity = descriptor.ReflectionIntensity;
-                    RenderSettings.reflectionBounces = descriptor.ReflectionBounces;
-                    RenderSettings.fog = descriptor.Fog;
-                    RenderSettings.fogColor = descriptor.FogColor;
-                    RenderSettings.fogMode = descriptor.FogMode;
-                    RenderSettings.fogDensity = descriptor.FogDensity;
-                    RenderSettings.fogStartDistance = descriptor.FogStartDistance;
-                    RenderSettings.fogEndDistance = descriptor.FogEndDistance;
-
-                    if (skyboxResolved)
+                    if (!ApplyEnvironmentSettingsToActiveScene(
+                            descriptor,
+                            skyboxMaterial,
+                            customReflection,
+                            sun,
+                            out error))
                     {
-                        RenderSettings.skybox = skyboxObject as Material;
+                        error = "Could not apply environment settings to scene " +
+                                scene.name + ": " + error;
+                        return false;
                     }
 
-                    if (reflectionResolved)
+                    if (!VerifyEnvironmentSettingsOnActiveScene(
+                            descriptor,
+                            skyboxMaterial,
+                            customReflection,
+                            sun,
+                            out error))
                     {
-                        RenderSettings.customReflection = reflectionObject as Cubemap;
-                    }
-
-                    if (sunResolved)
-                    {
-                        RenderSettings.sun = sunObject as Light;
+                        error = "Environment settings did not stick in scene " +
+                                scene.name + ": " + error;
+                        return false;
                     }
 
                     DynamicGI.UpdateEnvironment();
                     EditorSceneManager.MarkSceneDirty(scene);
+                    EditorApplication.QueuePlayerLoopUpdate();
                     SceneView.RepaintAll();
+                    appliedSceneCount++;
+                }
+
+                if (appliedSceneCount == 0)
+                {
+                    error = "No scene environment settings were applied.";
+                    return false;
                 }
 
                 return true;
@@ -522,6 +460,419 @@ namespace Glasspage.UnitySync
                     SceneManager.SetActiveScene(previousActiveScene);
                 }
             }
+        }
+
+        private static bool TryResolveEnvironmentReferences(
+            UnitySyncSceneDescriptor descriptor,
+            out Material skyboxMaterial,
+            out Cubemap customReflection,
+            out Light sun,
+            out string error)
+        {
+            skyboxMaterial = null;
+            customReflection = null;
+            sun = null;
+            error = string.Empty;
+
+            if (!TryResolveObjectReference(
+                    descriptor.SkyboxMaterial,
+                    out Object skyboxObject) ||
+                (skyboxObject != null && !(skyboxObject is Material)))
+            {
+                error = "The skybox Material could not be resolved.";
+                return false;
+            }
+
+            if (!TryResolveObjectReference(
+                    descriptor.CustomReflection,
+                    out Object reflectionObject) ||
+                (reflectionObject != null && !(reflectionObject is Cubemap)))
+            {
+                error = "The custom reflection Cubemap could not be resolved.";
+                return false;
+            }
+
+            if (!TryResolveObjectReference(
+                    descriptor.Sun,
+                    out Object sunObject) ||
+                (sunObject != null && !(sunObject is Light)))
+            {
+                error = "The Sun Light could not be resolved.";
+                return false;
+            }
+
+            skyboxMaterial = skyboxObject as Material;
+            customReflection = reflectionObject as Cubemap;
+            sun = sunObject as Light;
+            return true;
+        }
+
+        private static bool ApplyEnvironmentSettingsToActiveScene(
+            UnitySyncSceneDescriptor descriptor,
+            Material skyboxMaterial,
+            Cubemap customReflection,
+            Light sun,
+            out string error)
+        {
+            error = string.Empty;
+            SerializedObject renderSettings = GetSerializedRenderSettings();
+            if (renderSettings == null || renderSettings.targetObject == null)
+            {
+                error = "Unity did not expose the active scene's RenderSettings object.";
+                return false;
+            }
+
+            renderSettings.Update();
+            if (!SetRequiredInt(
+                    renderSettings,
+                    "m_AmbientMode",
+                    (int)descriptor.AmbientMode,
+                    out error) ||
+                !SetRequiredFloat(
+                    renderSettings,
+                    "m_AmbientIntensity",
+                    descriptor.AmbientIntensity,
+                    out error) ||
+                !SetRequiredColor(
+                    renderSettings,
+                    "m_AmbientSkyColor",
+                    descriptor.AmbientSkyColor,
+                    out error) ||
+                !SetRequiredColor(
+                    renderSettings,
+                    "m_AmbientEquatorColor",
+                    descriptor.AmbientEquatorColor,
+                    out error) ||
+                !SetRequiredColor(
+                    renderSettings,
+                    "m_AmbientGroundColor",
+                    descriptor.AmbientGroundColor,
+                    out error) ||
+                !SetRequiredInt(
+                    renderSettings,
+                    "m_DefaultReflectionMode",
+                    (int)descriptor.DefaultReflectionMode,
+                    out error) ||
+                !SetRequiredInt(
+                    renderSettings,
+                    "m_DefaultReflectionResolution",
+                    descriptor.DefaultReflectionResolution,
+                    out error) ||
+                !SetRequiredFloat(
+                    renderSettings,
+                    "m_ReflectionIntensity",
+                    descriptor.ReflectionIntensity,
+                    out error) ||
+                !SetRequiredInt(
+                    renderSettings,
+                    "m_ReflectionBounces",
+                    descriptor.ReflectionBounces,
+                    out error) ||
+                !SetRequiredBool(renderSettings, "m_Fog", descriptor.Fog, out error) ||
+                !SetRequiredColor(
+                    renderSettings,
+                    "m_FogColor",
+                    descriptor.FogColor,
+                    out error) ||
+                !SetRequiredInt(
+                    renderSettings,
+                    "m_FogMode",
+                    (int)descriptor.FogMode,
+                    out error) ||
+                !SetRequiredFloat(
+                    renderSettings,
+                    "m_FogDensity",
+                    descriptor.FogDensity,
+                    out error) ||
+                !SetRequiredFloat(
+                    renderSettings,
+                    "m_LinearFogStart",
+                    descriptor.FogStartDistance,
+                    out error) ||
+                !SetRequiredFloat(
+                    renderSettings,
+                    "m_LinearFogEnd",
+                    descriptor.FogEndDistance,
+                    out error) ||
+                !SetRequiredObjectReference(
+                    renderSettings,
+                    "m_SkyboxMaterial",
+                    skyboxMaterial,
+                    out error) ||
+                !SetRequiredObjectReference(
+                    renderSettings,
+                    "m_CustomReflection",
+                    customReflection,
+                    out error) ||
+                !SetRequiredObjectReference(
+                    renderSettings,
+                    "m_Sun",
+                    sun,
+                    out error))
+            {
+                return false;
+            }
+
+            // Match Unity's own LightingEditor. The hidden RenderSettings object is a native-
+            // backed editor object, and the normal apply path is what Unity uses for its UI.
+            renderSettings.ApplyModifiedProperties();
+            EditorUtility.SetDirty(renderSettings.targetObject);
+
+            // Keep the native/static facade synchronized immediately as well.
+            RenderSettings.ambientMode = descriptor.AmbientMode;
+            RenderSettings.ambientIntensity = descriptor.AmbientIntensity;
+            RenderSettings.ambientLight = descriptor.AmbientSkyColor;
+            RenderSettings.ambientSkyColor = descriptor.AmbientSkyColor;
+            RenderSettings.ambientEquatorColor = descriptor.AmbientEquatorColor;
+            RenderSettings.ambientGroundColor = descriptor.AmbientGroundColor;
+            RenderSettings.defaultReflectionMode = descriptor.DefaultReflectionMode;
+            RenderSettings.defaultReflectionResolution = descriptor.DefaultReflectionResolution;
+            RenderSettings.reflectionIntensity = descriptor.ReflectionIntensity;
+            RenderSettings.reflectionBounces = descriptor.ReflectionBounces;
+            RenderSettings.fog = descriptor.Fog;
+            RenderSettings.fogColor = descriptor.FogColor;
+            RenderSettings.fogMode = descriptor.FogMode;
+            RenderSettings.fogDensity = descriptor.FogDensity;
+            RenderSettings.fogStartDistance = descriptor.FogStartDistance;
+            RenderSettings.fogEndDistance = descriptor.FogEndDistance;
+            RenderSettings.skybox = skyboxMaterial;
+            RenderSettings.customReflection = customReflection;
+            RenderSettings.sun = sun;
+
+            return true;
+        }
+
+        private static bool VerifyEnvironmentSettingsOnActiveScene(
+            UnitySyncSceneDescriptor descriptor,
+            Material skyboxMaterial,
+            Cubemap customReflection,
+            Light sun,
+            out string error)
+        {
+            error = string.Empty;
+            SerializedObject renderSettings = GetSerializedRenderSettings();
+            if (renderSettings == null || renderSettings.targetObject == null)
+            {
+                error = "Unity no longer exposed the active scene's RenderSettings object.";
+                return false;
+            }
+
+            renderSettings.Update();
+
+            if (GetInt(renderSettings, "m_AmbientMode", int.MinValue) !=
+                (int)descriptor.AmbientMode)
+            {
+                error = "Environment Lighting Source did not update.";
+                return false;
+            }
+
+            if (!Approximately(
+                    GetFloat(renderSettings, "m_AmbientIntensity", float.NaN),
+                    descriptor.AmbientIntensity))
+            {
+                error = "Ambient Intensity did not update.";
+                return false;
+            }
+
+            if (!Approximately(
+                    GetColor(renderSettings, "m_AmbientSkyColor", default),
+                    descriptor.AmbientSkyColor))
+            {
+                error = "Ambient Sky/Color did not update.";
+                return false;
+            }
+
+            if (!Approximately(
+                    GetColor(renderSettings, "m_AmbientEquatorColor", default),
+                    descriptor.AmbientEquatorColor))
+            {
+                error = "Ambient Equator Color did not update.";
+                return false;
+            }
+
+            if (!Approximately(
+                    GetColor(renderSettings, "m_AmbientGroundColor", default),
+                    descriptor.AmbientGroundColor))
+            {
+                error = "Ambient Ground Color did not update.";
+                return false;
+            }
+
+            if (GetInt(renderSettings, "m_DefaultReflectionMode", int.MinValue) !=
+                    (int)descriptor.DefaultReflectionMode ||
+                GetInt(renderSettings, "m_DefaultReflectionResolution", int.MinValue) !=
+                    descriptor.DefaultReflectionResolution ||
+                !Approximately(
+                    GetFloat(renderSettings, "m_ReflectionIntensity", float.NaN),
+                    descriptor.ReflectionIntensity) ||
+                GetInt(renderSettings, "m_ReflectionBounces", int.MinValue) !=
+                    descriptor.ReflectionBounces)
+            {
+                error = "Environment Reflection settings did not update.";
+                return false;
+            }
+
+            if (GetBool(renderSettings, "m_Fog", !descriptor.Fog) != descriptor.Fog ||
+                !Approximately(
+                    GetColor(renderSettings, "m_FogColor", default),
+                    descriptor.FogColor) ||
+                GetInt(renderSettings, "m_FogMode", int.MinValue) != (int)descriptor.FogMode ||
+                !Approximately(
+                    GetFloat(renderSettings, "m_FogDensity", float.NaN),
+                    descriptor.FogDensity) ||
+                !Approximately(
+                    GetFloat(renderSettings, "m_LinearFogStart", float.NaN),
+                    descriptor.FogStartDistance) ||
+                !Approximately(
+                    GetFloat(renderSettings, "m_LinearFogEnd", float.NaN),
+                    descriptor.FogEndDistance))
+            {
+                error = "Fog settings did not update.";
+                return false;
+            }
+
+            if (GetObjectReference(renderSettings, "m_SkyboxMaterial", null) != skyboxMaterial)
+            {
+                error = "Skybox Material did not update.";
+                return false;
+            }
+
+            if (GetObjectReference(renderSettings, "m_CustomReflection", null) != customReflection)
+            {
+                error = "Custom Reflection did not update.";
+                return false;
+            }
+
+            if (GetObjectReference(renderSettings, "m_Sun", null) != sun)
+            {
+                error = "Sun Source did not update.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool SetRequiredBool(
+            SerializedObject serializedObject,
+            string propertyName,
+            bool value,
+            out string error)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property == null)
+            {
+                error = "Unity RenderSettings is missing " + propertyName + ".";
+                return false;
+            }
+
+            property.boolValue = value;
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool SetRequiredInt(
+            SerializedObject serializedObject,
+            string propertyName,
+            int value,
+            out string error)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property == null)
+            {
+                error = "Unity RenderSettings is missing " + propertyName + ".";
+                return false;
+            }
+
+            property.intValue = value;
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool SetRequiredFloat(
+            SerializedObject serializedObject,
+            string propertyName,
+            float value,
+            out string error)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property == null)
+            {
+                error = "Unity RenderSettings is missing " + propertyName + ".";
+                return false;
+            }
+
+            property.floatValue = value;
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool SetRequiredColor(
+            SerializedObject serializedObject,
+            string propertyName,
+            Color value,
+            out string error)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property == null)
+            {
+                error = "Unity RenderSettings is missing " + propertyName + ".";
+                return false;
+            }
+
+            property.colorValue = value;
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool SetRequiredObjectReference(
+            SerializedObject serializedObject,
+            string propertyName,
+            Object value,
+            out string error)
+        {
+            SerializedProperty property = serializedObject.FindProperty(propertyName);
+            if (property == null)
+            {
+                error = "Unity RenderSettings is missing " + propertyName + ".";
+                return false;
+            }
+
+            property.objectReferenceValue = value;
+            error = string.Empty;
+            return true;
+        }
+
+        private static bool Approximately(float left, float right)
+        {
+            if (float.IsNaN(left) || float.IsNaN(right))
+            {
+                return false;
+            }
+
+            return Mathf.Abs(left - right) <= 0.0001f;
+        }
+
+        private static bool Approximately(Color left, Color right)
+        {
+            return Approximately(left.r, right.r) &&
+                   Approximately(left.g, right.g) &&
+                   Approximately(left.b, right.b) &&
+                   Approximately(left.a, right.a);
+        }
+
+        private static string GetSceneDescriptorLabel(UnitySyncSceneDescriptor descriptor)
+        {
+            if (!string.IsNullOrEmpty(descriptor.ScenePath))
+            {
+                return descriptor.ScenePath;
+            }
+
+            if (!string.IsNullOrEmpty(descriptor.SceneName))
+            {
+                return descriptor.SceneName;
+            }
+
+            return "scene index " + descriptor.SceneIndex;
         }
 
         private static SerializedObject GetSerializedRenderSettings()
