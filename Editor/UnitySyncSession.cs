@@ -327,6 +327,11 @@ namespace Glasspage.UnitySync
                             AddLog("Scene settings sync skipped an update: " + sceneSettingsError);
                             Changed?.Invoke();
                         }
+                        else
+                        {
+                            AddLog("Applied scene environment settings update.");
+                            Changed?.Invoke();
+                        }
                         break;
 
                     case UnitySyncTransportEventKind.Log:
