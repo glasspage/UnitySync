@@ -26,8 +26,16 @@ namespace Glasspage.UnitySync
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
 
+        private sealed class PendingGuestViewport
+        {
+            internal UnitySyncViewportState Viewport;
+            internal double ReceivedAtSeconds;
+        }
+
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
+        private static readonly Dictionary<Guid, PendingGuestViewport> PendingGuestViewports =
+            new Dictionary<Guid, PendingGuestViewport>();
 
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
@@ -43,6 +51,7 @@ namespace Glasspage.UnitySync
         private static Color _lastSelectionColor = Color.white;
         private static int _fileSyncResumeAttempts;
         private static double _nextFileSyncResumeAttemptTime;
+        private static bool _guestSyncApproved;
         private static Guid _spectatingPlayerId = Guid.Empty;
         private static SceneView _spectatedSceneView;
         private static bool _hasSavedSceneViewState;
@@ -105,6 +114,8 @@ namespace Glasspage.UnitySync
                 _transport.StartHost(port);
                 _joinCode = code;
                 _guestJoinCode = string.Empty;
+                _guestSyncApproved = true;
+                PendingGuestViewports.Clear();
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
@@ -156,12 +167,13 @@ namespace Glasspage.UnitySync
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, data.Secret);
                 _transport.StartClient(data.Address, data.Port);
                 _guestJoinCode = joinCode;
+                _guestSyncApproved = false;
+                PendingGuestViewports.Clear();
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _hasLastViewportState = false;
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
-                UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -203,6 +215,9 @@ namespace Glasspage.UnitySync
             {
                 return false;
             }
+
+            _guestSyncApproved = true;
+            ApplyPendingGuestPresence();
 
             AddLog(
                 "Continuing host file download: " +
@@ -262,7 +277,9 @@ namespace Glasspage.UnitySync
 
         internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
         {
-            return UnitySyncPresenceRoot.GetParticipants();
+            return IsGuestSyncDeferred
+                ? new UnitySyncRemoteParticipant[0]
+                : UnitySyncPresenceRoot.GetParticipants();
         }
 
         internal static bool CanSpectate(Guid playerId)
@@ -351,26 +368,40 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.Viewport:
-                        UnitySyncPresenceRoot.Apply(
-                            transportEvent.Viewport,
-                            LocalPlayerId,
-                            transportEvent.ReceivedAtSeconds);
-                        if (_spectatingPlayerId == transportEvent.Viewport.PlayerId &&
-                            transportEvent.Viewport.SpectatingPlayerId == LocalPlayerId)
+                        if (IsGuestSyncDeferred)
                         {
-                            StopSpectatingInternal(true, false);
+                            PendingGuestViewports[transportEvent.Viewport.PlayerId] =
+                                new PendingGuestViewport
+                                {
+                                    Viewport = transportEvent.Viewport,
+                                    ReceivedAtSeconds = transportEvent.ReceivedAtSeconds
+                                };
+                            break;
                         }
 
-                        SceneView.RepaintAll();
-                        Changed?.Invoke();
+                        ApplyRemoteViewport(
+                            transportEvent.Viewport,
+                            transportEvent.ReceivedAtSeconds);
                         break;
 
                     case UnitySyncTransportEventKind.Selection:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         UnitySyncSelectionPresence.Apply(transportEvent.Selection, LocalPlayerId);
                         SceneView.RepaintAll();
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        if (IsGuestSyncDeferred)
+                        {
+                            PendingGuestViewports.Remove(transportEvent.PlayerId);
+                            UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
+                            break;
+                        }
+
                         if (_spectatingPlayerId == transportEvent.PlayerId)
                         {
                             StopSpectatingInternal(true, false);
@@ -388,6 +419,11 @@ namespace Glasspage.UnitySync
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileDelete;
+                        if (isProjectUpdate && IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         string fileSyncError;
                         bool fileHandled = isProjectUpdate
                             ? UnitySyncProjectSynchronizer.HandleMessage(
@@ -420,7 +456,8 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneObjectChange:
-                        if (UnitySyncFileSynchronizer.IsGuestSyncing)
+                        if (IsGuestSyncDeferred ||
+                            UnitySyncFileSynchronizer.IsGuestSyncing)
                         {
                             // The post-file-sync host snapshot supersedes live edits received while
                             // the guest is still reconciling Assets.
@@ -437,6 +474,11 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotBegin:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.BeginRemoteSnapshot(
                                 transportEvent.SceneSnapshot,
                                 out string snapshotBeginError))
@@ -447,6 +489,11 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotEnd:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.CompleteRemoteSnapshot(
                                 transportEvent.SceneSnapshot.SnapshotId,
                                 transportEvent.SceneSnapshot.IsComplete,
@@ -458,12 +505,22 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotRequest:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         UnitySyncSceneSynchronizer.QueueFullSceneSnapshot(transportEvent.PlayerId);
                         AddLog("Sending the current scene state to a collaborator.");
                         Changed?.Invoke();
                         break;
 
                     case UnitySyncTransportEventKind.SceneSettingsChange:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.ApplyRemoteSceneSettings(
                                 transportEvent.SceneSnapshot,
                                 out string sceneSettingsError))
@@ -501,6 +558,12 @@ namespace Glasspage.UnitySync
 
             if (UnitySyncFileSynchronizer.ConsumeGuestReadyForSceneSnapshot())
             {
+                if (!_guestSyncApproved)
+                {
+                    _guestSyncApproved = true;
+                    ApplyPendingGuestPresence();
+                }
+
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
@@ -731,6 +794,42 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = false;
         }
 
+        private static bool IsGuestSyncDeferred =>
+            !string.IsNullOrEmpty(_guestJoinCode) && !_guestSyncApproved;
+
+        private static void ApplyPendingGuestPresence()
+        {
+            if (PendingGuestViewports.Count == 0)
+            {
+                return;
+            }
+
+            foreach (PendingGuestViewport pending in PendingGuestViewports.Values)
+            {
+                ApplyRemoteViewport(pending.Viewport, pending.ReceivedAtSeconds);
+            }
+
+            PendingGuestViewports.Clear();
+        }
+
+        private static void ApplyRemoteViewport(
+            UnitySyncViewportState viewport,
+            double receivedAtSeconds)
+        {
+            UnitySyncPresenceRoot.Apply(
+                viewport,
+                LocalPlayerId,
+                receivedAtSeconds);
+            if (_spectatingPlayerId == viewport.PlayerId &&
+                viewport.SpectatingPlayerId == LocalPlayerId)
+            {
+                StopSpectatingInternal(true, false);
+            }
+
+            SceneView.RepaintAll();
+            Changed?.Invoke();
+        }
+
         private static bool ColorsEqual(Color left, Color right)
         {
             return Mathf.Approximately(left.r, right.r) &&
@@ -750,6 +849,8 @@ namespace Glasspage.UnitySync
             _state = UnitySyncSessionState.Idle;
             _joinCode = string.Empty;
             _guestJoinCode = string.Empty;
+            _guestSyncApproved = false;
+            PendingGuestViewports.Clear();
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
