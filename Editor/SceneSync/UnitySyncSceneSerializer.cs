@@ -211,6 +211,22 @@ namespace Glasspage.UnitySync
             return result;
         }
 
+        internal static bool TryGetActiveSceneDescriptor(
+            out UnitySyncSceneDescriptor descriptor)
+        {
+            descriptor = null;
+            Scene scene = EditorSceneManager.GetActiveScene();
+            if (!IsEnvironmentSceneCandidate(scene))
+            {
+                return false;
+            }
+
+            descriptor = CaptureSceneDescriptor(
+                scene,
+                FindLoadedSceneIndex(scene));
+            return true;
+        }
+
         internal static UnitySyncSceneDescriptor[] GetLoadedSceneDescriptors()
         {
             List<UnitySyncSceneDescriptor> scenes = new List<UnitySyncSceneDescriptor>();
