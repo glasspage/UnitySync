@@ -214,6 +214,27 @@ namespace Glasspage.UnitySync
                         }
                         break;
 
+                    case UnitySyncTransportEventKind.SceneSnapshotBegin:
+                        if (!UnitySyncSceneSynchronizer.BeginRemoteSnapshot(
+                                transportEvent.SceneSnapshot,
+                                out string snapshotBeginError))
+                        {
+                            AddLog("Scene sync skipped a snapshot: " + snapshotBeginError);
+                            Changed?.Invoke();
+                        }
+                        break;
+
+                    case UnitySyncTransportEventKind.SceneSnapshotEnd:
+                        if (!UnitySyncSceneSynchronizer.CompleteRemoteSnapshot(
+                                transportEvent.SceneSnapshot.SnapshotId,
+                                transportEvent.SceneSnapshot.IsComplete,
+                                out string snapshotEndError))
+                        {
+                            AddLog("Scene sync could not finish a snapshot: " + snapshotEndError);
+                            Changed?.Invoke();
+                        }
+                        break;
+
                     case UnitySyncTransportEventKind.SceneSnapshotRequest:
                         UnitySyncSceneSynchronizer.QueueFullSceneSnapshot(transportEvent.PlayerId);
                         AddLog("Sending the current scene state to a collaborator.");

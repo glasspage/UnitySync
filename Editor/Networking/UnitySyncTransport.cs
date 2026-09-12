@@ -17,6 +17,8 @@ namespace Glasspage.UnitySync
         PeerLeft,
         SceneObjectChange,
         SceneSnapshotRequest,
+        SceneSnapshotBegin,
+        SceneSnapshotEnd,
         Log
     }
 
@@ -25,6 +27,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncTransportEventKind Kind;
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSceneObjectChange SceneChange;
+        internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly Guid PlayerId;
         internal readonly string Message;
 
@@ -33,11 +36,13 @@ namespace Glasspage.UnitySync
             UnitySyncViewportState viewport,
             UnitySyncSceneObjectChange sceneChange,
             Guid playerId,
-            string message)
+            string message,
+            UnitySyncSceneSnapshotBoundary sceneSnapshot = null)
         {
             Kind = kind;
             Viewport = viewport;
             SceneChange = sceneChange;
+            SceneSnapshot = sceneSnapshot;
             PlayerId = playerId;
             Message = message;
         }
@@ -202,6 +207,27 @@ namespace Glasspage.UnitySync
         internal void RequestSceneSnapshot()
         {
             QueueMessage(UnitySyncProtocol.CreateSceneSnapshotRequest(_localPlayerId), Guid.Empty);
+        }
+
+        internal void SendSceneSnapshotBegin(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateSceneSnapshotBegin(playerId, snapshot),
+                targetPlayerId);
+        }
+
+        internal void SendSceneSnapshotEnd(
+            Guid playerId,
+            Guid snapshotId,
+            bool isComplete,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateSceneSnapshotEnd(playerId, snapshotId, isComplete),
+                targetPlayerId);
         }
 
         private void QueueMessage(byte[] payload, Guid targetPlayerId)
@@ -462,6 +488,11 @@ namespace Glasspage.UnitySync
                                 peer);
                             break;
 
+                        case UnitySyncMessageType.SceneSnapshotBegin:
+                        case UnitySyncMessageType.SceneSnapshotEnd:
+                            throw new InvalidDataException(
+                                "A collaborator sent a host-only scene snapshot message.");
+
                         case UnitySyncMessageType.SceneSnapshotRequest:
                             if (!peer.RequestedSceneSnapshot)
                             {
@@ -554,6 +585,26 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueSceneChange(message.PlayerId, message.SceneChange);
+                            break;
+
+                        case UnitySyncMessageType.SceneSnapshotBegin:
+                            if (message.PlayerId == Guid.Empty || message.SceneSnapshot == null)
+                            {
+                                throw new InvalidDataException("The host sent an invalid scene snapshot.");
+                            }
+
+                            EnqueueSceneSnapshotBegin(message.PlayerId, message.SceneSnapshot);
+                            break;
+
+                        case UnitySyncMessageType.SceneSnapshotEnd:
+                            if (message.PlayerId == Guid.Empty ||
+                                message.SceneSnapshot == null ||
+                                message.SceneSnapshot.SnapshotId == Guid.Empty)
+                            {
+                                throw new InvalidDataException("The host ended an invalid scene snapshot.");
+                            }
+
+                            EnqueueSceneSnapshotEnd(message.PlayerId, message.SceneSnapshot);
                             break;
 
                         default:
@@ -852,6 +903,38 @@ namespace Glasspage.UnitySync
                     null,
                     playerId,
                     string.Empty));
+            }
+        }
+
+        private void EnqueueSceneSnapshotBegin(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneSnapshotBegin,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    snapshot));
+            }
+        }
+
+        private void EnqueueSceneSnapshotEnd(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneSnapshotEnd,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    snapshot));
             }
         }
     }
