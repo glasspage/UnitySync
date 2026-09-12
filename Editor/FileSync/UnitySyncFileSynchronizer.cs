@@ -728,7 +728,7 @@ namespace Glasspage.UnitySync
 
             if (GuestMismatches.Count == 0)
             {
-                CompleteGuestSync();
+                BeginGuestImport();
                 return;
             }
 
@@ -926,14 +926,84 @@ namespace Glasspage.UnitySync
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
                 "Importing synchronized Assets...",
-                0.96f);
+                0.94f);
 
             UnitySyncSession.PrepareFileSyncReloadReconnect();
             SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.Importing;
             _guestImportEarliestComplete =
                 EditorApplication.timeSinceStartup + ImportSettleSeconds;
-            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+
+            try
+            {
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                ForceReimportSynchronizedDependencies();
+                ForceReimportProjectMaterials();
+            }
+            catch (Exception exception)
+            {
+                UnitySyncSession.ClearFileSyncReloadReconnect();
+                FailGuestSync(
+                    "Could not finish importing synchronized Assets: " +
+                    exception.Message);
+            }
+        }
+
+        private static void ForceReimportSynchronizedDependencies()
+        {
+            List<string> paths = new List<string>();
+            foreach (FileEntry entry in GuestMismatches)
+            {
+                string path = entry.Path ?? string.Empty;
+                if (!IsSafeAssetPath(path) ||
+                    path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".asmdef", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".asmref", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                paths.Add(path);
+            }
+
+            paths.Sort(StringComparer.Ordinal);
+            foreach (string path in paths)
+            {
+                AssetDatabase.ImportAsset(
+                    path,
+                    ImportAssetOptions.ForceUpdate |
+                    ImportAssetOptions.ForceSynchronousImport);
+            }
+        }
+
+        private static void ForceReimportProjectMaterials()
+        {
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                "Reinitializing synchronized materials...",
+                0.97f);
+
+            string[] materialGuids = AssetDatabase.FindAssets(
+                "t:Material",
+                new[] { "Assets" });
+            Array.Sort(materialGuids, StringComparer.Ordinal);
+
+            foreach (string guid in materialGuids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!IsSafeAssetPath(path) ||
+                    !path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                AssetDatabase.ImportAsset(
+                    path,
+                    ImportAssetOptions.ForceUpdate |
+                    ImportAssetOptions.ForceSynchronousImport);
+            }
         }
 
         private static void UpdateGuestImport()

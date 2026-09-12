@@ -174,6 +174,13 @@ namespace Glasspage.UnitySync
             _applyingRemoteChange = true;
             try
             {
+                if (!UnitySyncSceneSerializer.ApplySceneSettings(
+                        completedSnapshot.Boundary,
+                        out error))
+                {
+                    return false;
+                }
+
                 return UnitySyncSceneSerializer.PruneSnapshot(
                     completedSnapshot.Boundary,
                     completedSnapshot.RepresentedObjectIds,
