@@ -93,6 +93,7 @@ namespace Glasspage.UnitySync
         private static long _guestDownloadBytesReceived;
         private static string _guestTempRoot = string.Empty;
         private static bool _guestReadyForSceneSnapshot;
+        private static bool _guestAutoRefreshBlocked;
         private static string _guestFailure = string.Empty;
         private static double _guestImportEarliestComplete;
 
@@ -101,6 +102,7 @@ namespace Glasspage.UnitySync
         internal static void BeginGuestSync(UnitySyncTransport transport)
         {
             ResetGuestState();
+            SetGuestAutoRefreshBlocked(true);
             _guestPhase = GuestPhase.WaitingForManifest;
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
@@ -741,12 +743,23 @@ namespace Glasspage.UnitySync
                 "Library",
                 "UnitySyncFileSync",
                 _guestSyncId.ToString("N"));
-            if (Directory.Exists(_guestTempRoot))
+            try
             {
-                Directory.Delete(_guestTempRoot, true);
-            }
+                if (Directory.Exists(_guestTempRoot))
+                {
+                    Directory.Delete(_guestTempRoot, true);
+                }
 
-            Directory.CreateDirectory(_guestTempRoot);
+                Directory.CreateDirectory(_guestTempRoot);
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException)
+            {
+                FailGuestSync(
+                    "Could not prepare temporary file sync storage: " + exception.Message);
+                return;
+            }
             _guestRequestIndex = 0;
             _guestCompletedFiles = 0;
             _guestDownloadBytesReceived = 0;
@@ -916,6 +929,7 @@ namespace Glasspage.UnitySync
                 0.96f);
 
             UnitySyncSession.PrepareFileSyncReloadReconnect();
+            SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.Importing;
             _guestImportEarliestComplete =
                 EditorApplication.timeSinceStartup + ImportSettleSeconds;
@@ -945,6 +959,7 @@ namespace Glasspage.UnitySync
         {
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
+            SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.None;
             _guestReadyForSceneSnapshot = true;
             EditorUtility.ClearProgressBar();
@@ -954,6 +969,7 @@ namespace Glasspage.UnitySync
         {
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
+            SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.None;
             _guestReadyForSceneSnapshot = false;
             _guestFailure = string.IsNullOrEmpty(error)
@@ -966,6 +982,7 @@ namespace Glasspage.UnitySync
         {
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
+            SetGuestAutoRefreshBlocked(false);
 
             _guestPhase = GuestPhase.None;
             _guestFailure = string.Empty;
@@ -1035,6 +1052,25 @@ namespace Glasspage.UnitySync
             }
 
             _guestTempRoot = string.Empty;
+        }
+
+        private static void SetGuestAutoRefreshBlocked(bool blocked)
+        {
+            if (_guestAutoRefreshBlocked == blocked)
+            {
+                return;
+            }
+
+            if (blocked)
+            {
+                AssetDatabase.DisallowAutoRefresh();
+            }
+            else
+            {
+                AssetDatabase.AllowAutoRefresh();
+            }
+
+            _guestAutoRefreshBlocked = blocked;
         }
 
         private static List<FileEntry> BuildLocalManifest(out long totalBytes)
