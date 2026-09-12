@@ -44,7 +44,7 @@ namespace Glasspage.UnitySync
             string message,
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
             UnitySyncSelectionState selection = default,
-            UnitySyncMessageType messageType = 0,
+            UnitySyncMessageType messageType = default(UnitySyncMessageType),
             UnitySyncFileSyncMessage fileSync = null)
         {
             Kind = kind;
