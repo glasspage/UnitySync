@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- Resolve Unity built-in materials such as Default-Diffuse and Default-Skybox through Unity's built-in extra-resource API instead of assuming every built-in material is the primitive renderer's default material.
+- Retain the primitive-derived default material path as a compatibility fallback.
+
 ## 0.3.3
 
 - Remember the receiver's actual post-apply component state instead of the sender's serialized hash, preventing remotely applied Transform and component changes from being echoed back as fresh local edits and rubber-banding the active editor.

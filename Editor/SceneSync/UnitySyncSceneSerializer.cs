@@ -2077,7 +2077,7 @@ namespace Glasspage.UnitySync
             }
 
             if (assetType == typeof(Material) &&
-                TryResolveBuiltinDefaultMaterial(reference, out Material material))
+                TryResolveBuiltinMaterialReference(reference, out Material material))
             {
                 value = material;
                 return true;
@@ -2130,18 +2130,36 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool TryResolveBuiltinDefaultMaterial(
+        private static bool TryResolveBuiltinMaterialReference(
             UnitySyncObjectReferenceState reference,
             out Material material)
         {
             material = null;
+            if (reference == null || string.IsNullOrEmpty(reference.AssetName))
+            {
+                return false;
+            }
+
+            string resourceName = reference.AssetName.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)
+                ? reference.AssetName
+                : reference.AssetName + ".mat";
+
+            Material candidate = AssetDatabase.GetBuiltinExtraResource<Material>(resourceName);
+            if (BuiltinAssetCandidateMatches(candidate, reference))
+            {
+                material = candidate;
+                return true;
+            }
+
+            // Keep the primitive-derived material as a fallback for Unity versions where the
+            // default renderer material is exposed differently from the named extra resource.
             GameObject primitive = null;
             try
             {
                 primitive = GameObject.CreatePrimitive(PrimitiveType.Cube);
                 primitive.hideFlags = HideFlags.HideAndDontSave;
                 MeshRenderer meshRenderer = primitive.GetComponent<MeshRenderer>();
-                Material candidate = meshRenderer != null ? meshRenderer.sharedMaterial : null;
+                candidate = meshRenderer != null ? meshRenderer.sharedMaterial : null;
                 if (!BuiltinAssetCandidateMatches(candidate, reference))
                 {
                     return false;
