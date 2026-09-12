@@ -10,7 +10,9 @@ namespace Glasspage.UnitySync
         private const string ColorPreference = "Glasspage.UnitySync.Color";
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
-        private const string PackageJsonPath = "Packages/com.glasspage.unitysync/package.json";
+        // Keep this in sync with package.json when releasing a new UnitySync version.
+        private const string Version = "0.5.0";
+        private const string WindowTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
 
         private static readonly Color ActiveSessionColor = new Color(1f, 0.55f, 0.15f);
@@ -34,12 +36,6 @@ namespace Glasspage.UnitySync
 
         private static GUIStyle _activeSessionFoldoutStyle;
 
-        [Serializable]
-        private sealed class PackageMetadata
-        {
-            public string version;
-        }
-
         [MenuItem("UnitySync/Session", false, 0)]
         private static void Open()
         {
@@ -51,7 +47,7 @@ namespace Glasspage.UnitySync
 
         private void OnEnable()
         {
-            titleContent = new GUIContent(WindowTitle);
+            titleContent = new GUIContent("UnitySync v0.5.0");
 
             _displayName = EditorPrefs.GetString(DisplayNamePreference, Environment.UserName);
             if (string.IsNullOrWhiteSpace(_displayName))
@@ -501,36 +497,6 @@ namespace Glasspage.UnitySync
                 "The test gizmo is placed at the current Scene view pivot.",
                 EditorStyles.wordWrappedMiniLabel);
             EditorGUI.indentLevel--;
-        }
-
-        private static string WindowTitle
-        {
-            get
-            {
-                string version = GetPackageVersion();
-                return string.IsNullOrEmpty(version)
-                    ? "UnitySync"
-                    : "UnitySync v" + version;
-            }
-        }
-
-        private static string GetPackageVersion()
-        {
-            TextAsset packageJson = AssetDatabase.LoadAssetAtPath<TextAsset>(PackageJsonPath);
-            if (packageJson == null)
-            {
-                return string.Empty;
-            }
-
-            try
-            {
-                PackageMetadata metadata = JsonUtility.FromJson<PackageMetadata>(packageJson.text);
-                return metadata != null ? metadata.version : string.Empty;
-            }
-            catch (ArgumentException)
-            {
-                return string.Empty;
-            }
         }
 
         private static string NormalizeDebugDisplayName(string displayName)
