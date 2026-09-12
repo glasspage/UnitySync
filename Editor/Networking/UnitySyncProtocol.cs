@@ -78,7 +78,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 3;
+        internal const int Version = 4;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -616,6 +616,9 @@ namespace Glasspage.UnitySync
 
                 case UnitySyncObjectReferenceKind.Asset:
                     WriteLimitedString(writer, reference.AssetGuid);
+                    WriteLimitedString(writer, reference.AssetPath);
+                    WriteLimitedString(writer, reference.AssetTypeName);
+                    WriteLimitedString(writer, reference.AssetName);
                     writer.Write(reference.LocalFileId);
                     break;
 
@@ -643,7 +646,14 @@ namespace Glasspage.UnitySync
 
                 case UnitySyncObjectReferenceKind.Asset:
                     reference.AssetGuid = ReadLimitedString(reader);
+                    reference.AssetPath = ReadLimitedString(reader);
+                    reference.AssetTypeName = ReadLimitedString(reader);
+                    reference.AssetName = ReadLimitedString(reader);
                     reference.LocalFileId = reader.ReadInt64();
+                    if (string.IsNullOrEmpty(reference.AssetTypeName))
+                    {
+                        throw new InvalidDataException("Asset reference type is missing.");
+                    }
                     break;
 
                 case UnitySyncObjectReferenceKind.SceneObject:
