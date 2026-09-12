@@ -14,7 +14,7 @@ In Unity, open **Window > Package Manager**, choose **Add package from git URL**
 https://github.com/glasspage/UnitySync.git
 ```
 
-The current package targets Unity 2021.3 or newer.
+This requires Git to be installed.
 
 ## Connect through Radmin VPN
 
