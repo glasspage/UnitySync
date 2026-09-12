@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Preserve matching local object references instead of rewriting their serialized pointers.
+- Resolve assignable assets only by exact GUID and local file ID.
+- Remove the broad loaded-resource fallback that could select an editor-internal built-in asset with an incompatible native identity.
+- Improve object-reference resolution errors with the local serialized field type.
+
 ## 0.2.2
 
 - Prevented invalid PPtr casts by validating serialized field and referenced object types before assignment.

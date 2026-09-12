@@ -655,7 +655,8 @@ namespace Glasspage.UnitySync
                          propertyState.Kind == UnitySyncSerializedValueKind.ExposedReference))
                     {
                         error = "Object reference " + propertyState.Path +
-                                " is incompatible with " + component.GetType().Name + ".";
+                                " could not be resolved safely for local field type " +
+                                property.type + " on " + component.GetType().Name + ".";
                         return false;
                     }
                 }
@@ -699,11 +700,7 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ObjectReference:
-                        if (!CanApplyObjectReference(property, state.ObjectReference) ||
-                            !TryResolveObjectReference(state.ObjectReference, out Object objectReference) ||
-                            !IsSerializedReferenceTypeCompatible(property.type, objectReference)) return false;
-                        property.objectReferenceValue = objectReference;
-                        return true;
+                        return TryApplyObjectReference(property, state.ObjectReference);
 
                     case UnitySyncSerializedValueKind.LayerMask:
                         property.intValue = (int)state.IntegerValue;
@@ -980,25 +977,7 @@ namespace Glasspage.UnitySync
                 {
                     foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(assetPath))
                     {
-                        if (AssetReferenceMatches(candidate, reference))
-                        {
-                            value = candidate;
-                            return true;
-                        }
-                    }
-                }
-
-                if (IsBuiltinAssetReference(reference))
-                {
-                    Type assetType = ResolveType(reference.ObjectTypeName);
-                    if (assetType == null || !typeof(Object).IsAssignableFrom(assetType))
-                    {
-                        return false;
-                    }
-
-                    foreach (Object candidate in Resources.FindObjectsOfTypeAll(assetType))
-                    {
-                        if (AssetReferenceMatches(candidate, reference))
+                        if (AssetReferenceMatches(candidate, reference, false))
                         {
                             value = candidate;
                             return true;
@@ -1012,7 +991,8 @@ namespace Glasspage.UnitySync
 
         private static bool AssetReferenceMatches(
             Object candidate,
-            UnitySyncObjectReferenceState reference)
+            UnitySyncObjectReferenceState reference,
+            bool allowMatchingLocalBuiltin)
         {
             if (candidate == null ||
                 !TypeMatches(candidate.GetType(), reference.ObjectTypeName) ||
@@ -1021,7 +1001,7 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            if (IsBuiltinAssetReference(reference))
+            if (allowMatchingLocalBuiltin && IsBuiltinAssetReference(reference))
             {
                 string candidatePath = AssetDatabase.GetAssetPath(candidate) ?? string.Empty;
                 return EditorUtility.IsPersistent(candidate) &&
@@ -1034,6 +1014,83 @@ namespace Glasspage.UnitySync
                        out long candidateFileId) &&
                    candidateGuid == reference.AssetGuid &&
                    candidateFileId == reference.LocalFileId;
+        }
+
+        private static bool TryApplyObjectReference(
+            SerializedProperty property,
+            UnitySyncObjectReferenceState reference)
+        {
+            if (!CanApplyObjectReference(property, reference))
+            {
+                return false;
+            }
+
+            // Avoid rewriting an identical local PPtr. Unity can have several loaded editor
+            // resources with the same display name but different native identities.
+            if (ExistingObjectReferenceMatches(property, reference))
+            {
+                return true;
+            }
+
+            if (!TryResolveObjectReference(reference, out Object objectReference) ||
+                !IsSerializedReferenceTypeCompatible(property.type, objectReference))
+            {
+                return false;
+            }
+
+            property.objectReferenceValue = objectReference;
+            return true;
+        }
+
+        private static bool ExistingObjectReferenceMatches(
+            SerializedProperty property,
+            UnitySyncObjectReferenceState reference)
+        {
+            int instanceId = property.objectReferenceInstanceIDValue;
+            if (reference.Kind == UnitySyncObjectReferenceKind.Null)
+            {
+                return instanceId == 0;
+            }
+
+            Object candidate = EditorUtility.InstanceIDToObject(instanceId);
+            if (candidate == null ||
+                !IsSerializedReferenceTypeCompatible(property.type, candidate) ||
+                !TypeMatches(candidate.GetType(), reference.ObjectTypeName))
+            {
+                return false;
+            }
+
+            if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
+            {
+                return AssetReferenceMatches(candidate, reference, true);
+            }
+
+            if (reference.Kind != UnitySyncObjectReferenceKind.SceneObject)
+            {
+                return false;
+            }
+
+            GameObject referencedGameObject;
+            int componentIndex;
+            if (candidate is GameObject gameObject)
+            {
+                referencedGameObject = gameObject;
+                componentIndex = -1;
+            }
+            else if (candidate is Component component)
+            {
+                referencedGameObject = component.gameObject;
+                componentIndex = GetComponentIndex(referencedGameObject, component);
+            }
+            else
+            {
+                return false;
+            }
+
+            return componentIndex == reference.ComponentIndex &&
+                   reference.SceneObject != null &&
+                   TryCreateAddress(referencedGameObject, out UnitySyncSceneObjectAddress address) &&
+                   address.Key == reference.SceneObject.Key;
         }
 
         private static bool IsBuiltinAssetReference(UnitySyncObjectReferenceState reference)
