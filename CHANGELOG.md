@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Prevented invalid PPtr casts by validating serialized field and referenced object types before assignment.
+- Removed dereferencing of the receiver's existing object reference while applying a remote update.
+- Added type validation for synchronized scene-object references.
+- Removed the pre-apply local snapshot comparison that dereferenced already-invalid receiver PPtrs.
+
 ## 0.2.1
 
 - Fixed built-in Unity resources such as primitive meshes resolving to incompatible objects during scene synchronization.

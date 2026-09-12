@@ -78,7 +78,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 4;
+        internal const int Version = 5;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -609,20 +609,27 @@ namespace Glasspage.UnitySync
         {
             reference = reference ?? new UnitySyncObjectReferenceState();
             writer.Write((byte)reference.Kind);
+            if (string.IsNullOrEmpty(reference.SerializedPropertyTypeName))
+            {
+                throw new InvalidDataException("Object reference property type is missing.");
+            }
+
+            WriteLimitedString(writer, reference.SerializedPropertyTypeName);
             switch (reference.Kind)
             {
                 case UnitySyncObjectReferenceKind.Null:
                     break;
 
                 case UnitySyncObjectReferenceKind.Asset:
+                    WriteLimitedString(writer, reference.ObjectTypeName);
                     WriteLimitedString(writer, reference.AssetGuid);
                     WriteLimitedString(writer, reference.AssetPath);
-                    WriteLimitedString(writer, reference.AssetTypeName);
                     WriteLimitedString(writer, reference.AssetName);
                     writer.Write(reference.LocalFileId);
                     break;
 
                 case UnitySyncObjectReferenceKind.SceneObject:
+                    WriteLimitedString(writer, reference.ObjectTypeName);
                     WriteSceneAddress(writer, reference.SceneObject);
                     writer.Write(reference.ComponentIndex);
                     break;
@@ -636,8 +643,13 @@ namespace Glasspage.UnitySync
         {
             UnitySyncObjectReferenceState reference = new UnitySyncObjectReferenceState
             {
-                Kind = (UnitySyncObjectReferenceKind)reader.ReadByte()
+                Kind = (UnitySyncObjectReferenceKind)reader.ReadByte(),
+                SerializedPropertyTypeName = ReadLimitedString(reader)
             };
+            if (string.IsNullOrEmpty(reference.SerializedPropertyTypeName))
+            {
+                throw new InvalidDataException("Object reference property type is missing.");
+            }
 
             switch (reference.Kind)
             {
@@ -645,18 +657,24 @@ namespace Glasspage.UnitySync
                     break;
 
                 case UnitySyncObjectReferenceKind.Asset:
+                    reference.ObjectTypeName = ReadLimitedString(reader);
                     reference.AssetGuid = ReadLimitedString(reader);
                     reference.AssetPath = ReadLimitedString(reader);
-                    reference.AssetTypeName = ReadLimitedString(reader);
                     reference.AssetName = ReadLimitedString(reader);
                     reference.LocalFileId = reader.ReadInt64();
-                    if (string.IsNullOrEmpty(reference.AssetTypeName))
+                    if (string.IsNullOrEmpty(reference.ObjectTypeName))
                     {
                         throw new InvalidDataException("Asset reference type is missing.");
                     }
                     break;
 
                 case UnitySyncObjectReferenceKind.SceneObject:
+                    reference.ObjectTypeName = ReadLimitedString(reader);
+                    if (string.IsNullOrEmpty(reference.ObjectTypeName))
+                    {
+                        throw new InvalidDataException("Scene reference type is missing.");
+                    }
+
                     reference.SceneObject = ReadSceneAddress(reader);
                     reference.ComponentIndex = reader.ReadInt32();
                     if (reference.ComponentIndex < -1 || reference.ComponentIndex >= MaximumComponentsPerObject)

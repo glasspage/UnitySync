@@ -60,9 +60,10 @@ namespace Glasspage.UnitySync
     internal sealed class UnitySyncObjectReferenceState
     {
         internal UnitySyncObjectReferenceKind Kind;
+        internal string SerializedPropertyTypeName = string.Empty;
+        internal string ObjectTypeName = string.Empty;
         internal string AssetGuid = string.Empty;
         internal string AssetPath = string.Empty;
-        internal string AssetTypeName = string.Empty;
         internal string AssetName = string.Empty;
         internal long LocalFileId;
         internal UnitySyncSceneObjectAddress SceneObject;
