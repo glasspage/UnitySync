@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Glasspage.UnitySync
 {
@@ -80,6 +81,24 @@ namespace Glasspage.UnitySync
         internal string SceneName = string.Empty;
         internal int SceneIndex;
         internal UnitySyncObjectReferenceState SkyboxMaterial;
+        internal AmbientMode AmbientMode;
+        internal float AmbientIntensity;
+        internal Color AmbientLight;
+        internal Color AmbientSkyColor;
+        internal Color AmbientEquatorColor;
+        internal Color AmbientGroundColor;
+        internal DefaultReflectionMode DefaultReflectionMode;
+        internal int DefaultReflectionResolution;
+        internal float ReflectionIntensity;
+        internal int ReflectionBounces;
+        internal UnitySyncObjectReferenceState CustomReflection;
+        internal bool Fog;
+        internal Color FogColor;
+        internal FogMode FogMode;
+        internal float FogDensity;
+        internal float FogStartDistance;
+        internal float FogEndDistance;
+        internal UnitySyncObjectReferenceState Sun;
     }
 
     internal sealed class UnitySyncSceneSnapshotBoundary
