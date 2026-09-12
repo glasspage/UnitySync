@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
 
 namespace Glasspage.UnitySync
@@ -77,6 +79,7 @@ namespace Glasspage.UnitySync
         static UnitySyncSceneSynchronizer()
         {
             ObjectChangeEvents.changesPublished += OnChangesPublished;
+            EditorSceneManager.sceneDirtied += OnSceneDirtied;
         }
 
         internal static void BeginSession()
@@ -104,6 +107,33 @@ namespace Glasspage.UnitySync
             BatchedObjectInstanceIds.Clear();
             _remoteSnapshot = null;
             UnitySyncSceneObjectRegistry.Clear();
+        }
+
+        internal static void MarkSceneSettingsChanged()
+        {
+            if (!_active || _applyingRemoteChange)
+            {
+                return;
+            }
+
+            // Force the next settings flush even if Unity has not yet propagated a reliable
+            // dirty-file signal for RenderSettings. The snapshot itself is captured later
+            // from the main editor update after the inspector modification has completed.
+            _knownSceneSettingsSignature = string.Empty;
+            _nextSceneSettingsCheckTime = 0d;
+        }
+
+        private static void OnSceneDirtied(Scene scene)
+        {
+            if (!_active || _applyingRemoteChange)
+            {
+                return;
+            }
+
+            // Most scene changes are unrelated to lighting, so only accelerate the normal
+            // signature check here. A real RenderSettings Undo modification uses the stronger
+            // MarkSceneSettingsChanged path above.
+            _nextSceneSettingsCheckTime = 0d;
         }
 
         internal static void QueueFullSceneSnapshot(Guid targetPlayerId)
