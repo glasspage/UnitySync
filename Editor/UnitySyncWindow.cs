@@ -131,9 +131,11 @@ namespace Glasspage.UnitySync
                     break;
 
                 case UnitySyncSessionState.Connected:
-                    status = UnitySyncSession.IsFileSyncing
-                        ? "Syncing host files..."
-                        : "Connected";
+                    status = UnitySyncSession.IsAwaitingFileDownloadConfirmation
+                        ? "Review host file download"
+                        : UnitySyncSession.IsFileSyncing
+                            ? "Syncing host files..."
+                            : "Connected";
                     type = MessageType.Info;
                     break;
 
@@ -292,6 +294,50 @@ namespace Glasspage.UnitySync
             }
 
             EditorGUILayout.Space(8f);
+            if (!isHosting && UnitySyncSession.IsAwaitingFileDownloadConfirmation)
+            {
+                int fileCount = UnitySyncSession.PendingFileDownloadCount;
+                long downloadBytes = UnitySyncSession.PendingFileDownloadBytes;
+                string fileLabel = fileCount == 1 ? "file" : "files";
+                EditorGUILayout.HelpBox(
+                    "The host has " +
+                    fileCount +
+                    " " +
+                    fileLabel +
+                    " you need to download (" +
+                    FormatBytes(downloadBytes) +
+                    "). Review the file list in the Activity Log before continuing.",
+                    MessageType.Warning);
+
+                bool disconnected = false;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("Disconnect"))
+                    {
+                        _error = string.Empty;
+                        UnitySyncSession.Stop();
+                        disconnected = true;
+                    }
+
+                    if (GUILayout.Button("Continue"))
+                    {
+                        _error = string.Empty;
+                        if (!UnitySyncSession.ContinueFileSync(out _error))
+                        {
+                            Repaint();
+                        }
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+                if (disconnected)
+                {
+                    Repaint();
+                }
+
+                return;
+            }
+
             if (GUILayout.Button("Stop Session"))
             {
                 _error = string.Empty;
@@ -332,6 +378,31 @@ namespace Glasspage.UnitySync
             }
 
             return UnitySyncSession.DefaultColor;
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024)
+            {
+                return bytes + " B";
+            }
+
+            string[] units = { "KB", "MB", "GB", "TB" };
+            double value = bytes;
+            int unitIndex = -1;
+            do
+            {
+                value /= 1024d;
+                unitIndex++;
+            }
+            while (value >= 1024d && unitIndex < units.Length - 1);
+
+            string format = value >= 100d
+                ? "0"
+                : value >= 10d
+                    ? "0.0"
+                    : "0.00";
+            return value.ToString(format) + " " + units[unitIndex];
         }
 
         private static Color NormalizeColor(Color color)
