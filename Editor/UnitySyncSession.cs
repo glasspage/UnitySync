@@ -18,7 +18,6 @@ namespace Glasspage.UnitySync
     internal static class UnitySyncSession
     {
         private const double SendIntervalSeconds = 0.1;
-        private const double SelectionHeartbeatSeconds = 1.0;
         private const string PlayerIdSessionKey = "Glasspage.UnitySync.PlayerId";
         private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
@@ -37,8 +36,11 @@ namespace Glasspage.UnitySync
         private static string _joinCode = string.Empty;
         private static string _guestJoinCode = string.Empty;
         private static double _nextSendTime;
-        private static double _nextSelectionSendTime;
+        private static bool _hasLastViewportState;
+        private static UnitySyncViewportState _lastViewportState;
+        private static bool _hasLastSelectionState;
         private static string _lastSelectionSignature = string.Empty;
+        private static Color _lastSelectionColor = Color.white;
         private static int _fileSyncResumeAttempts;
         private static double _nextFileSyncResumeAttemptTime;
 
@@ -90,7 +92,8 @@ namespace Glasspage.UnitySync
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
-                _nextSelectionSendTime = 0d;
+                _hasLastViewportState = false;
+                _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
@@ -139,7 +142,8 @@ namespace Glasspage.UnitySync
                 _guestJoinCode = joinCode;
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
-                _nextSelectionSendTime = 0d;
+                _hasLastViewportState = false;
+                _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
@@ -170,9 +174,16 @@ namespace Glasspage.UnitySync
 
         internal static void SetLocalColor(Color color)
         {
-            _color = NormalizeColor(color);
+            Color normalizedColor = NormalizeColor(color);
+            if (ColorsEqual(_color, normalizedColor))
+            {
+                return;
+            }
+
+            _color = normalizedColor;
             _nextSendTime = 0d;
-            _nextSelectionSendTime = 0d;
+            _hasLastViewportState = false;
+            _hasLastSelectionState = false;
             _lastSelectionSignature = string.Empty;
         }
 
@@ -401,6 +412,13 @@ namespace Glasspage.UnitySync
                 camera.aspect,
                 camera.orthographic,
                 camera.orthographicSize);
+            if (_hasLastViewportState && ViewportStatesEqual(viewport, _lastViewportState))
+            {
+                return;
+            }
+
+            _lastViewportState = viewport;
+            _hasLastViewportState = true;
             transport.SendLocalViewport(viewport);
         }
 
@@ -419,18 +437,43 @@ namespace Glasspage.UnitySync
 
             objectIds.Sort(StringComparer.Ordinal);
             string signature = string.Join("|", objectIds);
-            double now = EditorApplication.timeSinceStartup;
-            if (signature == _lastSelectionSignature && now < _nextSelectionSendTime)
+            if (_hasLastSelectionState &&
+                signature == _lastSelectionSignature &&
+                ColorsEqual(_color, _lastSelectionColor))
             {
                 return;
             }
 
+            _hasLastSelectionState = true;
             _lastSelectionSignature = signature;
-            _nextSelectionSendTime = now + SelectionHeartbeatSeconds;
+            _lastSelectionColor = _color;
             transport.SendLocalSelection(new UnitySyncSelectionState(
                 LocalPlayerId,
                 _color,
                 objectIds.ToArray()));
+        }
+
+        private static bool ViewportStatesEqual(
+            UnitySyncViewportState left,
+            UnitySyncViewportState right)
+        {
+            return string.Equals(left.DisplayName, right.DisplayName, StringComparison.Ordinal) &&
+                   ColorsEqual(left.Color, right.Color) &&
+                   (left.Position - right.Position).sqrMagnitude <= 0.0000000001f &&
+                   Quaternion.Angle(left.Rotation, right.Rotation) <= 0.0001f &&
+                   (left.Pivot - right.Pivot).sqrMagnitude <= 0.0000000001f &&
+                   Mathf.Approximately(left.FieldOfView, right.FieldOfView) &&
+                   Mathf.Approximately(left.Aspect, right.Aspect) &&
+                   left.Orthographic == right.Orthographic &&
+                   Mathf.Approximately(left.OrthographicSize, right.OrthographicSize);
+        }
+
+        private static bool ColorsEqual(Color left, Color right)
+        {
+            return Mathf.Approximately(left.r, right.r) &&
+                   Mathf.Approximately(left.g, right.g) &&
+                   Mathf.Approximately(left.b, right.b) &&
+                   Mathf.Approximately(left.a, right.a);
         }
 
         private static void StopInternal(bool addLog)
@@ -447,8 +490,9 @@ namespace Glasspage.UnitySync
             UnitySyncSceneSynchronizer.EndSession();
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();
+            _hasLastViewportState = false;
+            _hasLastSelectionState = false;
             _lastSelectionSignature = string.Empty;
-            _nextSelectionSendTime = 0d;
             SceneView.RepaintAll();
 
             if (addLog && transport != null)
