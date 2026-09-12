@@ -830,6 +830,18 @@ namespace Glasspage.UnitySync
                             EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
                             break;
 
+                        case UnitySyncMessageType.ProjectFileBegin:
+                        case UnitySyncMessageType.ProjectFileChunk:
+                        case UnitySyncMessageType.ProjectFileDelete:
+                            if (message.PlayerId == Guid.Empty || message.FileSync == null)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid project file update.");
+                            }
+
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
                         case UnitySyncMessageType.FileSyncRequest:
                         case UnitySyncMessageType.FileRequest:
                             throw new InvalidDataException(
@@ -846,6 +858,16 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueSceneChange(message.PlayerId, message.SceneChange);
+                            break;
+
+                        case UnitySyncMessageType.SceneSettingsChange:
+                            if (message.PlayerId == Guid.Empty || message.SceneSnapshot == null)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent invalid scene settings.");
+                            }
+
+                            EnqueueSceneSettingsChange(message.PlayerId, message.SceneSnapshot);
                             break;
 
                         case UnitySyncMessageType.SceneSnapshotBegin:
@@ -1258,6 +1280,22 @@ namespace Glasspage.UnitySync
             {
                 _events.Enqueue(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSnapshotEnd,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    snapshot));
+            }
+        }
+
+        private void EnqueueSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneSettingsChange,
                     default,
                     null,
                     playerId,
