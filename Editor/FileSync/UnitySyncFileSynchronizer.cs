@@ -728,7 +728,7 @@ namespace Glasspage.UnitySync
 
             if (GuestMismatches.Count == 0)
             {
-                CompleteGuestSync();
+                BeginGuestImport();
                 return;
             }
 
