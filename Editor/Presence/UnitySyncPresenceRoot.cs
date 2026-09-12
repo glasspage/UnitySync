@@ -15,19 +15,34 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal Color Color;
             internal Vector3 Pivot;
-            internal Vector3 TargetPivot;
-            internal Vector3 TargetPosition;
-            internal Quaternion TargetRotation;
             internal float FieldOfView;
             internal float Aspect;
             internal bool Orthographic;
             internal float OrthographicSize;
 
+            private readonly struct TransformSample
+            {
+                internal readonly double Time;
+                internal readonly Vector3 Pivot;
+                internal readonly Vector3 Position;
+                internal readonly Quaternion Rotation;
+
+                internal TransformSample(
+                    double time,
+                    Vector3 pivot,
+                    Vector3 position,
+                    Quaternion rotation)
+                {
+                    Time = time;
+                    Pivot = pivot;
+                    Position = position;
+                    Rotation = rotation;
+                }
+            }
+
+            private readonly List<TransformSample> _transformSamples =
+                new List<TransformSample>(MaximumBufferedTransformSamples);
             private bool _hasTransform;
-            private Vector3 _interpolationStartPivot;
-            private Vector3 _interpolationStartPosition;
-            private Quaternion _interpolationStartRotation;
-            private double _interpolationStartTime;
 
             internal ViewportMarker(GameObject gameObject, string displayName, Color color, bool isDebug)
             {
@@ -44,52 +59,65 @@ namespace Glasspage.UnitySync
             {
                 DisplayName = viewport.DisplayName;
                 Color = viewport.Color;
-                TargetPivot = viewport.Pivot;
-                TargetPosition = viewport.Position;
-                TargetRotation = viewport.Rotation.normalized;
                 FieldOfView = viewport.FieldOfView;
                 Aspect = Mathf.Clamp(viewport.Aspect, 0.1f, 10f);
                 Orthographic = viewport.Orthographic;
                 OrthographicSize = viewport.OrthographicSize;
 
                 GameObject.name = DisplayName + " (Viewport)";
-                Transform transform = GameObject.transform;
+                TransformSample sample = new TransformSample(
+                    EditorApplication.timeSinceStartup,
+                    viewport.Pivot,
+                    viewport.Position,
+                    viewport.Rotation.normalized);
+
                 if (!_hasTransform)
                 {
-                    Pivot = TargetPivot;
-                    transform.SetPositionAndRotation(TargetPosition, TargetRotation);
-                    _interpolationStartPivot = TargetPivot;
-                    _interpolationStartPosition = TargetPosition;
-                    _interpolationStartRotation = TargetRotation;
-                    _interpolationStartTime = EditorApplication.timeSinceStartup;
+                    Pivot = sample.Pivot;
+                    GameObject.transform.SetPositionAndRotation(sample.Position, sample.Rotation);
+                    _transformSamples.Add(sample);
                     _hasTransform = true;
                     return;
                 }
 
-                _interpolationStartPivot = Pivot;
-                _interpolationStartPosition = transform.position;
-                _interpolationStartRotation = transform.rotation;
-                _interpolationStartTime = EditorApplication.timeSinceStartup;
+                _transformSamples.Add(sample);
+                if (_transformSamples.Count > MaximumBufferedTransformSamples)
+                {
+                    _transformSamples.RemoveAt(0);
+                }
             }
 
             internal bool Interpolate(double currentTime)
             {
-                Transform transform = GameObject.transform;
-                float amount = Mathf.Clamp01(
-                    (float)((currentTime - _interpolationStartTime) / TransformInterpolationDuration));
-                Vector3 position = Vector3.Lerp(
-                    _interpolationStartPosition,
-                    TargetPosition,
-                    amount);
-                Quaternion rotation = Quaternion.Slerp(
-                    _interpolationStartRotation,
-                    TargetRotation,
-                    amount);
-                Vector3 pivot = Vector3.Lerp(
-                    _interpolationStartPivot,
-                    TargetPivot,
-                    amount);
+                if (!_hasTransform || _transformSamples.Count == 0)
+                {
+                    return false;
+                }
 
+                double renderTime = currentTime - TransformInterpolationBufferSeconds;
+                while (_transformSamples.Count > 1 &&
+                       _transformSamples[1].Time <= renderTime)
+                {
+                    _transformSamples.RemoveAt(0);
+                }
+
+                TransformSample from = _transformSamples[0];
+                TransformSample to = _transformSamples.Count > 1
+                    ? _transformSamples[1]
+                    : from;
+
+                float amount = 0f;
+                double sampleDuration = to.Time - from.Time;
+                if (sampleDuration > 0.000001d)
+                {
+                    amount = Mathf.Clamp01((float)((renderTime - from.Time) / sampleDuration));
+                }
+
+                Vector3 position = Vector3.Lerp(from.Position, to.Position, amount);
+                Quaternion rotation = Quaternion.Slerp(from.Rotation, to.Rotation, amount);
+                Vector3 pivot = Vector3.Lerp(from.Pivot, to.Pivot, amount);
+
+                Transform transform = GameObject.transform;
                 bool positionChanged = (transform.position - position).sqrMagnitude > 0.00000001f;
                 bool rotationChanged = Quaternion.Angle(transform.rotation, rotation) > 0.01f;
                 bool pivotChanged = (Pivot - pivot).sqrMagnitude > 0.00000001f;
@@ -105,7 +133,8 @@ namespace Glasspage.UnitySync
         }
 
         private const string CollaboratorsContainerName = "Collaborators";
-        private const double TransformInterpolationDuration = 0.1d;
+        private const double TransformInterpolationBufferSeconds = 0.1d;
+        private const int MaximumBufferedTransformSamples = 8;
         private const float DirectionLineOpacityMultiplier = 0.6f;
         private const float ForegroundStrokeWidth = 1f;
         private const float OutlineStrokeWidth = 3f;
