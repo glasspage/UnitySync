@@ -8,13 +8,21 @@ namespace Glasspage.UnitySync
 {
     internal readonly struct UnitySyncRemoteParticipant
     {
+        internal readonly Guid PlayerId;
         internal readonly string DisplayName;
         internal readonly Color Color;
+        internal readonly Guid SpectatingPlayerId;
 
-        internal UnitySyncRemoteParticipant(string displayName, Color color)
+        internal UnitySyncRemoteParticipant(
+            Guid playerId,
+            string displayName,
+            Color color,
+            Guid spectatingPlayerId)
         {
+            PlayerId = playerId;
             DisplayName = displayName;
             Color = color;
+            SpectatingPlayerId = spectatingPlayerId;
         }
     }
 
@@ -32,6 +40,8 @@ namespace Glasspage.UnitySync
             internal float Aspect;
             internal bool Orthographic;
             internal float OrthographicSize;
+            internal float SceneViewSize;
+            internal Guid SpectatingPlayerId;
 
             private readonly struct TransformSample
             {
@@ -66,6 +76,8 @@ namespace Glasspage.UnitySync
                 FieldOfView = 60f;
                 Aspect = 1.777f;
                 OrthographicSize = 5f;
+                SceneViewSize = 10f;
+                SpectatingPlayerId = Guid.Empty;
             }
 
             internal void Apply(UnitySyncViewportState viewport, double sampleTime)
@@ -76,6 +88,8 @@ namespace Glasspage.UnitySync
                 Aspect = Mathf.Clamp(viewport.Aspect, 0.1f, 10f);
                 Orthographic = viewport.Orthographic;
                 OrthographicSize = viewport.OrthographicSize;
+                SceneViewSize = Mathf.Max(0.0001f, viewport.SceneViewSize);
+                SpectatingPlayerId = viewport.SpectatingPlayerId;
 
                 GameObject.name = DisplayName + " (Viewport)";
                 if (sampleTime <= 0d)
@@ -245,6 +259,7 @@ namespace Glasspage.UnitySync
             float aspect = 1.777f;
             bool orthographic = false;
             float orthographicSize = 5f;
+            float sceneViewSize = 10f;
 
             if (camera != null)
             {
@@ -255,6 +270,7 @@ namespace Glasspage.UnitySync
                 aspect = camera.aspect;
                 orthographic = camera.orthographic;
                 orthographicSize = camera.orthographicSize;
+                sceneViewSize = sceneView.size;
             }
 
             UnitySyncViewportState viewport = new UnitySyncViewportState(
@@ -267,7 +283,9 @@ namespace Glasspage.UnitySync
                 fieldOfView,
                 aspect,
                 orthographic,
-                orthographicSize);
+                orthographicSize,
+                sceneViewSize,
+                Guid.Empty);
             ApplyMarker(viewport, true, GetMonotonicSeconds());
             SceneView.RepaintAll();
         }
@@ -334,6 +352,35 @@ namespace Glasspage.UnitySync
             DestroyCollaboratorsContainerIfEmpty();
         }
 
+        internal static bool TryGetViewport(
+            Guid playerId,
+            out UnitySyncViewportState viewport)
+        {
+            if (!Markers.TryGetValue(playerId, out ViewportMarker marker) ||
+                marker.GameObject == null ||
+                marker.IsDebug)
+            {
+                viewport = default;
+                return false;
+            }
+
+            Transform transform = marker.GameObject.transform;
+            viewport = new UnitySyncViewportState(
+                playerId,
+                marker.DisplayName,
+                marker.Color,
+                transform.position,
+                transform.rotation,
+                marker.Pivot,
+                marker.FieldOfView,
+                marker.Aspect,
+                marker.Orthographic,
+                marker.OrthographicSize,
+                marker.SceneViewSize,
+                marker.SpectatingPlayerId);
+            return true;
+        }
+
         internal static UnitySyncRemoteParticipant[] GetParticipants()
         {
             List<UnitySyncRemoteParticipant> participants =
@@ -352,8 +399,10 @@ namespace Glasspage.UnitySync
                 else
                 {
                     participants.Add(new UnitySyncRemoteParticipant(
+                        pair.Key,
                         pair.Value.DisplayName,
-                        pair.Value.Color));
+                        pair.Value.Color,
+                        pair.Value.SpectatingPlayerId));
                 }
             }
 

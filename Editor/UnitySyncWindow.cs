@@ -372,7 +372,36 @@ namespace Glasspage.UnitySync
             UnitySyncRemoteParticipant[] participants = UnitySyncSession.GetRemoteParticipants();
             foreach (UnitySyncRemoteParticipant participant in participants)
             {
+                DrawRemoteParticipant(participant);
+            }
+        }
+
+        private static void DrawRemoteParticipant(UnitySyncRemoteParticipant participant)
+        {
+            bool isSpectating =
+                UnitySyncSession.SpectatingPlayerId == participant.PlayerId;
+            bool canSpectate = UnitySyncSession.CanSpectate(participant.PlayerId);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
                 DrawParticipantLabel(participant.DisplayName, participant.Color);
+
+                using (new EditorGUI.DisabledScope(!isSpectating && !canSpectate))
+                {
+                    if (GUILayout.Button(
+                            isSpectating ? "Stop Spectating" : "Spectate",
+                            GUILayout.Width(110f)))
+                    {
+                        if (isSpectating)
+                        {
+                            UnitySyncSession.StopSpectating();
+                        }
+                        else
+                        {
+                            UnitySyncSession.StartSpectating(participant.PlayerId);
+                        }
+                    }
+                }
             }
         }
 
