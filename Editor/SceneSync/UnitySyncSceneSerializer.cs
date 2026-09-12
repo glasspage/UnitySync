@@ -1454,7 +1454,7 @@ namespace Glasspage.UnitySync
             return AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
                        candidate,
                        out string candidateGuid,
-                       out _) &&
+                       out long _) &&
                    IsBuiltinAssetGuid(candidateGuid);
         }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7
+
+- Select Unity's `long` local-file-ID overload explicitly when validating built-in assets, fixing an ambiguous overload compile error in Unity 2021.3.
+
 ## 0.2.6
 
 - Assign staged object references through Unity's typed `objectReferenceValue` API instead of writing raw instance IDs into serialized PPtrs.
