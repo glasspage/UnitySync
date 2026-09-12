@@ -17,7 +17,7 @@ namespace Glasspage.UnitySync
         {
             UnitySyncVisualOptionsWindow window = GetWindow<UnitySyncVisualOptionsWindow>();
             window.titleContent = new GUIContent("UnitySync Visuals");
-            window.minSize = new Vector2(320f, 170f);
+            window.minSize = new Vector2(320f, 195f);
             window.Show();
         }
 
@@ -60,6 +60,13 @@ namespace Glasspage.UnitySync
                 0f,
                 1f);
             UnitySyncVisualSettings.ContrastIntensity = contrastIntensity;
+
+            bool selectionOutlines = EditorGUILayout.Toggle(
+                new GUIContent(
+                    "Selection Outlines",
+                    "Shows colored outlines around GameObjects selected by remote collaborators."),
+                UnitySyncVisualSettings.SelectionOutlines);
+            UnitySyncVisualSettings.SelectionOutlines = selectionOutlines;
 
             EditorGUILayout.Space(12f);
             if (GUILayout.Button("Reset to Defaults"))
