@@ -18,12 +18,12 @@ namespace Glasspage.UnitySync
         private const string ContrastIntensityPreference = "Glasspage.UnitySync.Visuals.ContrastIntensity";
         private const string SelectionOutlinesPreference = "Glasspage.UnitySync.Visuals.SelectionOutlines";
 
-        internal const UnitySyncViewportLineLength DefaultLineLength = UnitySyncViewportLineLength.Long;
+        internal const UnitySyncViewportLineLength DefaultLineLength = UnitySyncViewportLineLength.Short;
         internal const float DefaultViewportOpacity = 1f;
         internal const float DefaultContrastIntensity = 0.2f;
         internal const bool DefaultSelectionOutlines = true;
-        internal const float ShortLineDistance = 0.45f;
-        internal const float LongLineDistance = 1.15f;
+        internal const float ShortLineDistance = 1.25f;
+        internal const float LongLineDistance = 3f;
 
         internal static event Action Changed;
 
