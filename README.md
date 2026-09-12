@@ -4,6 +4,8 @@ UnitySync is an experimental real-time collaboration add-on for the Unity Editor
 
 Version 0.1 establishes the connection and presence foundation only. A host can create an encrypted session, collaborators can join with a compact code, and everyone can see one another's Scene view camera as temporary gizmos. It does **not** sync scene edits or files yet.
 
+DISCLAIMER: The code in this repository was created with assistance from AI tools. I made the architecture, design and implementation decisions; AI was used to write the code based on them.
+
 ## Install
 
 In Unity, open **Window > Package Manager**, choose **Add package from git URL**, and enter:
