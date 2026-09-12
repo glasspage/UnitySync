@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5
+
+- Preserve validated built-in asset identities locally before synchronized fields are cleared.
+- Resolve reassigned built-in meshes, materials, shaders, and other resources by exact type, GUID, and local file ID.
+- Load known Unity built-in resource paths only as candidates, and reject them unless their persistent identity exactly matches the sender.
+- Keep staged component application atomic when a built-in asset cannot be resolved safely.
+
 ## 0.2.4
 
 - Apply incoming component data to a hidden disposable staging component instead of mutating the live scene component through `SerializedObject`.
