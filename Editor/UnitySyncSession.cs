@@ -19,7 +19,7 @@ namespace Glasspage.UnitySync
     {
         private const double SendIntervalSeconds = 0.1;
         private const double SelectionHeartbeatSeconds = 1.0;
-        private const string PlayerIdPreference = "Glasspage.UnitySync.PlayerId";
+        private const string PlayerIdSessionKey = "Glasspage.UnitySync.PlayerId";
         private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
         private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
@@ -525,14 +525,14 @@ namespace Glasspage.UnitySync
 
         private static Guid LoadOrCreatePlayerId()
         {
-            string stored = EditorPrefs.GetString(PlayerIdPreference, string.Empty);
+            string stored = SessionState.GetString(PlayerIdSessionKey, string.Empty);
             if (Guid.TryParse(stored, out Guid playerId) && playerId != Guid.Empty)
             {
                 return playerId;
             }
 
             playerId = Guid.NewGuid();
-            EditorPrefs.SetString(PlayerIdPreference, playerId.ToString("D"));
+            SessionState.SetString(PlayerIdSessionKey, playerId.ToString("D"));
             return playerId;
         }
 
