@@ -22,6 +22,7 @@ namespace Glasspage.UnitySync
         SceneSnapshotRequest,
         SceneSnapshotBegin,
         SceneSnapshotEnd,
+        SceneSettingsChange,
         Log
     }
 
