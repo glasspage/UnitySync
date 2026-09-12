@@ -108,6 +108,7 @@ namespace Glasspage.UnitySync
 
         internal static void BeginSession()
         {
+            CompleteRemoteTransformInterpolations();
             _active = true;
             _nextFlushTime = 0d;
             _nextSceneSettingsCheckTime = 0d;
