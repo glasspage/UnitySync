@@ -472,7 +472,8 @@ namespace Glasspage.UnitySync
                         return false;
                     }
 
-                    if (!SceneManager.SetActiveScene(scene))
+                    if (!IsSceneCurrentlyActive(scene) &&
+                        !SceneManager.SetActiveScene(scene))
                     {
                         error = "Could not activate scene " + scene.name +
                                 " while applying environment settings.";
@@ -530,10 +531,7 @@ namespace Glasspage.UnitySync
             }
             finally
             {
-                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
-                {
-                    SceneManager.SetActiveScene(previousActiveScene);
-                }
+                RestoreActiveScene(previousActiveScene);
             }
         }
 
