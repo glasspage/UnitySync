@@ -1316,6 +1316,33 @@ namespace Glasspage.UnitySync
                     scene.SkyboxMaterial = ReadObjectReference(reader);
                 }
 
+                scene.AmbientMode = (UnityEngine.Rendering.AmbientMode)reader.ReadInt32();
+                scene.AmbientIntensity = reader.ReadSingle();
+                scene.AmbientLight = ReadColorWithAlpha(reader);
+                scene.AmbientSkyColor = ReadColorWithAlpha(reader);
+                scene.AmbientEquatorColor = ReadColorWithAlpha(reader);
+                scene.AmbientGroundColor = ReadColorWithAlpha(reader);
+                scene.DefaultReflectionMode =
+                    (UnityEngine.Rendering.DefaultReflectionMode)reader.ReadInt32();
+                scene.DefaultReflectionResolution = reader.ReadInt32();
+                scene.ReflectionIntensity = reader.ReadSingle();
+                scene.ReflectionBounces = reader.ReadInt32();
+                if (reader.ReadBoolean())
+                {
+                    scene.CustomReflection = ReadObjectReference(reader);
+                }
+
+                scene.Fog = reader.ReadBoolean();
+                scene.FogColor = ReadColorWithAlpha(reader);
+                scene.FogMode = (FogMode)reader.ReadInt32();
+                scene.FogDensity = reader.ReadSingle();
+                scene.FogStartDistance = reader.ReadSingle();
+                scene.FogEndDistance = reader.ReadSingle();
+                if (reader.ReadBoolean())
+                {
+                    scene.Sun = ReadObjectReference(reader);
+                }
+
                 snapshot.Scenes[index] = scene;
             }
 
