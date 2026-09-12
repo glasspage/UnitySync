@@ -31,7 +31,8 @@ namespace Glasspage.UnitySync
 
         private const double ChangeDebounceSeconds = 0.2d;
         private const double DirtyAssetSaveDelaySeconds = 0.05d;
-        private const double DirtyMaterialScanIntervalSeconds = 0.1d;
+        private const double MaterialSyncDelaySeconds = 1.5d;
+        private const double DirtyMaterialScanIntervalSeconds = 0.25d;
         private const double RemoteEchoSuppressionSeconds = 2.0d;
 
         private static readonly object PendingLock = new object();
@@ -43,6 +44,8 @@ namespace Glasspage.UnitySync
             new Dictionary<string, byte[]>(StringComparer.Ordinal);
         private static readonly Dictionary<int, PendingDirtyAsset> PendingDirtyAssets =
             new Dictionary<int, PendingDirtyAsset>();
+        private static readonly Dictionary<int, string> MaterialEditFingerprints =
+            new Dictionary<int, string>();
         private static readonly Dictionary<Guid, RemoteTransfer> RemoteTransfers =
             new Dictionary<Guid, RemoteTransfer>();
 
@@ -85,6 +88,7 @@ namespace Glasspage.UnitySync
 
             KnownHashes.Clear();
             PendingDirtyAssets.Clear();
+            MaterialEditFingerprints.Clear();
             _nextDirtyMaterialScanTime = 0d;
             foreach (RemoteTransfer transfer in RemoteTransfers.Values)
             {
@@ -165,7 +169,7 @@ namespace Glasspage.UnitySync
                 return modifications;
             }
 
-            double due = GetMonotonicSeconds() + DirtyAssetSaveDelaySeconds;
+            double now = GetMonotonicSeconds();
             foreach (UndoPropertyModification modification in modifications)
             {
                 PropertyModification current = modification.currentValue;
@@ -186,7 +190,10 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                QueueDirtyAsset(target, due);
+                double delay = target is Material
+                    ? MaterialSyncDelaySeconds
+                    : DirtyAssetSaveDelaySeconds;
+                QueueDirtyAsset(target, now + delay);
             }
 
             return modifications;
@@ -212,13 +219,71 @@ namespace Glasspage.UnitySync
 
             _nextDirtyMaterialScanTime = now + DirtyMaterialScanIntervalSeconds;
             Material[] materials = Resources.FindObjectsOfTypeAll<Material>();
-            double due = now + DirtyAssetSaveDelaySeconds;
+            HashSet<int> seen = new HashSet<int>();
             foreach (Material material in materials)
             {
-                if (material != null && EditorUtility.IsDirty(material))
+                if (material == null || !EditorUtility.IsPersistent(material))
                 {
-                    QueueDirtyAsset(material, due);
+                    continue;
                 }
+
+                int instanceId = material.GetInstanceID();
+                seen.Add(instanceId);
+                if (!EditorUtility.IsDirty(material))
+                {
+                    MaterialEditFingerprints.Remove(instanceId);
+                    continue;
+                }
+
+                string path = AssetDatabase.GetAssetPath(material) ?? string.Empty;
+                if (!IsLiveSyncPath(path))
+                {
+                    continue;
+                }
+
+                string fingerprint = GetMaterialEditFingerprint(material);
+                if (MaterialEditFingerprints.TryGetValue(instanceId, out string previous) &&
+                    string.Equals(previous, fingerprint, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                MaterialEditFingerprints[instanceId] = fingerprint;
+                QueueDirtyAsset(material, now + MaterialSyncDelaySeconds);
+            }
+
+            List<int> stale = null;
+            foreach (int instanceId in MaterialEditFingerprints.Keys)
+            {
+                if (seen.Contains(instanceId))
+                {
+                    continue;
+                }
+
+                if (stale == null)
+                {
+                    stale = new List<int>();
+                }
+
+                stale.Add(instanceId);
+            }
+
+            if (stale != null)
+            {
+                foreach (int instanceId in stale)
+                {
+                    MaterialEditFingerprints.Remove(instanceId);
+                }
+            }
+        }
+
+        private static string GetMaterialEditFingerprint(Material material)
+        {
+            string json = EditorJsonUtility.ToJson(material, false);
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json ?? string.Empty);
+                return Convert.ToBase64String(sha.ComputeHash(bytes));
             }
         }
 
