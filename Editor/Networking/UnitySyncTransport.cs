@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -35,6 +36,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly Guid PlayerId;
         internal readonly string Message;
+        internal readonly double ReceivedAtSeconds;
 
         internal UnitySyncTransportEvent(
             UnitySyncTransportEventKind kind,
@@ -45,7 +47,8 @@ namespace Glasspage.UnitySync
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
             UnitySyncSelectionState selection = default,
             UnitySyncMessageType messageType = default(UnitySyncMessageType),
-            UnitySyncFileSyncMessage fileSync = null)
+            UnitySyncFileSyncMessage fileSync = null,
+            double receivedAtSeconds = 0d)
         {
             Kind = kind;
             Viewport = viewport;
@@ -56,6 +59,7 @@ namespace Glasspage.UnitySync
             SceneSnapshot = sceneSnapshot;
             PlayerId = playerId;
             Message = message;
+            ReceivedAtSeconds = receivedAtSeconds;
         }
     }
 
@@ -1041,6 +1045,11 @@ namespace Glasspage.UnitySync
             return IsFinite(value) && value >= 0f && value <= 1f;
         }
 
+        private static double GetMonotonicSeconds()
+        {
+            return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+        }
+
         private void Enqueue(UnitySyncTransportEventKind kind, string message)
         {
             lock (_eventsLock)
@@ -1058,7 +1067,8 @@ namespace Glasspage.UnitySync
                     viewport,
                     null,
                     viewport.PlayerId,
-                    string.Empty));
+                    string.Empty,
+                    receivedAtSeconds: GetMonotonicSeconds()));
             }
         }
 
