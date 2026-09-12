@@ -1,10 +1,9 @@
 # UnitySync
 
-UnitySync is an experimental real-time collaboration add-on for Unity Editor 2021.3+.
+UnitySync is an experimental real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same project with live scene editing, project asset syncing, shared Scene view presence, and spectating.
 
-Version 0.2 adds the first scene-edit synchronization layer. A host can create an encrypted session, collaborators can join with a compact code, everyone can see one another's Scene view camera, and edits to matching scene objects are replicated in real time.
-
-DISCLAIMER: The code in this repository was created with assistance from AI tools. I made the architecture, design and implementation decisions; AI was used to write the code based on them.
+> [!WARNING]
+> UnitySync is *not* considered a fully-functioning add-on yet and issues are expected. ***Use a backup project for testing!***
 
 ## Install
 
@@ -14,65 +13,73 @@ In Unity, open **Window > Package Manager**, choose **Add package from git URL**
 https://github.com/glasspage/UnitySync.git
 ```
 
-This requires Git to be installed.
+Git must be installed on the computer running Unity.
 
-## Connect through Radmin VPN
+After installation, a **UnitySync** menu is added to the top bar of the Unity Editor.
 
-1. Put every collaborator on the same Radmin VPN network.
-2. On the host, open **UnitySync > Session**.
-3. Set **Host address** to the host's Radmin VPN IPv4 address (normally a `26.x.x.x` address), then select **Start Hosting**.
-4. Allow Unity through the private-network firewall prompt if the operating system asks.
-5. Share the generated join code privately.
-6. Collaborators paste it into **Join code** and select **Connect**.
+## Network setup
 
-The host listens on all local interfaces. The address field controls the address embedded in the join code, so it should be the address other collaborators can actually reach.
+UnitySync connects collaborators directly to the host over IPv4.
+[Radmin VPN](https://www.radmin-vpn.com/) is the simplest way to connect users together, but other direct network setups work as well.
 
-When a collaborator connects, the host sends its current loaded-scene state to that collaborator. The host's scene is therefore the starting authority for a session.
+The default port is **47832**.
 
-## What appears in the scene
+## Host a session
 
-While connected, UnitySync creates temporary objects under `[UnitySync] > Collaborators`. Every remote user gets a child GameObject named `Username (Viewport)` with an `EditorOnly` tag and a Scene view camera gizmo. The generated hierarchy uses `DontSaveInEditor` and is removed when the session stops.
+1. Open **UnitySync > Session**.
+2. Set your **Username** and **Color**.
+3. Expand **Host a session**.
+4. Enter an IPv4 address the other collaborators can reach.
+5. Leave the port at **47832**, or choose another available TCP port.
+6. Select **Start Hosting**.
+7. Share the generated join code with your collaborators.
 
-Open **UnitySync > Visual Options** to change the length of remote viewport direction lines, the opacity of viewport indicators, or the intensity of their adaptive contrast outlines. The main UnitySync window also includes a debug foldout that can summon a customizable test viewport without starting a session.
+When using Radmin VPN, the host address should be the host's Radmin VPN IPv4 address.
 
-## Security model
+## Join a session
 
-Every hosted session generates a new random 256-bit secret. The join code contains the advertised IPv4 endpoint, port, and this secret. Network messages use AES-256-CBC encryption with a fresh random IV and HMAC-SHA256 authentication (encrypt-then-MAC).
+1. Open **UnitySync > Session**.
+2. Set your **Username** and **Color**.
+3. Expand **Join a session**.
+4. Paste the host's join code.
+5. Select **Connect**.
 
-Treat a join code like a temporary password: anyone who has it can connect while the host is running. This first version does not provide account identity, a relay, forward secrecy, host approval prompts, NAT traversal, or protection for a join code sent through an insecure chat.
+When someone first joins, UnitySync brings their project and loaded scenes in line with the host before normal collaboration begins. This can involve importing assets or recompiling scripts, so the initial connection may take longer.
 
-## Current scope
+## What it syncs
 
-- Direct host/client TCP networking
-- Multiple clients per host
-- Encrypted and authenticated messages
-- Live username, chosen viewport color, camera position, camera rotation, projection, and Scene view pivot
-- Live transforms, GameObject settings, hierarchy creation/deletion, parenting, and sibling order
-- Serialized settings for Unity and third-party components, including UdonBehaviours, PhysBones, custom MonoBehaviours, scene references, and asset references
-- Component add, remove, and reorder synchronization on existing GameObjects
-- Host-authoritative initial hierarchy snapshots that create missing objects and remove extras
-- Automatic cleanup when peers disconnect or the session stops
+UnitySync synchronizes loaded scene edits and supported project files between connected editors. This includes normal GameObject, Transform, hierarchy, component, and serialized property changes, along with project assets under **Assets** and supported **ProjectSettings** changes.
 
-Not implemented:
+Connected collaborators also appear in the Scene view with colored viewport indicators and can be spectated from the **Collaborators** list.
 
-- Prefab asset editing
-- Asset or file transfer
-- Project settings synchronization
-- Relay servers or internet matchmaking
-- Conflict resolution beyond last received edit wins, or version history
+## Visual options
 
-## Scene hierarchy synchronization
+Open **UnitySync > Visual Options** to adjust collaborator viewport indicators.
 
-UnitySync assigns every synchronized GameObject a session-only ID. It does not add tracking components or save UnitySync IDs into your scenes. When a collaborator joins, the host first sends the full hierarchy and component layout, then sends serialized values and references. This lets scene references resolve even when objects were absent or differently ordered before joining.
+## Security
 
-The host’s loaded scenes are authoritative during that initial snapshot: in matching loaded scenes, UnitySync creates missing non-UnitySync objects and removes extra non-UnitySync objects after a complete snapshot finishes. If any object cannot be serialized or applied safely, it leaves unmatched local objects in place rather than deleting them. It does not open, close, save, or transfer scene files, so collaborators should still open the same scene files and keep them installed locally. UnitySync's temporary `[UnitySync]` hierarchy is always ignored.
+Session traffic is encrypted and authenticated. Keep join codes private.
 
-Component settings are synchronized through Unity's generic editor serialization layer rather than a list of supported component types. Both projects must have the same third-party packages and referenced assets installed. Properties Unity does not expose through `SerializedProperty`, and transient runtime-only state, are not synchronized.
+UnitySync does not currently provide accounts, permissions, host approval prompts, relay servers, matchmaking, or automatic NAT traversal.
+
+## Limitations
+
+- Direct IPv4 connectivity to the host is required.
+- **Packages** and package dependencies are not yet synchronized.
+- Collaborators should use compatible Unity versions, packages, and third-party dependencies.
+- UnitySync does not automatically open, close, or save scenes.
+- There is no merge or conflict-resolution system for simultaneous edits.
 
 ## Troubleshooting
 
-- Confirm everyone can ping the host's Radmin VPN address.
-- Confirm the host used that same address when generating the join code.
-- Allow the Unity Editor through the firewall on private networks.
-- Confirm no other program is using TCP port `47832`, or choose another port before hosting.
-- Generate a fresh code by stopping and starting the host if a code was shared accidentally.
+If someone cannot connect:
+
+- Confirm they can reach the host's chosen IPv4 address.
+- Confirm TCP port **47832** is available, or choose another port.
+- If using a VPN, confirm everyone is connected to the same VPN network.
+
+If synchronization appears incomplete, let any initial asset import or script compilation finish, check the **Activity Log** in **UnitySync > Session**, and confirm everyone has the required packages and dependencies installed.
+
+## AI assistance disclosure
+
+The code in this repository was created with assistance from AI tools. I made the architecture, design and implementation decisions; AI was used to write the code based on them.
