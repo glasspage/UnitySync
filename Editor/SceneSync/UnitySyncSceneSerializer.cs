@@ -221,11 +221,29 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    UnitySyncObjectReferenceState skyboxReference = null;
-                    if (SceneManager.SetActiveScene(scene) &&
-                        TryCaptureObjectReference(RenderSettings.skybox, out skyboxReference))
+                    if (!SceneManager.SetActiveScene(scene))
+                    {
+                        continue;
+                    }
+
+                    TryCaptureObjectReference(RenderSettings.skybox, out UnitySyncObjectReferenceState skyboxReference);
+                    if (skyboxReference != null)
                     {
                         skyboxReference.SerializedPropertyTypeName = "PPtr<Material>";
+                    }
+
+                    TryCaptureObjectReference(
+                        RenderSettings.customReflection,
+                        out UnitySyncObjectReferenceState customReflectionReference);
+                    if (customReflectionReference != null)
+                    {
+                        customReflectionReference.SerializedPropertyTypeName = "PPtr<Cubemap>";
+                    }
+
+                    TryCaptureObjectReference(RenderSettings.sun, out UnitySyncObjectReferenceState sunReference);
+                    if (sunReference != null)
+                    {
+                        sunReference.SerializedPropertyTypeName = "PPtr<Light>";
                     }
 
                     scenes.Add(new UnitySyncSceneDescriptor
@@ -233,7 +251,25 @@ namespace Glasspage.UnitySync
                         ScenePath = scene.path ?? string.Empty,
                         SceneName = scene.name ?? string.Empty,
                         SceneIndex = sceneIndex,
-                        SkyboxMaterial = skyboxReference
+                        SkyboxMaterial = skyboxReference,
+                        AmbientMode = RenderSettings.ambientMode,
+                        AmbientIntensity = RenderSettings.ambientIntensity,
+                        AmbientLight = RenderSettings.ambientLight,
+                        AmbientSkyColor = RenderSettings.ambientSkyColor,
+                        AmbientEquatorColor = RenderSettings.ambientEquatorColor,
+                        AmbientGroundColor = RenderSettings.ambientGroundColor,
+                        DefaultReflectionMode = RenderSettings.defaultReflectionMode,
+                        DefaultReflectionResolution = RenderSettings.defaultReflectionResolution,
+                        ReflectionIntensity = RenderSettings.reflectionIntensity,
+                        ReflectionBounces = RenderSettings.reflectionBounces,
+                        CustomReflection = customReflectionReference,
+                        Fog = RenderSettings.fog,
+                        FogColor = RenderSettings.fogColor,
+                        FogMode = RenderSettings.fogMode,
+                        FogDensity = RenderSettings.fogDensity,
+                        FogStartDistance = RenderSettings.fogStartDistance,
+                        FogEndDistance = RenderSettings.fogEndDistance,
+                        Sun = sunReference
                     });
                 }
             }
@@ -275,11 +311,6 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    if (descriptor.SkyboxMaterial == null)
-                    {
-                        continue;
-                    }
-
                     if (!SceneManager.SetActiveScene(scene))
                     {
                         error = "Could not activate scene " + scene.name +
@@ -297,12 +328,46 @@ namespace Glasspage.UnitySync
                         return false;
                     }
 
-                    Material skybox = skyboxObject as Material;
-                    if (RenderSettings.skybox != skybox)
+                    if (!TryResolveObjectReference(
+                            descriptor.CustomReflection,
+                            out Object reflectionObject) ||
+                        (reflectionObject != null && !(reflectionObject is Cubemap)))
                     {
-                        RenderSettings.skybox = skybox;
-                        EditorSceneManager.MarkSceneDirty(scene);
+                        error = "The custom reflection for scene " + scene.name +
+                                " could not be resolved.";
+                        return false;
                     }
+
+                    if (!TryResolveObjectReference(
+                            descriptor.Sun,
+                            out Object sunObject) ||
+                        (sunObject != null && !(sunObject is Light)))
+                    {
+                        error = "The sun light for scene " + scene.name +
+                                " could not be resolved.";
+                        return false;
+                    }
+
+                    RenderSettings.skybox = skyboxObject as Material;
+                    RenderSettings.ambientMode = descriptor.AmbientMode;
+                    RenderSettings.ambientIntensity = descriptor.AmbientIntensity;
+                    RenderSettings.ambientLight = descriptor.AmbientLight;
+                    RenderSettings.ambientSkyColor = descriptor.AmbientSkyColor;
+                    RenderSettings.ambientEquatorColor = descriptor.AmbientEquatorColor;
+                    RenderSettings.ambientGroundColor = descriptor.AmbientGroundColor;
+                    RenderSettings.defaultReflectionMode = descriptor.DefaultReflectionMode;
+                    RenderSettings.defaultReflectionResolution = descriptor.DefaultReflectionResolution;
+                    RenderSettings.reflectionIntensity = descriptor.ReflectionIntensity;
+                    RenderSettings.reflectionBounces = descriptor.ReflectionBounces;
+                    RenderSettings.customReflection = reflectionObject as Cubemap;
+                    RenderSettings.fog = descriptor.Fog;
+                    RenderSettings.fogColor = descriptor.FogColor;
+                    RenderSettings.fogMode = descriptor.FogMode;
+                    RenderSettings.fogDensity = descriptor.FogDensity;
+                    RenderSettings.fogStartDistance = descriptor.FogStartDistance;
+                    RenderSettings.fogEndDistance = descriptor.FogEndDistance;
+                    RenderSettings.sun = sunObject as Light;
+                    EditorSceneManager.MarkSceneDirty(scene);
                 }
 
                 return true;
@@ -314,6 +379,72 @@ namespace Glasspage.UnitySync
                     SceneManager.SetActiveScene(previousActiveScene);
                 }
             }
+        }
+
+        internal static string GetSceneSettingsSignature()
+        {
+            UnitySyncSceneDescriptor[] scenes = GetLoadedSceneDescriptors();
+            using (MemoryStream stream = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(stream))
+            using (SHA256 sha = SHA256.Create())
+            {
+                foreach (UnitySyncSceneDescriptor scene in scenes)
+                {
+                    writer.Write(scene.ScenePath ?? string.Empty);
+                    writer.Write(scene.SceneName ?? string.Empty);
+                    writer.Write(scene.SceneIndex);
+                    writer.Write((int)scene.AmbientMode);
+                    writer.Write(scene.AmbientIntensity);
+                    WriteSignatureColor(writer, scene.AmbientLight);
+                    WriteSignatureColor(writer, scene.AmbientSkyColor);
+                    WriteSignatureColor(writer, scene.AmbientEquatorColor);
+                    WriteSignatureColor(writer, scene.AmbientGroundColor);
+                    writer.Write((int)scene.DefaultReflectionMode);
+                    writer.Write(scene.DefaultReflectionResolution);
+                    writer.Write(scene.ReflectionIntensity);
+                    writer.Write(scene.ReflectionBounces);
+                    writer.Write(scene.Fog);
+                    WriteSignatureColor(writer, scene.FogColor);
+                    writer.Write((int)scene.FogMode);
+                    writer.Write(scene.FogDensity);
+                    writer.Write(scene.FogStartDistance);
+                    writer.Write(scene.FogEndDistance);
+                    WriteSignatureReference(writer, scene.SkyboxMaterial);
+                    WriteSignatureReference(writer, scene.CustomReflection);
+                    WriteSignatureReference(writer, scene.Sun);
+                }
+
+                writer.Flush();
+                return Convert.ToBase64String(sha.ComputeHash(stream.ToArray()));
+            }
+        }
+
+        private static void WriteSignatureColor(BinaryWriter writer, Color color)
+        {
+            writer.Write(color.r);
+            writer.Write(color.g);
+            writer.Write(color.b);
+            writer.Write(color.a);
+        }
+
+        private static void WriteSignatureReference(
+            BinaryWriter writer,
+            UnitySyncObjectReferenceState reference)
+        {
+            if (reference == null)
+            {
+                writer.Write((byte)255);
+                return;
+            }
+
+            writer.Write((byte)reference.Kind);
+            writer.Write(reference.AssetGuid ?? string.Empty);
+            writer.Write(reference.AssetPath ?? string.Empty);
+            writer.Write(reference.LocalFileId);
+            writer.Write(reference.SceneObject != null
+                ? reference.SceneObject.ObjectId ?? string.Empty
+                : string.Empty);
+            writer.Write(reference.ComponentIndex);
         }
 
         internal static bool Apply(UnitySyncSceneObjectChange change, out string error)
