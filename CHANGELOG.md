@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1
+
+- Include each loaded scene's RenderSettings skybox material in the host scene snapshot and reapply it on guests after the object snapshot completes.
+- Reimport newly synchronized dependency assets before materials so textures, shaders, and imported assets are available when material state is rebuilt.
+- Force-reimport all project materials under Assets after file synchronization, covering cases where a material file already hash-matched but one of its referenced asset .meta files changed.
+- Keep SerializedUdonPrograms excluded from the additional dependency/material reimport pass.
+- Bump the UnitySync wire protocol to version 11 for the new per-scene skybox reference.
+
 ## 0.4.0
 
 - Add the first host-to-guest project file synchronization pass. Guests now reconcile host files before requesting the initial scene snapshot.
