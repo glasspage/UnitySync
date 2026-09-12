@@ -55,7 +55,22 @@ namespace Glasspage.UnitySync
                 new HashSet<string>(StringComparer.Ordinal);
         }
 
+        private sealed class RemoteTransformInterpolation
+        {
+            internal Transform Transform;
+            internal Vector3 FromPosition;
+            internal Quaternion FromRotation;
+            internal Vector3 FromScale;
+            internal Vector3 ToPosition;
+            internal Quaternion ToRotation;
+            internal Vector3 ToScale;
+            internal double StartTime;
+        }
+
         private const double FlushIntervalSeconds = 0.05;
+        private const double TransformSyncIntervalSeconds = 0.1;
+        private const double OtherSyncIntervalSeconds = 1.0;
+        private const double TransformInterpolationSeconds = 0.1;
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
@@ -65,6 +80,10 @@ namespace Glasspage.UnitySync
             new Dictionary<string, PendingChange>();
         private static readonly Dictionary<string, string> KnownHashes =
             new Dictionary<string, string>();
+        private static readonly Dictionary<string, double> NextAllowedSendTimes =
+            new Dictionary<string, double>();
+        private static readonly Dictionary<string, RemoteTransformInterpolation> RemoteTransformInterpolations =
+            new Dictionary<string, RemoteTransformInterpolation>();
         private static readonly Queue<HierarchyBatch> HierarchyBatches =
             new Queue<HierarchyBatch>();
         private static readonly HashSet<int> BatchedObjectInstanceIds =
@@ -84,6 +103,7 @@ namespace Glasspage.UnitySync
             ObjectChangeEvents.changesPublished += OnChangesPublished;
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
             EditorSceneManager.sceneSaved += OnSceneSaved;
+            EditorApplication.update += UpdateRemoteTransformInterpolations;
         }
 
         internal static void BeginSession()
@@ -96,6 +116,8 @@ namespace Glasspage.UnitySync
             _pendingSceneSettingsSignature = string.Empty;
             Pending.Clear();
             KnownHashes.Clear();
+            NextAllowedSendTimes.Clear();
+            RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             _remoteSnapshot = null;
@@ -105,12 +127,15 @@ namespace Glasspage.UnitySync
         internal static void EndSession()
         {
             _active = false;
+            CompleteRemoteTransformInterpolations();
             _knownSceneSettingsSignature = string.Empty;
             _pendingSceneSettingsSignature = string.Empty;
             _nextSceneSettingsCheckTime = 0d;
             _sceneSettingsSendAfterTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
+            NextAllowedSendTimes.Clear();
+            RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             _remoteSnapshot = null;
@@ -273,7 +298,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            FlushPendingChanges(transport, localPlayerId);
+            FlushPendingChanges(transport, localPlayerId, now);
         }
 
         internal static bool ApplyRemoteSceneSettings(
@@ -386,6 +411,17 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            bool interpolateTransform = TryGetLiveTransform(change, out Transform transform);
+            Vector3 fromPosition = default;
+            Quaternion fromRotation = default;
+            Vector3 fromScale = default;
+            if (interpolateTransform)
+            {
+                fromPosition = transform.localPosition;
+                fromRotation = transform.localRotation;
+                fromScale = transform.localScale;
+            }
+
             _applyingRemoteChange = true;
             try
             {
@@ -407,7 +443,23 @@ namespace Glasspage.UnitySync
                     _remoteSnapshot.RepresentedObjectIds.Add(change.Address.ObjectId);
                 }
 
+                // Remember the final remote state before rewinding a live Transform for
+                // interpolation so echo suppression compares against the real target state.
                 RememberAppliedState(change);
+
+                if (interpolateTransform && transform != null)
+                {
+                    BeginRemoteTransformInterpolation(
+                        change.Address.ObjectId,
+                        transform,
+                        fromPosition,
+                        fromRotation,
+                        fromScale,
+                        transform.localPosition,
+                        transform.localRotation,
+                        transform.localScale);
+                }
+
                 return true;
             }
             catch (Exception exception)
@@ -424,6 +476,201 @@ namespace Glasspage.UnitySync
             {
                 _applyingRemoteChange = false;
             }
+        }
+
+        private static bool TryGetLiveTransform(
+            UnitySyncSceneObjectChange change,
+            out Transform transform)
+        {
+            transform = null;
+            if (change == null ||
+                change.Address == null ||
+                change.SnapshotId != Guid.Empty ||
+                change.Kind != UnitySyncSceneChangeKind.Upsert ||
+                change.HierarchyOnly ||
+                change.ReconcileComponents ||
+                change.GameObject != null ||
+                change.Components == null ||
+                change.Components.Length != 1 ||
+                change.Components[0] == null)
+            {
+                return false;
+            }
+
+            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(change.Address);
+            if (gameObject == null)
+            {
+                return false;
+            }
+
+            int componentIndex = change.Components[0].ComponentIndex;
+            Component[] components = gameObject.GetComponents<Component>();
+            if (componentIndex < 0 || componentIndex >= components.Length)
+            {
+                return false;
+            }
+
+            transform = components[componentIndex] as Transform;
+            return transform != null;
+        }
+
+        private static void BeginRemoteTransformInterpolation(
+            string objectId,
+            Transform transform,
+            Vector3 fromPosition,
+            Quaternion fromRotation,
+            Vector3 fromScale,
+            Vector3 toPosition,
+            Quaternion toRotation,
+            Vector3 toScale)
+        {
+            if (string.IsNullOrEmpty(objectId) || transform == null)
+            {
+                return;
+            }
+
+            bool positionChanged = (fromPosition - toPosition).sqrMagnitude > 0.0000000001f;
+            bool rotationChanged = Quaternion.Angle(fromRotation, toRotation) > 0.0001f;
+            bool scaleChanged = (fromScale - toScale).sqrMagnitude > 0.0000000001f;
+            if (!positionChanged && !rotationChanged && !scaleChanged)
+            {
+                RemoteTransformInterpolations.Remove(objectId);
+                return;
+            }
+
+            RemoteTransformInterpolations[objectId] = new RemoteTransformInterpolation
+            {
+                Transform = transform,
+                FromPosition = fromPosition,
+                FromRotation = fromRotation,
+                FromScale = fromScale,
+                ToPosition = toPosition,
+                ToRotation = toRotation,
+                ToScale = toScale,
+                StartTime = EditorApplication.timeSinceStartup
+            };
+
+            transform.localPosition = fromPosition;
+            transform.localRotation = fromRotation;
+            transform.localScale = fromScale;
+            EditorApplication.QueuePlayerLoopUpdate();
+        }
+
+        private static void UpdateRemoteTransformInterpolations()
+        {
+            if (!_active || _applyingRemoteChange || RemoteTransformInterpolations.Count == 0)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            List<string> completed = null;
+            bool changed = false;
+            bool previousApplyingRemoteChange = _applyingRemoteChange;
+            _applyingRemoteChange = true;
+            try
+            {
+                foreach (KeyValuePair<string, RemoteTransformInterpolation> pair in
+                         RemoteTransformInterpolations)
+                {
+                    RemoteTransformInterpolation interpolation = pair.Value;
+                    Transform target = interpolation.Transform;
+                    if (target == null)
+                    {
+                        if (completed == null)
+                        {
+                            completed = new List<string>();
+                        }
+
+                        completed.Add(pair.Key);
+                        continue;
+                    }
+
+                    float amount = Mathf.Clamp01(
+                        (float)((now - interpolation.StartTime) / TransformInterpolationSeconds));
+                    target.localPosition = Vector3.Lerp(
+                        interpolation.FromPosition,
+                        interpolation.ToPosition,
+                        amount);
+                    target.localRotation = Quaternion.Lerp(
+                        interpolation.FromRotation,
+                        interpolation.ToRotation,
+                        amount);
+                    target.localScale = Vector3.Lerp(
+                        interpolation.FromScale,
+                        interpolation.ToScale,
+                        amount);
+                    changed = true;
+
+                    if (amount >= 1f)
+                    {
+                        if (completed == null)
+                        {
+                            completed = new List<string>();
+                        }
+
+                        completed.Add(pair.Key);
+                    }
+                }
+            }
+            finally
+            {
+                _applyingRemoteChange = previousApplyingRemoteChange;
+            }
+
+            if (completed != null)
+            {
+                foreach (string objectId in completed)
+                {
+                    RemoteTransformInterpolations.Remove(objectId);
+                }
+            }
+
+            if (changed)
+            {
+                EditorApplication.QueuePlayerLoopUpdate();
+                SceneView.RepaintAll();
+            }
+        }
+
+        private static void CompleteRemoteTransformInterpolations()
+        {
+            if (RemoteTransformInterpolations.Count == 0)
+            {
+                return;
+            }
+
+            bool previousApplyingRemoteChange = _applyingRemoteChange;
+            _applyingRemoteChange = true;
+            try
+            {
+                foreach (RemoteTransformInterpolation interpolation in
+                         RemoteTransformInterpolations.Values)
+                {
+                    Transform target = interpolation.Transform;
+                    if (target == null)
+                    {
+                        continue;
+                    }
+
+                    target.localPosition = interpolation.ToPosition;
+                    target.localRotation = interpolation.ToRotation;
+                    target.localScale = interpolation.ToScale;
+                }
+            }
+            finally
+            {
+                _applyingRemoteChange = previousApplyingRemoteChange;
+                RemoteTransformInterpolations.Clear();
+            }
+        }
+
+        private static bool IsRemoteTransformInterpolating(GameObject gameObject)
+        {
+            return gameObject != null &&
+                   UnitySyncSceneObjectRegistry.TryGetId(gameObject, out string objectId) &&
+                   !string.IsNullOrEmpty(objectId) &&
+                   RemoteTransformInterpolations.ContainsKey(objectId);
         }
 
         private static void OnChangesPublished(ref ObjectChangeEventStream stream)
@@ -495,6 +742,11 @@ namespace Glasspage.UnitySync
             }
 
             if (!(changedObject is Component component) || component == null)
+            {
+                return;
+            }
+
+            if (component is Transform && IsRemoteTransformInterpolating(component.gameObject))
             {
                 return;
             }
@@ -722,7 +974,30 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static void FlushPendingChanges(UnitySyncTransport transport, Guid localPlayerId)
+        private static bool IsTransformPending(PendingChange pending)
+        {
+            if (pending == null || pending.Kind != PendingKind.Component)
+            {
+                return false;
+            }
+
+            GameObject gameObject =
+                EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
+            if (gameObject == null)
+            {
+                return false;
+            }
+
+            Component[] components = gameObject.GetComponents<Component>();
+            return pending.ComponentIndex >= 0 &&
+                   pending.ComponentIndex < components.Length &&
+                   components[pending.ComponentIndex] is Transform;
+        }
+
+        private static void FlushPendingChanges(
+            UnitySyncTransport transport,
+            Guid localPlayerId,
+            double now)
         {
             if (Pending.Count == 0)
             {
@@ -730,11 +1005,21 @@ namespace Glasspage.UnitySync
             }
 
             List<string> keys = new List<string>(Pending.Keys);
-            int count = Mathf.Min(MaximumChangesPerUpdate, keys.Count);
-            for (int index = 0; index < count; index++)
+            int sent = 0;
+            for (int index = 0; index < keys.Count && sent < MaximumChangesPerUpdate; index++)
             {
                 string pendingKey = keys[index];
                 if (!Pending.TryGetValue(pendingKey, out PendingChange pending))
+                {
+                    continue;
+                }
+
+                bool isTransform = IsTransformPending(pending);
+                double interval = isTransform
+                    ? TransformSyncIntervalSeconds
+                    : OtherSyncIntervalSeconds;
+                if (NextAllowedSendTimes.TryGetValue(pendingKey, out double nextAllowedSendTime) &&
+                    now < nextAllowedSendTime)
                 {
                     continue;
                 }
@@ -765,6 +1050,8 @@ namespace Glasspage.UnitySync
                 }
 
                 transport.SendSceneObjectChange(localPlayerId, change);
+                NextAllowedSendTimes[pendingKey] = now + interval;
+                sent++;
             }
         }
 
