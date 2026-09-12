@@ -26,7 +26,8 @@ namespace Glasspage.UnitySync
             internal readonly HashSet<int> RendererIds = new HashSet<int>();
         }
 
-        private const float RingWidthPixels = 2f;
+        private const float BaseOutlinePixels = 2f;
+        private const float StackedOutlinePixels = 1f;
         private const int MaskSupersample = 2;
         private const int SupersamplePixelLimit = 2560 * 1440;
 
@@ -267,8 +268,14 @@ namespace Glasspage.UnitySync
         {
             RenderMask(camera, batch.Renderers);
 
-            int innerRadius = Mathf.RoundToInt(batch.RingIndex * RingWidthPixels);
-            int outerRadius = Mathf.RoundToInt((batch.RingIndex + 1) * RingWidthPixels);
+            int innerRadius = batch.RingIndex <= 0
+                ? 0
+                : Mathf.RoundToInt(
+                    BaseOutlinePixels + (batch.RingIndex - 1) * StackedOutlinePixels);
+            int outerRadius = batch.RingIndex <= 0
+                ? Mathf.RoundToInt(BaseOutlinePixels)
+                : Mathf.RoundToInt(
+                    BaseOutlinePixels + batch.RingIndex * StackedOutlinePixels);
 
             Dilate(_mask, _outerHorizontal, _outer, outerRadius);
             RenderTexture innerTexture;
