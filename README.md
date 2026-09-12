@@ -19,7 +19,7 @@ After installation, UnitySync adds a **UnitySync** menu to the Unity Editor.
 
 ## Network setup
 
-UnitySync connects collaborators directly to the host over IPv4. Everyone must be able to reach the host through the same local network, a VPN such as Radmin VPN, or another direct network setup.
+UnitySync connects collaborators directly to the host over IPv4. Everyone must be able to reach the host through the same local network, a VPN such as Radmin VPN (recommended), or another direct network setup.
 
 The default port is **47832**.
 
@@ -81,4 +81,4 @@ If synchronization appears incomplete, let any initial asset import or script co
 
 ## AI assistance disclosure
 
-The code in this repository was created with assistance from AI tools. The project architecture, design, and implementation decisions are made by the project author; AI tools are used to help write code based on those decisions.
+The code in this repository was created with assistance from AI tools. I made the architecture, design and implementation decisions; AI was used to write the code based on them.
