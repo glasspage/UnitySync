@@ -286,10 +286,15 @@ namespace Glasspage.UnitySync
                 renderSettings,
                 "m_SkyboxMaterial",
                 RenderSettings.skybox);
-            Object reflectionValue = GetObjectReference(
-                renderSettings,
-                "m_CustomReflection",
-                RenderSettings.customReflection);
+            UnityEngine.Rendering.DefaultReflectionMode reflectionMode =
+                (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
+                    renderSettings,
+                    "m_DefaultReflectionMode",
+                    (int)RenderSettings.defaultReflectionMode);
+            Object reflectionValue = reflectionMode ==
+                    UnityEngine.Rendering.DefaultReflectionMode.Custom
+                ? GetObjectReference(renderSettings, "m_CustomReflection", null)
+                : null;
             Object sunValue = GetObjectReference(
                 renderSettings,
                 "m_Sun",
@@ -348,10 +353,7 @@ namespace Glasspage.UnitySync
                     renderSettings,
                     "m_AmbientGroundColor",
                     RenderSettings.ambientGroundColor),
-                DefaultReflectionMode = (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
-                    renderSettings,
-                    "m_DefaultReflectionMode",
-                    (int)RenderSettings.defaultReflectionMode),
+                DefaultReflectionMode = reflectionMode,
                 DefaultReflectionResolution = GetInt(
                     renderSettings,
                     "m_DefaultReflectionResolution",
@@ -556,13 +558,18 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            if (!TryResolveObjectReference(
-                    descriptor.CustomReflection,
-                    out Object reflectionObject) ||
-                (reflectionObject != null && !(reflectionObject is Cubemap)))
+            Object reflectionObject = null;
+            if (descriptor.DefaultReflectionMode ==
+                UnityEngine.Rendering.DefaultReflectionMode.Custom)
             {
-                error = "The custom reflection Cubemap could not be resolved.";
-                return false;
+                if (!TryResolveObjectReference(
+                        descriptor.CustomReflection,
+                        out reflectionObject) ||
+                    (reflectionObject != null && !(reflectionObject is Cubemap)))
+                {
+                    error = "The custom reflection Cubemap could not be resolved.";
+                    return false;
+                }
             }
 
             if (!TryResolveObjectReference(
@@ -674,13 +681,19 @@ namespace Glasspage.UnitySync
                     out error) ||
                 !SetRequiredObjectReference(
                     renderSettings,
-                    "m_CustomReflection",
-                    customReflection,
-                    out error) ||
-                !SetRequiredObjectReference(
-                    renderSettings,
                     "m_Sun",
                     sun,
+                    out error))
+            {
+                return false;
+            }
+
+            if (descriptor.DefaultReflectionMode ==
+                    UnityEngine.Rendering.DefaultReflectionMode.Custom &&
+                !SetRequiredObjectReference(
+                    renderSettings,
+                    "m_CustomReflection",
+                    customReflection,
                     out error))
             {
                 return false;
@@ -709,7 +722,8 @@ namespace Glasspage.UnitySync
             RenderSettings.fogStartDistance = descriptor.FogStartDistance;
             RenderSettings.fogEndDistance = descriptor.FogEndDistance;
             RenderSettings.skybox = skyboxMaterial;
-            RenderSettings.customReflection = customReflection;
+            // Custom reflection is applied through the serialized m_CustomReflection field.
+            // Avoid the public property because Unity throws when its hidden value is not a Cubemap.
             RenderSettings.sun = sun;
 
             return true;
@@ -810,7 +824,9 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            if (GetObjectReference(renderSettings, "m_CustomReflection", null) != customReflection)
+            if (descriptor.DefaultReflectionMode ==
+                    UnityEngine.Rendering.DefaultReflectionMode.Custom &&
+                GetObjectReference(renderSettings, "m_CustomReflection", null) != customReflection)
             {
                 error = "Custom Reflection did not update.";
                 return false;
@@ -1198,10 +1214,12 @@ namespace Glasspage.UnitySync
                     "m_Sun",
                     RenderSettings.sun));
 
-            writer.Write(GetInt(
-                renderSettings,
-                "m_DefaultReflectionMode",
-                (int)RenderSettings.defaultReflectionMode));
+            UnityEngine.Rendering.DefaultReflectionMode fingerprintReflectionMode =
+                (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
+                    renderSettings,
+                    "m_DefaultReflectionMode",
+                    (int)RenderSettings.defaultReflectionMode);
+            writer.Write((int)fingerprintReflectionMode);
             writer.Write(GetInt(
                 renderSettings,
                 "m_DefaultReflectionResolution",
@@ -1216,10 +1234,10 @@ namespace Glasspage.UnitySync
                 RenderSettings.reflectionBounces));
             WriteRenderSettingsObjectFingerprint(
                 writer,
-                GetObjectReference(
-                    renderSettings,
-                    "m_CustomReflection",
-                    RenderSettings.customReflection));
+                fingerprintReflectionMode ==
+                    UnityEngine.Rendering.DefaultReflectionMode.Custom
+                    ? GetObjectReference(renderSettings, "m_CustomReflection", null)
+                    : null);
         }
 
         private static void WriteRenderSettingsObjectFingerprint(
