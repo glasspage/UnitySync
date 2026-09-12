@@ -5,6 +5,7 @@ Shader "Hidden/Glasspage/UnitySync/SelectionComposite"
         _MainTex ("Outer Mask", 2D) = "black" {}
         _InnerTex ("Inner Mask", 2D) = "black" {}
         _OutlineColor ("Outline Color", Color) = (1, 1, 1, 1)
+        _FlipY ("Flip Y", Float) = 0
     }
 
     SubShader
@@ -25,11 +26,18 @@ Shader "Hidden/Glasspage/UnitySync/SelectionComposite"
             sampler2D _MainTex;
             sampler2D _InnerTex;
             fixed4 _OutlineColor;
+            float _FlipY;
 
             fixed4 frag(v2f_img input) : SV_Target
             {
-                float outerMask = tex2D(_MainTex, input.uv).r;
-                float innerMask = tex2D(_InnerTex, input.uv).r;
+                float2 uv = input.uv;
+                if (_FlipY > 0.5)
+                {
+                    uv.y = 1.0 - uv.y;
+                }
+
+                float outerMask = tex2D(_MainTex, uv).r;
+                float innerMask = tex2D(_InnerTex, uv).r;
                 float ring = saturate(outerMask - innerMask);
                 return fixed4(_OutlineColor.rgb, ring * _OutlineColor.a);
             }
