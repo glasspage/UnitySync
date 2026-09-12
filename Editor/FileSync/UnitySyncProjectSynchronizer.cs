@@ -31,7 +31,7 @@ namespace Glasspage.UnitySync
 
         private const double ChangeDebounceSeconds = 0.2d;
         private const double DirtyAssetSaveDelaySeconds = 0.05d;
-        private const double MaterialSyncDelaySeconds = 1.5d;
+        private const double MaterialSyncDelaySeconds = 1.0d;
         private const double DirtyMaterialScanIntervalSeconds = 0.25d;
         private const double RemoteEchoSuppressionSeconds = 2.0d;
 
