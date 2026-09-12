@@ -554,8 +554,12 @@ namespace Glasspage.UnitySync
                 labelSize.x,
                 labelSize.y);
 
-            _labelOutlineStyle.normal.textColor = CalculateOutlineColor(marker.Color, opacity);
-            _labelStyle.normal.textColor = WithAlpha(marker.Color, opacity);
+            SetLabelTextColor(
+                _labelOutlineStyle,
+                CalculateOutlineColor(marker.Color, opacity));
+            SetLabelTextColor(
+                _labelStyle,
+                WithAlpha(marker.Color, opacity));
 
             Handles.BeginGUI();
             foreach (Vector2 offset in LabelOutlineOffsets)
@@ -585,6 +589,18 @@ namespace Glasspage.UnitySync
                 fontStyle = FontStyle.Bold
             };
             _labelOutlineStyle = new GUIStyle(_labelStyle);
+        }
+
+        private static void SetLabelTextColor(GUIStyle style, Color color)
+        {
+            style.normal.textColor = color;
+            style.hover.textColor = color;
+            style.active.textColor = color;
+            style.focused.textColor = color;
+            style.onNormal.textColor = color;
+            style.onHover.textColor = color;
+            style.onActive.textColor = color;
+            style.onFocused.textColor = color;
         }
 
         private static Color WithAlpha(Color color, float alpha)
