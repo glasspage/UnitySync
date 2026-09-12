@@ -7,6 +7,7 @@
 - Added host-authoritative scene snapshots when a collaborator joins.
 - Added component add, remove, and reorder replication on existing GameObjects.
 - Excluded UnitySync's temporary hierarchy from scene addressing and synchronization.
+- Protected Unity's internal Transform hierarchy references from serialization and remote application.
 
 ## 0.1.2
 

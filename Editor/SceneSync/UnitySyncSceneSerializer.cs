@@ -269,9 +269,12 @@ namespace Glasspage.UnitySync
             serializedObject.UpdateIfRequiredOrScript();
             SerializedProperty iterator = serializedObject.GetIterator();
             List<UnitySyncSerializedPropertyState> properties = new List<UnitySyncSerializedPropertyState>();
-            while (iterator.Next(true))
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
             {
-                if (IgnoredPropertyPaths.Contains(iterator.propertyPath) || !iterator.editable)
+                bool ignored = IsIgnoredPropertyPath(iterator.propertyPath);
+                enterChildren = !ignored;
+                if (ignored || !iterator.editable)
                 {
                     continue;
                 }
@@ -584,6 +587,11 @@ namespace Glasspage.UnitySync
 
             foreach (UnitySyncSerializedPropertyState propertyState in state.Properties)
             {
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                {
+                    continue;
+                }
+
                 if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
                     propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
                 {
@@ -602,6 +610,11 @@ namespace Glasspage.UnitySync
 
             foreach (UnitySyncSerializedPropertyState propertyState in state.Properties)
             {
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                {
+                    continue;
+                }
+
                 if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
                     propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference)
                 {
@@ -1180,6 +1193,25 @@ namespace Glasspage.UnitySync
         private static bool HasIntegers(UnitySyncSerializedPropertyState state, int count)
         {
             return state.IntegerValues != null && state.IntegerValues.Length == count;
+        }
+
+        private static bool IsIgnoredPropertyPath(string propertyPath)
+        {
+            if (string.IsNullOrEmpty(propertyPath))
+            {
+                return true;
+            }
+
+            foreach (string ignoredPath in IgnoredPropertyPaths)
+            {
+                if (propertyPath == ignoredPath ||
+                    propertyPath.StartsWith(ignoredPath + ".", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static float[] ToArray(Color value)
