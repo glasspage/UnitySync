@@ -5,11 +5,18 @@ using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace Glasspage.UnitySync
 {
     internal static class UnitySyncProjectSynchronizer
     {
+        private sealed class PendingDirtyAsset
+        {
+            internal Object Asset;
+            internal double DueTime;
+        }
+
         private sealed class RemoteTransfer
         {
             internal Guid PlayerId;
@@ -23,6 +30,8 @@ namespace Glasspage.UnitySync
         }
 
         private const double ChangeDebounceSeconds = 0.2d;
+        private const double DirtyAssetSaveDelaySeconds = 0.05d;
+        private const double DirtyMaterialScanIntervalSeconds = 0.1d;
         private const double RemoteEchoSuppressionSeconds = 2.0d;
 
         private static readonly object PendingLock = new object();
@@ -32,6 +41,8 @@ namespace Glasspage.UnitySync
             new Dictionary<string, double>(StringComparer.Ordinal);
         private static readonly Dictionary<string, byte[]> KnownHashes =
             new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        private static readonly Dictionary<int, PendingDirtyAsset> PendingDirtyAssets =
+            new Dictionary<int, PendingDirtyAsset>();
         private static readonly Dictionary<Guid, RemoteTransfer> RemoteTransfers =
             new Dictionary<Guid, RemoteTransfer>();
 
@@ -39,6 +50,7 @@ namespace Glasspage.UnitySync
         private static string _projectRoot = string.Empty;
         private static FileSystemWatcher _assetsWatcher;
         private static FileSystemWatcher _projectSettingsWatcher;
+        private static double _nextDirtyMaterialScanTime;
 
         internal static void BeginSession()
         {
@@ -46,6 +58,9 @@ namespace Glasspage.UnitySync
 
             _projectRoot = GetProjectRoot();
             _active = true;
+            _nextDirtyMaterialScanTime = 0d;
+            Undo.postprocessModifications += OnPostprocessModifications;
+            Undo.undoRedoPerformed += OnUndoRedoPerformed;
             StartWatcher(
                 Path.Combine(_projectRoot, "Assets"),
                 out _assetsWatcher);
@@ -57,6 +72,8 @@ namespace Glasspage.UnitySync
         internal static void EndSession()
         {
             _active = false;
+            Undo.postprocessModifications -= OnPostprocessModifications;
+            Undo.undoRedoPerformed -= OnUndoRedoPerformed;
             DisposeWatcher(ref _assetsWatcher);
             DisposeWatcher(ref _projectSettingsWatcher);
 
@@ -67,6 +84,8 @@ namespace Glasspage.UnitySync
             }
 
             KnownHashes.Clear();
+            PendingDirtyAssets.Clear();
+            _nextDirtyMaterialScanTime = 0d;
             foreach (RemoteTransfer transfer in RemoteTransfers.Values)
             {
                 CleanupTransfer(transfer);
@@ -84,6 +103,9 @@ namespace Glasspage.UnitySync
             }
 
             double now = GetMonotonicSeconds();
+            ScanLoadedDirtyMaterials(now);
+            FlushDirtyAssets(now);
+
             List<string> ready = new List<string>();
             lock (PendingLock)
             {
@@ -132,6 +154,160 @@ namespace Glasspage.UnitySync
                 }
 
                 TrySendLocalChange(transport, localPlayerId, path);
+            }
+        }
+
+        private static UndoPropertyModification[] OnPostprocessModifications(
+            UndoPropertyModification[] modifications)
+        {
+            if (!_active || modifications == null)
+            {
+                return modifications;
+            }
+
+            double due = GetMonotonicSeconds() + DirtyAssetSaveDelaySeconds;
+            foreach (UndoPropertyModification modification in modifications)
+            {
+                PropertyModification current = modification.currentValue;
+                PropertyModification previous = modification.previousValue;
+                Object target = current != null && current.target != null
+                    ? current.target
+                    : previous != null
+                        ? previous.target
+                        : null;
+                if (target == null)
+                {
+                    continue;
+                }
+
+                if (target is RenderSettings)
+                {
+                    UnitySyncSceneSynchronizer.MarkSceneSettingsChanged();
+                    continue;
+                }
+
+                QueueDirtyAsset(target, due);
+            }
+
+            return modifications;
+        }
+
+        private static void OnUndoRedoPerformed()
+        {
+            if (!_active)
+            {
+                return;
+            }
+
+            UnitySyncSceneSynchronizer.MarkSceneSettingsChanged();
+            _nextDirtyMaterialScanTime = 0d;
+        }
+
+        private static void ScanLoadedDirtyMaterials(double now)
+        {
+            if (now < _nextDirtyMaterialScanTime)
+            {
+                return;
+            }
+
+            _nextDirtyMaterialScanTime = now + DirtyMaterialScanIntervalSeconds;
+            Material[] materials = Resources.FindObjectsOfTypeAll<Material>();
+            double due = now + DirtyAssetSaveDelaySeconds;
+            foreach (Material material in materials)
+            {
+                if (material != null && EditorUtility.IsDirty(material))
+                {
+                    QueueDirtyAsset(material, due);
+                }
+            }
+        }
+
+        private static void QueueDirtyAsset(Object asset, double dueTime)
+        {
+            if (asset == null || !EditorUtility.IsPersistent(asset))
+            {
+                return;
+            }
+
+            string path = AssetDatabase.GetAssetPath(asset) ?? string.Empty;
+            if (!IsLiveSyncPath(path))
+            {
+                return;
+            }
+
+            int instanceId = asset.GetInstanceID();
+            if (PendingDirtyAssets.TryGetValue(instanceId, out PendingDirtyAsset pending))
+            {
+                pending.Asset = asset;
+                pending.DueTime = dueTime;
+                return;
+            }
+
+            PendingDirtyAssets.Add(
+                instanceId,
+                new PendingDirtyAsset
+                {
+                    Asset = asset,
+                    DueTime = dueTime
+                });
+        }
+
+        private static void FlushDirtyAssets(double now)
+        {
+            if (PendingDirtyAssets.Count == 0)
+            {
+                return;
+            }
+
+            List<int> ready = new List<int>();
+            foreach (KeyValuePair<int, PendingDirtyAsset> pair in PendingDirtyAssets)
+            {
+                if (pair.Value.DueTime <= now)
+                {
+                    ready.Add(pair.Key);
+                }
+            }
+
+            foreach (int instanceId in ready)
+            {
+                if (!PendingDirtyAssets.TryGetValue(instanceId, out PendingDirtyAsset pending))
+                {
+                    continue;
+                }
+
+                PendingDirtyAssets.Remove(instanceId);
+                Object asset = pending.Asset;
+                if (asset == null || !EditorUtility.IsPersistent(asset))
+                {
+                    continue;
+                }
+
+                string path = AssetDatabase.GetAssetPath(asset) ?? string.Empty;
+                if (!IsLiveSyncPath(path))
+                {
+                    continue;
+                }
+
+                if (EditorUtility.IsDirty(asset))
+                {
+                    AssetDatabase.SaveAssetIfDirty(asset);
+                }
+
+                QueueAssetPath(path);
+            }
+        }
+
+        private static void QueueAssetPath(string path)
+        {
+            if (!_active || !IsLiveSyncPath(path))
+            {
+                return;
+            }
+
+            double due = GetMonotonicSeconds() + ChangeDebounceSeconds;
+            lock (PendingLock)
+            {
+                PendingLocalChanges[path.Replace('\\', '/')] = due;
             }
         }
 

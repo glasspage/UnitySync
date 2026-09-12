@@ -318,37 +318,22 @@ namespace Glasspage.UnitySync
                         return false;
                     }
 
-                    if (!TryResolveObjectReference(
-                            descriptor.SkyboxMaterial,
-                            out Object skyboxObject) ||
-                        (skyboxObject != null && !(skyboxObject is Material)))
-                    {
-                        error = "The skybox material for scene " + scene.name +
-                                " could not be resolved.";
-                        return false;
-                    }
+                    bool skyboxResolved = TryResolveObjectReference(
+                        descriptor.SkyboxMaterial,
+                        out Object skyboxObject) &&
+                        (skyboxObject == null || skyboxObject is Material);
+                    bool reflectionResolved = TryResolveObjectReference(
+                        descriptor.CustomReflection,
+                        out Object reflectionObject) &&
+                        (reflectionObject == null || reflectionObject is Cubemap);
+                    bool sunResolved = TryResolveObjectReference(
+                        descriptor.Sun,
+                        out Object sunObject) &&
+                        (sunObject == null || sunObject is Light);
 
-                    if (!TryResolveObjectReference(
-                            descriptor.CustomReflection,
-                            out Object reflectionObject) ||
-                        (reflectionObject != null && !(reflectionObject is Cubemap)))
-                    {
-                        error = "The custom reflection for scene " + scene.name +
-                                " could not be resolved.";
-                        return false;
-                    }
-
-                    if (!TryResolveObjectReference(
-                            descriptor.Sun,
-                            out Object sunObject) ||
-                        (sunObject != null && !(sunObject is Light)))
-                    {
-                        error = "The sun light for scene " + scene.name +
-                                " could not be resolved.";
-                        return false;
-                    }
-
-                    RenderSettings.skybox = skyboxObject as Material;
+                    // Apply scalar/color environment settings independently from optional
+                    // object references. One stale scene-object reference must not prevent
+                    // ambient, fog, reflection, or other environment settings from syncing.
                     RenderSettings.ambientMode = descriptor.AmbientMode;
                     RenderSettings.ambientIntensity = descriptor.AmbientIntensity;
                     RenderSettings.ambientLight = descriptor.AmbientLight;
@@ -359,15 +344,31 @@ namespace Glasspage.UnitySync
                     RenderSettings.defaultReflectionResolution = descriptor.DefaultReflectionResolution;
                     RenderSettings.reflectionIntensity = descriptor.ReflectionIntensity;
                     RenderSettings.reflectionBounces = descriptor.ReflectionBounces;
-                    RenderSettings.customReflection = reflectionObject as Cubemap;
                     RenderSettings.fog = descriptor.Fog;
                     RenderSettings.fogColor = descriptor.FogColor;
                     RenderSettings.fogMode = descriptor.FogMode;
                     RenderSettings.fogDensity = descriptor.FogDensity;
                     RenderSettings.fogStartDistance = descriptor.FogStartDistance;
                     RenderSettings.fogEndDistance = descriptor.FogEndDistance;
-                    RenderSettings.sun = sunObject as Light;
+
+                    if (skyboxResolved)
+                    {
+                        RenderSettings.skybox = skyboxObject as Material;
+                    }
+
+                    if (reflectionResolved)
+                    {
+                        RenderSettings.customReflection = reflectionObject as Cubemap;
+                    }
+
+                    if (sunResolved)
+                    {
+                        RenderSettings.sun = sunObject as Light;
+                    }
+
+                    DynamicGI.UpdateEnvironment();
                     EditorSceneManager.MarkSceneDirty(scene);
+                    SceneView.RepaintAll();
                 }
 
                 return true;
