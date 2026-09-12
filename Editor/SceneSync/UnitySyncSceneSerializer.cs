@@ -211,148 +211,221 @@ namespace Glasspage.UnitySync
             return result;
         }
 
+        internal static bool TryGetActiveSceneDescriptor(
+            out UnitySyncSceneDescriptor descriptor)
+        {
+            descriptor = null;
+            Scene scene = EditorSceneManager.GetActiveScene();
+            if (!IsEnvironmentSceneCandidate(scene))
+            {
+                return false;
+            }
+
+            descriptor = CaptureSceneDescriptor(
+                scene,
+                FindLoadedSceneIndex(scene));
+            return true;
+        }
+
         internal static UnitySyncSceneDescriptor[] GetLoadedSceneDescriptors()
         {
             List<UnitySyncSceneDescriptor> scenes = new List<UnitySyncSceneDescriptor>();
+            HashSet<int> capturedSceneHandles = new HashSet<int>();
             Scene previousActiveScene = SceneManager.GetActiveScene();
             try
             {
                 for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
                 {
                     Scene scene = SceneManager.GetSceneAt(sceneIndex);
-                    if (!scene.IsValid() || !scene.isLoaded || EditorSceneManager.IsPreviewScene(scene))
+                    if (!IsEnvironmentSceneCandidate(scene))
                     {
                         continue;
                     }
 
-                    if (!SceneManager.SetActiveScene(scene))
+                    if (!IsSceneCurrentlyActive(scene) && !SceneManager.SetActiveScene(scene))
                     {
                         continue;
                     }
 
-                    SerializedObject renderSettings = GetSerializedRenderSettings();
-                    renderSettings?.Update();
+                    scenes.Add(CaptureSceneDescriptor(scene, sceneIndex));
+                    capturedSceneHandles.Add(scene.handle);
+                }
 
-                    Object skyboxValue = GetObjectReference(
-                        renderSettings,
-                        "m_SkyboxMaterial",
-                        RenderSettings.skybox);
-                    Object reflectionValue = GetObjectReference(
-                        renderSettings,
-                        "m_CustomReflection",
-                        RenderSettings.customReflection);
-                    Object sunValue = GetObjectReference(
-                        renderSettings,
-                        "m_Sun",
-                        RenderSettings.sun);
-
-                    TryCaptureObjectReference(
-                        skyboxValue,
-                        out UnitySyncObjectReferenceState skyboxReference);
-                    if (skyboxReference != null)
+                // In the Editor, scene enumeration / activation can briefly be unavailable
+                // around save/import callbacks even though the current active scene remains
+                // valid and loaded. Never let that transient state produce an empty
+                // environment packet.
+                if (IsEnvironmentSceneCandidate(previousActiveScene) &&
+                    !capturedSceneHandles.Contains(previousActiveScene.handle))
+                {
+                    if (IsSceneCurrentlyActive(previousActiveScene) ||
+                        SceneManager.SetActiveScene(previousActiveScene))
                     {
-                        skyboxReference.SerializedPropertyTypeName = "PPtr<Material>";
+                        scenes.Add(CaptureSceneDescriptor(
+                            previousActiveScene,
+                            FindLoadedSceneIndex(previousActiveScene)));
                     }
-
-                    TryCaptureObjectReference(
-                        reflectionValue,
-                        out UnitySyncObjectReferenceState customReflectionReference);
-                    if (customReflectionReference != null)
-                    {
-                        customReflectionReference.SerializedPropertyTypeName = "PPtr<Cubemap>";
-                    }
-
-                    TryCaptureObjectReference(
-                        sunValue,
-                        out UnitySyncObjectReferenceState sunReference);
-                    if (sunReference != null)
-                    {
-                        sunReference.SerializedPropertyTypeName = "PPtr<Light>";
-                    }
-
-                    Color ambientSky = GetColor(
-                        renderSettings,
-                        "m_AmbientSkyColor",
-                        RenderSettings.ambientSkyColor);
-
-                    scenes.Add(new UnitySyncSceneDescriptor
-                    {
-                        ScenePath = scene.path ?? string.Empty,
-                        SceneName = scene.name ?? string.Empty,
-                        SceneIndex = sceneIndex,
-                        SkyboxMaterial = skyboxReference,
-                        AmbientMode = (UnityEngine.Rendering.AmbientMode)GetInt(
-                            renderSettings,
-                            "m_AmbientMode",
-                            (int)RenderSettings.ambientMode),
-                        AmbientIntensity = GetFloat(
-                            renderSettings,
-                            "m_AmbientIntensity",
-                            RenderSettings.ambientIntensity),
-                        AmbientLight = ambientSky,
-                        AmbientSkyColor = ambientSky,
-                        AmbientEquatorColor = GetColor(
-                            renderSettings,
-                            "m_AmbientEquatorColor",
-                            RenderSettings.ambientEquatorColor),
-                        AmbientGroundColor = GetColor(
-                            renderSettings,
-                            "m_AmbientGroundColor",
-                            RenderSettings.ambientGroundColor),
-                        DefaultReflectionMode = (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
-                            renderSettings,
-                            "m_DefaultReflectionMode",
-                            (int)RenderSettings.defaultReflectionMode),
-                        DefaultReflectionResolution = GetInt(
-                            renderSettings,
-                            "m_DefaultReflectionResolution",
-                            RenderSettings.defaultReflectionResolution),
-                        ReflectionIntensity = GetFloat(
-                            renderSettings,
-                            "m_ReflectionIntensity",
-                            RenderSettings.reflectionIntensity),
-                        ReflectionBounces = GetInt(
-                            renderSettings,
-                            "m_ReflectionBounces",
-                            RenderSettings.reflectionBounces),
-                        CustomReflection = customReflectionReference,
-                        Fog = GetBool(
-                            renderSettings,
-                            "m_Fog",
-                            RenderSettings.fog),
-                        FogColor = GetColor(
-                            renderSettings,
-                            "m_FogColor",
-                            RenderSettings.fogColor),
-                        FogMode = (FogMode)GetInt(
-                            renderSettings,
-                            "m_FogMode",
-                            (int)RenderSettings.fogMode),
-                        FogDensity = GetFloat(
-                            renderSettings,
-                            "m_FogDensity",
-                            RenderSettings.fogDensity),
-                        FogStartDistance = GetFloat(
-                            renderSettings,
-                            "m_LinearFogStart",
-                            RenderSettings.fogStartDistance),
-                        FogEndDistance = GetFloat(
-                            renderSettings,
-                            "m_LinearFogEnd",
-                            RenderSettings.fogEndDistance),
-                        Sun = sunReference
-                    });
                 }
             }
             finally
             {
-                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
-                {
-                    SceneManager.SetActiveScene(previousActiveScene);
-                }
+                RestoreActiveScene(previousActiveScene);
             }
 
             return scenes.ToArray();
+        }
+
+        private static UnitySyncSceneDescriptor CaptureSceneDescriptor(
+            Scene scene,
+            int sceneIndex)
+        {
+            SerializedObject renderSettings = GetSerializedRenderSettings();
+            renderSettings?.Update();
+
+            Object skyboxValue = GetObjectReference(
+                renderSettings,
+                "m_SkyboxMaterial",
+                RenderSettings.skybox);
+            Object reflectionValue = GetObjectReference(
+                renderSettings,
+                "m_CustomReflection",
+                RenderSettings.customReflection);
+            Object sunValue = GetObjectReference(
+                renderSettings,
+                "m_Sun",
+                RenderSettings.sun);
+
+            TryCaptureObjectReference(
+                skyboxValue,
+                out UnitySyncObjectReferenceState skyboxReference);
+            if (skyboxReference != null)
+            {
+                skyboxReference.SerializedPropertyTypeName = "PPtr<Material>";
+            }
+
+            TryCaptureObjectReference(
+                reflectionValue,
+                out UnitySyncObjectReferenceState customReflectionReference);
+            if (customReflectionReference != null)
+            {
+                customReflectionReference.SerializedPropertyTypeName = "PPtr<Cubemap>";
+            }
+
+            TryCaptureObjectReference(
+                sunValue,
+                out UnitySyncObjectReferenceState sunReference);
+            if (sunReference != null)
+            {
+                sunReference.SerializedPropertyTypeName = "PPtr<Light>";
+            }
+
+            Color ambientSky = GetColor(
+                renderSettings,
+                "m_AmbientSkyColor",
+                RenderSettings.ambientSkyColor);
+
+            return new UnitySyncSceneDescriptor
+            {
+                ScenePath = scene.path ?? string.Empty,
+                SceneName = scene.name ?? string.Empty,
+                SceneIndex = sceneIndex,
+                SkyboxMaterial = skyboxReference,
+                AmbientMode = (UnityEngine.Rendering.AmbientMode)GetInt(
+                    renderSettings,
+                    "m_AmbientMode",
+                    (int)RenderSettings.ambientMode),
+                AmbientIntensity = GetFloat(
+                    renderSettings,
+                    "m_AmbientIntensity",
+                    RenderSettings.ambientIntensity),
+                AmbientLight = ambientSky,
+                AmbientSkyColor = ambientSky,
+                AmbientEquatorColor = GetColor(
+                    renderSettings,
+                    "m_AmbientEquatorColor",
+                    RenderSettings.ambientEquatorColor),
+                AmbientGroundColor = GetColor(
+                    renderSettings,
+                    "m_AmbientGroundColor",
+                    RenderSettings.ambientGroundColor),
+                DefaultReflectionMode = (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
+                    renderSettings,
+                    "m_DefaultReflectionMode",
+                    (int)RenderSettings.defaultReflectionMode),
+                DefaultReflectionResolution = GetInt(
+                    renderSettings,
+                    "m_DefaultReflectionResolution",
+                    RenderSettings.defaultReflectionResolution),
+                ReflectionIntensity = GetFloat(
+                    renderSettings,
+                    "m_ReflectionIntensity",
+                    RenderSettings.reflectionIntensity),
+                ReflectionBounces = GetInt(
+                    renderSettings,
+                    "m_ReflectionBounces",
+                    RenderSettings.reflectionBounces),
+                CustomReflection = customReflectionReference,
+                Fog = GetBool(
+                    renderSettings,
+                    "m_Fog",
+                    RenderSettings.fog),
+                FogColor = GetColor(
+                    renderSettings,
+                    "m_FogColor",
+                    RenderSettings.fogColor),
+                FogMode = (FogMode)GetInt(
+                    renderSettings,
+                    "m_FogMode",
+                    (int)RenderSettings.fogMode),
+                FogDensity = GetFloat(
+                    renderSettings,
+                    "m_FogDensity",
+                    RenderSettings.fogDensity),
+                FogStartDistance = GetFloat(
+                    renderSettings,
+                    "m_LinearFogStart",
+                    RenderSettings.fogStartDistance),
+                FogEndDistance = GetFloat(
+                    renderSettings,
+                    "m_LinearFogEnd",
+                    RenderSettings.fogEndDistance),
+                Sun = sunReference
+            };
+        }
+
+        private static bool IsEnvironmentSceneCandidate(Scene scene)
+        {
+            return scene.IsValid() &&
+                   scene.isLoaded &&
+                   !EditorSceneManager.IsPreviewScene(scene);
+        }
+
+        private static bool IsSceneCurrentlyActive(Scene scene)
+        {
+            Scene activeScene = SceneManager.GetActiveScene();
+            return activeScene.IsValid() && activeScene.handle == scene.handle;
+        }
+
+        private static int FindLoadedSceneIndex(Scene scene)
+        {
+            for (int index = 0; index < SceneManager.sceneCount; index++)
+            {
+                Scene candidate = SceneManager.GetSceneAt(index);
+                if (candidate.IsValid() && candidate.handle == scene.handle)
+                {
+                    return index;
+                }
+            }
+
+            return 0;
+        }
+
+        private static void RestoreActiveScene(Scene scene)
+        {
+            if (IsEnvironmentSceneCandidate(scene) && !IsSceneCurrentlyActive(scene))
+            {
+                SceneManager.SetActiveScene(scene);
+            }
         }
 
         internal static bool ApplySceneSettings(
@@ -1010,107 +1083,36 @@ namespace Glasspage.UnitySync
                 using (BinaryWriter writer = new BinaryWriter(stream))
                 using (SHA256 sha = SHA256.Create())
                 {
+                    HashSet<int> fingerprintedSceneHandles = new HashSet<int>();
                     for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
                     {
                         Scene scene = SceneManager.GetSceneAt(sceneIndex);
-                        if (!scene.IsValid() ||
-                            !scene.isLoaded ||
-                            EditorSceneManager.IsPreviewScene(scene) ||
-                            !SceneManager.SetActiveScene(scene))
+                        if (!IsEnvironmentSceneCandidate(scene))
                         {
                             continue;
                         }
 
-                        SerializedObject renderSettings = GetSerializedRenderSettings();
-                        renderSettings?.Update();
+                        if (!IsSceneCurrentlyActive(scene) && !SceneManager.SetActiveScene(scene))
+                        {
+                            continue;
+                        }
 
-                        writer.Write(scene.path ?? string.Empty);
-                        writer.Write(scene.name ?? string.Empty);
-                        writer.Write(sceneIndex);
+                        WriteRenderSettingsFingerprintForActiveScene(
+                            writer,
+                            scene,
+                            sceneIndex);
+                        fingerprintedSceneHandles.Add(scene.handle);
+                    }
 
-                        writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
-                        WriteSignatureColor(
+                    if (IsEnvironmentSceneCandidate(previousActiveScene) &&
+                        !fingerprintedSceneHandles.Contains(previousActiveScene.handle) &&
+                        (IsSceneCurrentlyActive(previousActiveScene) ||
+                         SceneManager.SetActiveScene(previousActiveScene)))
+                    {
+                        WriteRenderSettingsFingerprintForActiveScene(
                             writer,
-                            GetColor(renderSettings, "m_FogColor", RenderSettings.fogColor));
-                        writer.Write(GetInt(
-                            renderSettings,
-                            "m_FogMode",
-                            (int)RenderSettings.fogMode));
-                        writer.Write(GetFloat(
-                            renderSettings,
-                            "m_FogDensity",
-                            RenderSettings.fogDensity));
-                        writer.Write(GetFloat(
-                            renderSettings,
-                            "m_LinearFogStart",
-                            RenderSettings.fogStartDistance));
-                        writer.Write(GetFloat(
-                            renderSettings,
-                            "m_LinearFogEnd",
-                            RenderSettings.fogEndDistance));
-
-                        writer.Write(GetInt(
-                            renderSettings,
-                            "m_AmbientMode",
-                            (int)RenderSettings.ambientMode));
-                        WriteSignatureColor(
-                            writer,
-                            GetColor(
-                                renderSettings,
-                                "m_AmbientSkyColor",
-                                RenderSettings.ambientSkyColor));
-                        WriteSignatureColor(
-                            writer,
-                            GetColor(
-                                renderSettings,
-                                "m_AmbientEquatorColor",
-                                RenderSettings.ambientEquatorColor));
-                        WriteSignatureColor(
-                            writer,
-                            GetColor(
-                                renderSettings,
-                                "m_AmbientGroundColor",
-                                RenderSettings.ambientGroundColor));
-                        writer.Write(GetFloat(
-                            renderSettings,
-                            "m_AmbientIntensity",
-                            RenderSettings.ambientIntensity));
-
-                        WriteRenderSettingsObjectFingerprint(
-                            writer,
-                            GetObjectReference(
-                                renderSettings,
-                                "m_SkyboxMaterial",
-                                RenderSettings.skybox));
-                        WriteRenderSettingsObjectFingerprint(
-                            writer,
-                            GetObjectReference(
-                                renderSettings,
-                                "m_Sun",
-                                RenderSettings.sun));
-
-                        writer.Write(GetInt(
-                            renderSettings,
-                            "m_DefaultReflectionMode",
-                            (int)RenderSettings.defaultReflectionMode));
-                        writer.Write(GetInt(
-                            renderSettings,
-                            "m_DefaultReflectionResolution",
-                            RenderSettings.defaultReflectionResolution));
-                        writer.Write(GetFloat(
-                            renderSettings,
-                            "m_ReflectionIntensity",
-                            RenderSettings.reflectionIntensity));
-                        writer.Write(GetInt(
-                            renderSettings,
-                            "m_ReflectionBounces",
-                            RenderSettings.reflectionBounces));
-                        WriteRenderSettingsObjectFingerprint(
-                            writer,
-                            GetObjectReference(
-                                renderSettings,
-                                "m_CustomReflection",
-                                RenderSettings.customReflection));
+                            previousActiveScene,
+                            FindLoadedSceneIndex(previousActiveScene));
                     }
 
                     writer.Flush();
@@ -1119,11 +1121,105 @@ namespace Glasspage.UnitySync
             }
             finally
             {
-                if (previousActiveScene.IsValid() && previousActiveScene.isLoaded)
-                {
-                    SceneManager.SetActiveScene(previousActiveScene);
-                }
+                RestoreActiveScene(previousActiveScene);
             }
+        }
+
+        private static void WriteRenderSettingsFingerprintForActiveScene(
+            BinaryWriter writer,
+            Scene scene,
+            int sceneIndex)
+        {
+            SerializedObject renderSettings = GetSerializedRenderSettings();
+            renderSettings?.Update();
+
+            writer.Write(scene.path ?? string.Empty);
+            writer.Write(scene.name ?? string.Empty);
+            writer.Write(sceneIndex);
+
+            writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
+            WriteSignatureColor(
+                writer,
+                GetColor(renderSettings, "m_FogColor", RenderSettings.fogColor));
+            writer.Write(GetInt(
+                renderSettings,
+                "m_FogMode",
+                (int)RenderSettings.fogMode));
+            writer.Write(GetFloat(
+                renderSettings,
+                "m_FogDensity",
+                RenderSettings.fogDensity));
+            writer.Write(GetFloat(
+                renderSettings,
+                "m_LinearFogStart",
+                RenderSettings.fogStartDistance));
+            writer.Write(GetFloat(
+                renderSettings,
+                "m_LinearFogEnd",
+                RenderSettings.fogEndDistance));
+
+            writer.Write(GetInt(
+                renderSettings,
+                "m_AmbientMode",
+                (int)RenderSettings.ambientMode));
+            WriteSignatureColor(
+                writer,
+                GetColor(
+                    renderSettings,
+                    "m_AmbientSkyColor",
+                    RenderSettings.ambientSkyColor));
+            WriteSignatureColor(
+                writer,
+                GetColor(
+                    renderSettings,
+                    "m_AmbientEquatorColor",
+                    RenderSettings.ambientEquatorColor));
+            WriteSignatureColor(
+                writer,
+                GetColor(
+                    renderSettings,
+                    "m_AmbientGroundColor",
+                    RenderSettings.ambientGroundColor));
+            writer.Write(GetFloat(
+                renderSettings,
+                "m_AmbientIntensity",
+                RenderSettings.ambientIntensity));
+
+            WriteRenderSettingsObjectFingerprint(
+                writer,
+                GetObjectReference(
+                    renderSettings,
+                    "m_SkyboxMaterial",
+                    RenderSettings.skybox));
+            WriteRenderSettingsObjectFingerprint(
+                writer,
+                GetObjectReference(
+                    renderSettings,
+                    "m_Sun",
+                    RenderSettings.sun));
+
+            writer.Write(GetInt(
+                renderSettings,
+                "m_DefaultReflectionMode",
+                (int)RenderSettings.defaultReflectionMode));
+            writer.Write(GetInt(
+                renderSettings,
+                "m_DefaultReflectionResolution",
+                RenderSettings.defaultReflectionResolution));
+            writer.Write(GetFloat(
+                renderSettings,
+                "m_ReflectionIntensity",
+                RenderSettings.reflectionIntensity));
+            writer.Write(GetInt(
+                renderSettings,
+                "m_ReflectionBounces",
+                RenderSettings.reflectionBounces));
+            WriteRenderSettingsObjectFingerprint(
+                writer,
+                GetObjectReference(
+                    renderSettings,
+                    "m_CustomReflection",
+                    RenderSettings.customReflection));
         }
 
         private static void WriteRenderSettingsObjectFingerprint(

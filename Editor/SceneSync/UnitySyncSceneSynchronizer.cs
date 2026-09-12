@@ -310,14 +310,27 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            if (!UnitySyncSceneSerializer.TryGetActiveSceneDescriptor(
+                    out UnitySyncSceneDescriptor activeScene))
+            {
+                // Do not advance the known signature. A transient Editor scene-state issue
+                // should be retried rather than turned into an invalid zero-scene packet.
+                _nextSceneSettingsCheckTime = now + SceneSettingsCheckIntervalSeconds;
+                transport.LogLocal(
+                    "Environment settings changed, but the active scene could not be captured; retrying.");
+                return;
+            }
+
             UnitySyncSceneSnapshotBoundary settings = new UnitySyncSceneSnapshotBoundary
             {
                 SnapshotId = Guid.NewGuid(),
-                Scenes = UnitySyncSceneSerializer.GetLoadedSceneDescriptors()
+                Scenes = new[] { activeScene }
             };
             _knownSceneSettingsSignature = signature;
             transport.SendSceneSettingsChange(localPlayerId, settings);
-            transport.LogLocal("Sent scene environment settings update.");
+            transport.LogLocal(
+                "Sent scene environment settings update for active scene " +
+                activeScene.SceneName + ".");
         }
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
