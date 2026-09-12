@@ -54,6 +54,7 @@ namespace Glasspage.UnitySync
         }
 
         private const double FlushIntervalSeconds = 0.05;
+        private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const int MaximumChangesPerUpdate = 64;
         private const int SnapshotObjectsPerUpdate = 8;
 
@@ -69,6 +70,8 @@ namespace Glasspage.UnitySync
         private static bool _active;
         private static bool _applyingRemoteChange;
         private static double _nextFlushTime;
+        private static double _nextSceneSettingsCheckTime;
+        private static string _knownSceneSettingsSignature = string.Empty;
         private static RemoteSnapshot _remoteSnapshot;
 
         static UnitySyncSceneSynchronizer()
@@ -80,6 +83,10 @@ namespace Glasspage.UnitySync
         {
             _active = true;
             _nextFlushTime = 0d;
+            _nextSceneSettingsCheckTime = 0d;
+            _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetSceneSettingsSignature();
+            _knownSceneSettingsSignature = string.Empty;
+            _nextSceneSettingsCheckTime = 0d;
             Pending.Clear();
             KnownHashes.Clear();
             HierarchyBatches.Clear();
@@ -181,6 +188,9 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
+                _knownSceneSettingsSignature =
+                    UnitySyncSceneSerializer.GetSceneSettingsSignature();
+
                 return UnitySyncSceneSerializer.PruneSnapshot(
                     completedSnapshot.Boundary,
                     completedSnapshot.RepresentedObjectIds,
@@ -211,12 +221,66 @@ namespace Glasspage.UnitySync
             }
 
             _nextFlushTime = now + FlushIntervalSeconds;
+            FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
             if (FlushHierarchyBatch(transport, localPlayerId))
             {
                 return;
             }
 
             FlushPendingChanges(transport, localPlayerId);
+        }
+
+        internal static bool ApplyRemoteSceneSettings(
+            UnitySyncSceneSnapshotBoundary settings,
+            out string error)
+        {
+            _applyingRemoteChange = true;
+            try
+            {
+                if (!UnitySyncSceneSerializer.ApplySceneSettings(settings, out error))
+                {
+                    return false;
+                }
+
+                _knownSceneSettingsSignature =
+                    UnitySyncSceneSerializer.GetSceneSettingsSignature();
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+            finally
+            {
+                _applyingRemoteChange = false;
+            }
+        }
+
+        private static void FlushSceneSettingsIfNeeded(
+            UnitySyncTransport transport,
+            Guid localPlayerId,
+            double now)
+        {
+            if (now < _nextSceneSettingsCheckTime || _applyingRemoteChange)
+            {
+                return;
+            }
+
+            _nextSceneSettingsCheckTime = now + SceneSettingsCheckIntervalSeconds;
+            string signature = UnitySyncSceneSerializer.GetSceneSettingsSignature();
+            if (string.Equals(signature, _knownSceneSettingsSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            UnitySyncSceneSnapshotBoundary settings = new UnitySyncSceneSnapshotBoundary
+            {
+                SnapshotId = Guid.NewGuid(),
+                Scenes = UnitySyncSceneSerializer.GetLoadedSceneDescriptors()
+            };
+            _knownSceneSettingsSignature = signature;
+            transport.SendSceneSettingsChange(localPlayerId, settings);
         }
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
