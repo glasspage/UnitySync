@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8
+
+- Validate object references on disposable staging components through Unity's typed object-reference getter, preventing valid references inside arrays from being rejected.
+- Keep the non-dereferencing validation path for live scene components so previously corrupted PPtrs are never read before staging.
+
 ## 0.2.7
 
 - Select Unity's `long` local-file-ID overload explicitly when validating built-in assets, fixing an ambiguous overload compile error in Unity 2021.3.
