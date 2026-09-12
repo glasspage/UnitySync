@@ -184,6 +184,9 @@ namespace Glasspage.UnitySync
         private const float NeutralOutlineSwitchValue = 0.35f;
         private const float SaturatedOutlineSwitchValue = 0.65f;
         private const float MinimumOutlineOpacity = 0.35f;
+        private const float SpectateStatusLeftMargin = 12f;
+        private const float SpectateStatusBottomMargin = 12f;
+        private const float SpectateStatusSpacing = 4f;
         private const int DiscSegmentCount = 48;
 
         private static readonly Guid DebugMarkerId = new Guid("f47f5129-96d0-40ac-a62c-6db83ea543fa");
@@ -526,13 +529,25 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
+            Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
             float directionLineDistance = UnitySyncVisualSettings.LineDistance;
             Matrix4x4 previousMatrix = Handles.matrix;
             Color previousColor = Handles.color;
 
-            foreach (ViewportMarker marker in Markers.Values)
+            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
             {
+                ViewportMarker marker = pair.Value;
                 if (marker.GameObject == null)
+                {
+                    continue;
+                }
+
+                bool isSpectatingRelation =
+                    !marker.IsDebug &&
+                    (pair.Key == spectatingPlayerId ||
+                     marker.SpectatingPlayerId == localPlayerId);
+                if (isSpectatingRelation)
                 {
                     continue;
                 }
@@ -589,6 +604,11 @@ namespace Glasspage.UnitySync
 
             Handles.matrix = previousMatrix;
             Handles.color = previousColor;
+            DrawSpectatingStatuses(
+                sceneView,
+                localPlayerId,
+                spectatingPlayerId,
+                opacity);
         }
 
         private static void DrawDisplayName(
@@ -621,14 +641,91 @@ namespace Glasspage.UnitySync
                 labelSize.x,
                 labelSize.y);
 
-            SetLabelTextColor(
-                _labelOutlineStyle,
-                CalculateOutlineColor(marker.Color, opacity));
-            SetLabelTextColor(
-                _labelStyle,
-                WithAlpha(marker.Color, opacity));
+            Handles.BeginGUI();
+            DrawOutlinedGuiLabel(labelRect, content, marker.Color, opacity);
+            Handles.EndGUI();
+        }
+
+        private static void DrawSpectatingStatuses(
+            SceneView sceneView,
+            Guid localPlayerId,
+            Guid spectatingPlayerId,
+            float opacity)
+        {
+            EnsureLabelStyles();
+            int statusIndex = 0;
 
             Handles.BeginGUI();
+
+            if (spectatingPlayerId != Guid.Empty &&
+                Markers.TryGetValue(spectatingPlayerId, out ViewportMarker spectatedMarker) &&
+                spectatedMarker.GameObject != null &&
+                !spectatedMarker.IsDebug)
+            {
+                DrawSpectatingStatus(
+                    sceneView,
+                    "Spectating " + spectatedMarker.DisplayName,
+                    spectatedMarker.Color,
+                    opacity,
+                    statusIndex++);
+            }
+
+            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
+            {
+                ViewportMarker marker = pair.Value;
+                if (pair.Key == spectatingPlayerId ||
+                    marker.GameObject == null ||
+                    marker.IsDebug ||
+                    marker.SpectatingPlayerId != localPlayerId)
+                {
+                    continue;
+                }
+
+                DrawSpectatingStatus(
+                    sceneView,
+                    marker.DisplayName + " is spectating",
+                    marker.Color,
+                    opacity,
+                    statusIndex++);
+            }
+
+            Handles.EndGUI();
+        }
+
+        private static void DrawSpectatingStatus(
+            SceneView sceneView,
+            string text,
+            Color color,
+            float opacity,
+            int index)
+        {
+            GUIContent content = new GUIContent(text);
+            Vector2 labelSize = _labelStyle.CalcSize(content);
+            float y = sceneView.position.height -
+                      SpectateStatusBottomMargin -
+                      labelSize.y -
+                      index * (labelSize.y + SpectateStatusSpacing);
+            Rect labelRect = new Rect(
+                SpectateStatusLeftMargin,
+                y,
+                labelSize.x,
+                labelSize.y);
+            DrawOutlinedGuiLabel(labelRect, content, color, opacity);
+        }
+
+        private static void DrawOutlinedGuiLabel(
+            Rect labelRect,
+            GUIContent content,
+            Color color,
+            float opacity)
+        {
+            SetLabelTextColor(
+                _labelOutlineStyle,
+                CalculateOutlineColor(color, opacity));
+            SetLabelTextColor(
+                _labelStyle,
+                WithAlpha(color, opacity));
+
             foreach (Vector2 offset in LabelOutlineOffsets)
             {
                 Rect outlineRect = new Rect(
@@ -640,7 +737,6 @@ namespace Glasspage.UnitySync
             }
 
             GUI.Label(labelRect, content, _labelStyle);
-            Handles.EndGUI();
         }
 
         private static void EnsureLabelStyles()
