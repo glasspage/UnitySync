@@ -157,6 +157,11 @@ namespace Glasspage.UnitySync
             return Logs.ToArray();
         }
 
+        internal static void ReportSceneSyncIssue(string message)
+        {
+            AddLog(message);
+        }
+
         internal static string[] GetParticipantNames()
         {
             return UnitySyncPresenceRoot.GetParticipantNames();
