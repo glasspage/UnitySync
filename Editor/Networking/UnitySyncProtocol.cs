@@ -1255,6 +1255,33 @@ namespace Glasspage.UnitySync
                 {
                     WriteObjectReference(writer, scene.SkyboxMaterial);
                 }
+                writer.Write((int)scene.AmbientMode);
+                writer.Write(scene.AmbientIntensity);
+                WriteColorWithAlpha(writer, scene.AmbientLight);
+                WriteColorWithAlpha(writer, scene.AmbientSkyColor);
+                WriteColorWithAlpha(writer, scene.AmbientEquatorColor);
+                WriteColorWithAlpha(writer, scene.AmbientGroundColor);
+                writer.Write((int)scene.DefaultReflectionMode);
+                writer.Write(scene.DefaultReflectionResolution);
+                writer.Write(scene.ReflectionIntensity);
+                writer.Write(scene.ReflectionBounces);
+                writer.Write(scene.CustomReflection != null);
+                if (scene.CustomReflection != null)
+                {
+                    WriteObjectReference(writer, scene.CustomReflection);
+                }
+
+                writer.Write(scene.Fog);
+                WriteColorWithAlpha(writer, scene.FogColor);
+                writer.Write((int)scene.FogMode);
+                writer.Write(scene.FogDensity);
+                writer.Write(scene.FogStartDistance);
+                writer.Write(scene.FogEndDistance);
+                writer.Write(scene.Sun != null);
+                if (scene.Sun != null)
+                {
+                    WriteObjectReference(writer, scene.Sun);
+                }
             }
         }
 
