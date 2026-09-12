@@ -369,10 +369,11 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double due = GetMonotonicSeconds() + ChangeDebounceSeconds;
             lock (PendingLock)
             {
-                PendingLocalChanges[path.Replace('\\', '/')] = due;
+                // The dirty-asset timer already debounced this edit. Queue it immediately so
+                // Material synchronization starts as soon as the 1.5-second quiet period ends.
+                PendingLocalChanges[path.Replace('\\', '/')] = GetMonotonicSeconds();
             }
         }
 
