@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
@@ -82,7 +83,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double now = EditorApplication.timeSinceStartup;
+            double now = GetMonotonicSeconds();
             List<string> ready = new List<string>();
             lock (PendingLock)
             {
@@ -221,7 +222,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double due = EditorApplication.timeSinceStartup + ChangeDebounceSeconds;
+            double due = GetMonotonicSeconds() + ChangeDebounceSeconds;
             lock (PendingLock)
             {
                 PendingLocalChanges[path] = due;
@@ -574,7 +575,7 @@ namespace Glasspage.UnitySync
             {
                 PendingLocalChanges.Remove(path);
                 SuppressedUntil[path] =
-                    EditorApplication.timeSinceStartup + RemoteEchoSuppressionSeconds;
+                    GetMonotonicSeconds() + RemoteEchoSuppressionSeconds;
             }
         }
 
@@ -591,7 +592,7 @@ namespace Glasspage.UnitySync
             lock (PendingLock)
             {
                 PendingLocalChanges[path] =
-                    EditorApplication.timeSinceStartup + ChangeDebounceSeconds;
+                    GetMonotonicSeconds() + ChangeDebounceSeconds;
             }
         }
 
@@ -707,6 +708,11 @@ namespace Glasspage.UnitySync
         {
             DirectoryInfo parent = Directory.GetParent(Application.dataPath);
             return parent != null ? parent.FullName : Application.dataPath;
+        }
+
+        private static double GetMonotonicSeconds()
+        {
+            return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
         }
 
         private static byte[] ComputeHash(string fullPath)
