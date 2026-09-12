@@ -125,11 +125,16 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             if (transport == null ||
                 _guestPhase != GuestPhase.WaitingForConfirmation ||
-                _guestSyncId == Guid.Empty ||
-                GuestMismatches.Count == 0)
+                _guestSyncId == Guid.Empty)
             {
-                error = "There is no pending host file download to continue.";
+                error = "There is no pending host file comparison to continue.";
                 return false;
+            }
+
+            if (GuestMismatches.Count == 0)
+            {
+                BeginGuestImport();
+                return true;
             }
 
             _guestTempRoot = Path.Combine(
@@ -776,12 +781,6 @@ namespace Glasspage.UnitySync
 
             if (_guestCompareIndex < GuestManifest.Count)
             {
-                return;
-            }
-
-            if (GuestMismatches.Count == 0)
-            {
-                BeginGuestImport();
                 return;
             }
 
