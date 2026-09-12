@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Prevent initial scene synchronization from dereferencing stale local serialized object references while copying validated staging data back onto guest components.
+- Clear only incompatible raw PPtr instance IDs before the final staging copy, then apply the host's already type-validated object references normally.
+- Validate staged object references immediately before mutating the live component so an invalid staging state is rejected without touching the scene.
+
 ## 0.4.1
 
 - Include each loaded scene's RenderSettings skybox material in the host scene snapshot and reapply it on guests after the object snapshot completes.
