@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Added live synchronization for existing scene GameObjects, transforms, component lists, and serialized component settings.
+- Added generic third-party component support through Unity's editor serialization APIs, including scene-object and asset references.
+- Added host-authoritative scene snapshots when a collaborator joins.
+- Added component add, remove, and reorder replication on existing GameObjects.
+- Excluded UnitySync's temporary hierarchy from scene addressing and synchronization.
+
 ## 0.1.2
 
 - Moved UnitySync windows into a dedicated top-level UnitySync menu.

@@ -15,6 +15,8 @@ namespace Glasspage.UnitySync
         Disconnected,
         Viewport,
         PeerLeft,
+        SceneObjectChange,
+        SceneSnapshotRequest,
         Log
     }
 
@@ -22,17 +24,20 @@ namespace Glasspage.UnitySync
     {
         internal readonly UnitySyncTransportEventKind Kind;
         internal readonly UnitySyncViewportState Viewport;
+        internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly Guid PlayerId;
         internal readonly string Message;
 
         internal UnitySyncTransportEvent(
             UnitySyncTransportEventKind kind,
             UnitySyncViewportState viewport,
+            UnitySyncSceneObjectChange sceneChange,
             Guid playerId,
             string message)
         {
             Kind = kind;
             Viewport = viewport;
+            SceneChange = sceneChange;
             PlayerId = playerId;
             Message = message;
         }
@@ -40,6 +45,12 @@ namespace Glasspage.UnitySync
 
     internal sealed class UnitySyncTransport : IDisposable
     {
+        private sealed class OutboundMessage
+        {
+            internal byte[] Payload;
+            internal Guid TargetPlayerId;
+        }
+
         private sealed class Peer
         {
             internal readonly TcpClient Client;
@@ -47,6 +58,7 @@ namespace Glasspage.UnitySync
             internal NetworkStream Stream;
             internal Guid PlayerId;
             internal string DisplayName;
+            internal bool RequestedSceneSnapshot;
 
             internal Peer(TcpClient client)
             {
@@ -87,6 +99,7 @@ namespace Glasspage.UnitySync
         private readonly Queue<UnitySyncTransportEvent> _events = new Queue<UnitySyncTransportEvent>();
         private readonly object _outboundLock = new object();
         private readonly AutoResetEvent _outboundSignal = new AutoResetEvent(false);
+        private readonly Queue<OutboundMessage> _pendingMessages = new Queue<OutboundMessage>();
 
         private volatile bool _running;
         private volatile bool _clientReady;
@@ -156,6 +169,55 @@ namespace Glasspage.UnitySync
             lock (_outboundLock)
             {
                 _pendingLocalViewport = payload;
+            }
+
+            _outboundSignal.Set();
+        }
+
+        internal void SendSceneObjectChange(
+            Guid playerId,
+            UnitySyncSceneObjectChange change,
+            Guid targetPlayerId = default)
+        {
+            try
+            {
+                byte[] payload = UnitySyncProtocol.CreateSceneObjectChange(playerId, change);
+                if (payload.Length > UnitySyncProtocol.MaximumFrameSize - 128)
+                {
+                    Enqueue(UnitySyncTransportEventKind.Log, "A scene update was too large to send.");
+                    return;
+                }
+
+                QueueMessage(payload, targetPlayerId);
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException ||
+                exception is InvalidDataException ||
+                exception is OverflowException)
+            {
+                Enqueue(UnitySyncTransportEventKind.Log, "Could not serialize a scene update: " + exception.Message);
+            }
+        }
+
+        internal void RequestSceneSnapshot()
+        {
+            QueueMessage(UnitySyncProtocol.CreateSceneSnapshotRequest(_localPlayerId), Guid.Empty);
+        }
+
+        private void QueueMessage(byte[] payload, Guid targetPlayerId)
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            lock (_outboundLock)
+            {
+                _pendingMessages.Enqueue(new OutboundMessage
+                {
+                    Payload = payload,
+                    TargetPlayerId = targetPlayerId
+                });
             }
 
             _outboundSignal.Set();
@@ -278,28 +340,64 @@ namespace Glasspage.UnitySync
             {
                 _outboundSignal.WaitOne(250);
 
-                byte[] payload;
+                byte[] viewportPayload;
+                OutboundMessage[] messages;
                 lock (_outboundLock)
                 {
-                    payload = _pendingLocalViewport;
+                    viewportPayload = _pendingLocalViewport;
                     _pendingLocalViewport = null;
+                    messages = _pendingMessages.ToArray();
+                    _pendingMessages.Clear();
                 }
 
-                if (!_running || payload == null)
+                if (!_running)
                 {
                     continue;
                 }
 
                 if (_isHost)
                 {
-                    Broadcast(payload, null);
+                    if (viewportPayload != null)
+                    {
+                        Broadcast(viewportPayload, null);
+                    }
+
+                    foreach (OutboundMessage message in messages)
+                    {
+                        if (message.TargetPlayerId == Guid.Empty)
+                        {
+                            Broadcast(message.Payload, null);
+                        }
+                        else
+                        {
+                            SendToPlayer(message.TargetPlayerId, message.Payload);
+                        }
+                    }
                     continue;
                 }
 
                 Peer server = _serverPeer;
                 if (_clientReady && server != null)
                 {
-                    TrySend(server, payload);
+                    if (viewportPayload != null)
+                    {
+                        TrySend(server, viewportPayload);
+                    }
+
+                    foreach (OutboundMessage message in messages)
+                    {
+                        TrySend(server, message.Payload);
+                    }
+                }
+                else if (messages.Length > 0)
+                {
+                    lock (_outboundLock)
+                    {
+                        foreach (OutboundMessage message in messages)
+                        {
+                            _pendingMessages.Enqueue(message);
+                        }
+                    }
                 }
             }
         }
@@ -339,19 +437,42 @@ namespace Glasspage.UnitySync
                 while (_running)
                 {
                     UnitySyncMessage message = ReadMessage(peer);
-                    if (message.Type != UnitySyncMessageType.Viewport || message.PlayerId != peer.PlayerId)
+                    if (message.PlayerId != peer.PlayerId)
                     {
                         throw new InvalidDataException("A collaborator sent an unexpected message.");
                     }
 
-                    UnitySyncViewportState viewport = WithDisplayName(message.Viewport, peer.DisplayName);
-                    if (!IsValid(viewport))
+                    switch (message.Type)
                     {
-                        throw new InvalidDataException("A collaborator sent an invalid viewport.");
-                    }
+                        case UnitySyncMessageType.Viewport:
+                            UnitySyncViewportState viewport = WithDisplayName(message.Viewport, peer.DisplayName);
+                            if (!IsValid(viewport))
+                            {
+                                throw new InvalidDataException("A collaborator sent an invalid viewport.");
+                            }
 
-                    EnqueueViewport(viewport);
-                    Broadcast(UnitySyncProtocol.CreateViewport(viewport), peer);
+                            EnqueueViewport(viewport);
+                            Broadcast(UnitySyncProtocol.CreateViewport(viewport), peer);
+                            break;
+
+                        case UnitySyncMessageType.SceneObjectChange:
+                            EnqueueSceneChange(message.PlayerId, message.SceneChange);
+                            Broadcast(
+                                UnitySyncProtocol.CreateSceneObjectChange(message.PlayerId, message.SceneChange),
+                                peer);
+                            break;
+
+                        case UnitySyncMessageType.SceneSnapshotRequest:
+                            if (!peer.RequestedSceneSnapshot)
+                            {
+                                peer.RequestedSceneSnapshot = true;
+                                EnqueueSceneSnapshotRequest(peer.PlayerId);
+                            }
+                            break;
+
+                        default:
+                            throw new InvalidDataException("A collaborator sent an unexpected message.");
+                    }
                 }
             }
             catch (Exception exception) when (
@@ -424,6 +545,15 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.PeerLeft:
                             EnqueuePeerLeft(message.PlayerId);
+                            break;
+
+                        case UnitySyncMessageType.SceneObjectChange:
+                            if (message.PlayerId == Guid.Empty || message.SceneChange == null)
+                            {
+                                throw new InvalidDataException("The host sent an invalid scene update.");
+                            }
+
+                            EnqueueSceneChange(message.PlayerId, message.SceneChange);
                             break;
 
                         default:
@@ -532,6 +662,20 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private void SendToPlayer(Guid playerId, byte[] payload)
+        {
+            Peer target = null;
+            lock (_peersLock)
+            {
+                target = _peers.Find(peer => peer.PlayerId == playerId);
+            }
+
+            if (target != null)
+            {
+                TrySend(target, payload);
+            }
+        }
+
         private void TrySend(Peer peer, byte[] payload)
         {
             try
@@ -549,6 +693,10 @@ namespace Glasspage.UnitySync
             catch (ObjectDisposedException)
             {
                 peer.Close();
+            }
+            catch (InvalidDataException exception)
+            {
+                Enqueue(UnitySyncTransportEventKind.Log, "Could not send an update: " + exception.Message);
             }
         }
 
@@ -651,7 +799,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(kind, default, Guid.Empty, message));
+                _events.Enqueue(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
             }
         }
 
@@ -659,7 +807,12 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(UnitySyncTransportEventKind.Viewport, viewport, viewport.PlayerId, string.Empty));
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.Viewport,
+                    viewport,
+                    null,
+                    viewport.PlayerId,
+                    string.Empty));
             }
         }
 
@@ -667,7 +820,38 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(UnitySyncTransportEventKind.PeerLeft, default, playerId, string.Empty));
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.PeerLeft,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty));
+            }
+        }
+
+        private void EnqueueSceneChange(Guid playerId, UnitySyncSceneObjectChange change)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneObjectChange,
+                    default,
+                    change,
+                    playerId,
+                    string.Empty));
+            }
+        }
+
+        private void EnqueueSceneSnapshotRequest(Guid playerId)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.SceneSnapshotRequest,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty));
             }
         }
     }
