@@ -53,7 +53,17 @@ namespace Glasspage.UnitySync
             SceneView.duringSceneGui += OnSceneGUI;
             AssemblyReloadEvents.beforeAssemblyReload += ReleaseResources;
             EditorApplication.quitting += ReleaseResources;
-            UnitySyncVisualSettings.Changed += SceneView.RepaintAll;
+            UnitySyncVisualSettings.Changed += OnVisualSettingsChanged;
+        }
+
+        private static void OnVisualSettingsChanged()
+        {
+            if (!UnitySyncVisualSettings.SelectionOutlines)
+            {
+                ReleaseRenderTextures();
+            }
+
+            SceneView.RepaintAll();
         }
 
         internal static void Apply(UnitySyncSelectionState selection, Guid localPlayerId)
