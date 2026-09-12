@@ -252,7 +252,7 @@ namespace Glasspage.UnitySync
                 _savedSceneViewRotation = sceneView.rotation;
                 _savedSceneViewSize = sceneView.size;
                 _savedSceneViewOrthographic = sceneView.orthographic;
-                _savedSceneViewFieldOfView = camera.fieldOfView;
+                _savedSceneViewFieldOfView = sceneView.cameraSettings.fieldOfView;
                 _hasSavedSceneViewState = true;
             }
 
@@ -487,7 +487,7 @@ namespace Glasspage.UnitySync
                 camera.transform.position,
                 camera.transform.rotation,
                 sceneView.pivot,
-                camera.fieldOfView,
+                sceneView.cameraSettings.fieldOfView,
                 camera.aspect,
                 camera.orthographic,
                 camera.orthographicSize,
@@ -608,18 +608,23 @@ namespace Glasspage.UnitySync
                 Quaternion.Angle(sceneView.rotation, viewport.Rotation) <= 0.001f &&
                 Mathf.Approximately(sceneView.size, size) &&
                 sceneView.orthographic == viewport.Orthographic &&
-                Mathf.Approximately(camera.fieldOfView, fieldOfView);
+                Mathf.Approximately(
+                    sceneView.cameraSettings.fieldOfView,
+                    fieldOfView);
             if (matches)
             {
                 return;
             }
 
-            camera.fieldOfView = fieldOfView;
-            sceneView.LookAtDirect(
+            SceneView.CameraSettings cameraSettings = sceneView.cameraSettings;
+            cameraSettings.fieldOfView = fieldOfView;
+            sceneView.cameraSettings = cameraSettings;
+            sceneView.LookAt(
                 viewport.Pivot,
                 viewport.Rotation,
                 size,
-                viewport.Orthographic);
+                viewport.Orthographic,
+                true);
             sceneView.Repaint();
         }
 
@@ -635,12 +640,16 @@ namespace Glasspage.UnitySync
                 Camera camera = _spectatedSceneView.camera;
                 if (camera != null)
                 {
-                    camera.fieldOfView = _savedSceneViewFieldOfView;
-                    _spectatedSceneView.LookAtDirect(
+                    SceneView.CameraSettings cameraSettings =
+                        _spectatedSceneView.cameraSettings;
+                    cameraSettings.fieldOfView = _savedSceneViewFieldOfView;
+                    _spectatedSceneView.cameraSettings = cameraSettings;
+                    _spectatedSceneView.LookAt(
                         _savedSceneViewPivot,
                         _savedSceneViewRotation,
                         Mathf.Max(0.0001f, _savedSceneViewSize),
-                        _savedSceneViewOrthographic);
+                        _savedSceneViewOrthographic,
+                        true);
                     _spectatedSceneView.Repaint();
                 }
             }
