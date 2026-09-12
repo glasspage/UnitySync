@@ -20,6 +20,16 @@ namespace Glasspage.UnitySync
             "constrainProportionsScale",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        private static readonly MethodInfo GetBuiltinExtraResourceMethod = typeof(AssetDatabase).GetMethod(
+            "GetBuiltinExtraResource",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+            null,
+            new[] { typeof(Type), typeof(string) },
+            null);
+
+        private static readonly Dictionary<string, Object> BuiltinAssetCache =
+            new Dictionary<string, Object>();
+
         private static readonly HashSet<string> IgnoredPropertyPaths = new HashSet<string>
         {
             "m_ObjectHideFlags",
@@ -634,6 +644,7 @@ namespace Glasspage.UnitySync
                 // the complete incoming component state can repair it from clean defaults.
                 if (TryValidateObjectReferences(component, out _))
                 {
+                    RememberBuiltinObjectReferences(component);
                     EditorUtility.CopySerialized(component, stagingComponent);
                 }
 
@@ -803,6 +814,38 @@ namespace Glasspage.UnitySync
             }
 
             return true;
+        }
+
+        private static void RememberBuiltinObjectReferences(Component component)
+        {
+            SerializedObject serializedObject = new SerializedObject(component);
+            serializedObject.UpdateIfRequiredOrScript();
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                if (iterator.propertyType != SerializedPropertyType.ObjectReference)
+                {
+                    continue;
+                }
+
+                int instanceId = iterator.objectReferenceInstanceIDValue;
+                if (instanceId == 0)
+                {
+                    continue;
+                }
+
+                Object value = EditorUtility.InstanceIDToObject(instanceId);
+                if (value == null ||
+                    !IsSerializedReferenceTypeCompatible(iterator.type, value) ||
+                    !TryGetBuiltinAssetKey(value, out string key))
+                {
+                    continue;
+                }
+
+                BuiltinAssetCache[key] = value;
+            }
         }
 
         private static void CopyTransformSettings(Transform source, Transform destination)
@@ -1128,6 +1171,11 @@ namespace Glasspage.UnitySync
 
             if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
             {
+                if (IsBuiltinAssetReference(reference))
+                {
+                    return TryResolveBuiltinAssetReference(reference, out value);
+                }
+
                 string assetPath = AssetDatabase.GUIDToAssetPath(reference.AssetGuid);
                 if (string.IsNullOrEmpty(assetPath))
                 {
@@ -1138,7 +1186,7 @@ namespace Glasspage.UnitySync
                 {
                     foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(assetPath))
                     {
-                        if (AssetReferenceMatches(candidate, reference, false))
+                        if (AssetReferenceMatches(candidate, reference))
                         {
                             value = candidate;
                             return true;
@@ -1150,23 +1198,137 @@ namespace Glasspage.UnitySync
             return false;
         }
 
+        private static bool TryResolveBuiltinAssetReference(
+            UnitySyncObjectReferenceState reference,
+            out Object value)
+        {
+            value = null;
+            Type assetType = ResolveType(reference.ObjectTypeName);
+            if (assetType == null || !typeof(Object).IsAssignableFrom(assetType))
+            {
+                return false;
+            }
+
+            string key = GetAssetKey(
+                reference.AssetGuid,
+                reference.LocalFileId,
+                reference.ObjectTypeName);
+            if (BuiltinAssetCache.TryGetValue(key, out Object cached))
+            {
+                if (AssetReferenceMatches(cached, reference))
+                {
+                    value = cached;
+                    return true;
+                }
+
+                BuiltinAssetCache.Remove(key);
+            }
+
+            foreach (string resourcePath in GetBuiltinResourcePaths(reference.AssetName, assetType))
+            {
+                Object candidate = LoadBuiltinResource(assetType, resourcePath);
+                if (!AssetReferenceMatches(candidate, reference))
+                {
+                    continue;
+                }
+
+                BuiltinAssetCache[key] = candidate;
+                value = candidate;
+                return true;
+            }
+
+            if (assetType == typeof(Shader))
+            {
+                Shader shader = Shader.Find(reference.AssetName);
+                if (AssetReferenceMatches(shader, reference))
+                {
+                    BuiltinAssetCache[key] = shader;
+                    value = shader;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static Object LoadBuiltinResource(Type assetType, string resourcePath)
+        {
+            try
+            {
+                Object resource = Resources.GetBuiltinResource(assetType, resourcePath);
+                if (resource != null)
+                {
+                    return resource;
+                }
+            }
+            catch (UnityException)
+            {
+                // The path may belong to unity_builtin_extra rather than default resources.
+            }
+            catch (ArgumentException)
+            {
+                // Try the type-specific filename and extra-resource loader instead.
+            }
+
+            if (GetBuiltinExtraResourceMethod == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return GetBuiltinExtraResourceMethod.Invoke(
+                    null,
+                    new object[] { assetType, resourcePath }) as Object;
+            }
+            catch (TargetInvocationException)
+            {
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static IEnumerable<string> GetBuiltinResourcePaths(string assetName, Type assetType)
+        {
+            if (string.IsNullOrEmpty(assetName) ||
+                assetName.Length > 256 ||
+                assetName.IndexOf('/') >= 0 ||
+                assetName.IndexOf('\\') >= 0)
+            {
+                yield break;
+            }
+
+            yield return assetName;
+
+            string extension = GetBuiltinResourceExtension(assetType);
+            if (!string.IsNullOrEmpty(extension) &&
+                !assetName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return assetName + extension;
+            }
+        }
+
+        private static string GetBuiltinResourceExtension(Type assetType)
+        {
+            if (assetType == typeof(Mesh)) return ".fbx";
+            if (assetType == typeof(Material)) return ".mat";
+            if (assetType == typeof(Font)) return ".ttf";
+            if (assetType == typeof(GUISkin)) return ".GUISkin";
+            return string.Empty;
+        }
+
         private static bool AssetReferenceMatches(
             Object candidate,
-            UnitySyncObjectReferenceState reference,
-            bool allowMatchingLocalBuiltin)
+            UnitySyncObjectReferenceState reference)
         {
             if (candidate == null ||
                 !TypeMatches(candidate.GetType(), reference.ObjectTypeName) ||
                 candidate.name != reference.AssetName)
             {
                 return false;
-            }
-
-            if (allowMatchingLocalBuiltin && IsBuiltinAssetReference(reference))
-            {
-                string candidatePath = AssetDatabase.GetAssetPath(candidate) ?? string.Empty;
-                return EditorUtility.IsPersistent(candidate) &&
-                       (string.IsNullOrEmpty(candidatePath) || IsBuiltinAssetPath(candidatePath));
             }
 
             return AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
@@ -1225,7 +1387,7 @@ namespace Glasspage.UnitySync
 
             if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
             {
-                return AssetReferenceMatches(candidate, reference, true);
+                return AssetReferenceMatches(candidate, reference);
             }
 
             if (reference.Kind != UnitySyncObjectReferenceKind.SceneObject)
@@ -1262,6 +1424,39 @@ namespace Glasspage.UnitySync
                    (IsBuiltinAssetPath(reference.AssetPath) ||
                     reference.AssetGuid == "0000000000000000e000000000000000" ||
                     reference.AssetGuid == "0000000000000000f000000000000000");
+        }
+
+        private static bool TryGetBuiltinAssetKey(Object value, out string key)
+        {
+            key = string.Empty;
+            if (value == null || !EditorUtility.IsPersistent(value))
+            {
+                return false;
+            }
+
+            string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+            if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                    value,
+                    out string guid,
+                    out long localFileId) ||
+                (!IsBuiltinAssetPath(assetPath) && !IsBuiltinAssetGuid(guid)))
+            {
+                return false;
+            }
+
+            key = GetAssetKey(guid, localFileId, GetStableTypeName(value.GetType()));
+            return true;
+        }
+
+        private static string GetAssetKey(string guid, long localFileId, string objectTypeName)
+        {
+            return (guid ?? string.Empty) + ":" + localFileId + ":" + (objectTypeName ?? string.Empty);
+        }
+
+        private static bool IsBuiltinAssetGuid(string guid)
+        {
+            return guid == "0000000000000000e000000000000000" ||
+                   guid == "0000000000000000f000000000000000";
         }
 
         private static bool IsBuiltinAssetPath(string assetPath)
