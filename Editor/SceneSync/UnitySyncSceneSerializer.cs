@@ -323,7 +323,15 @@ namespace Glasspage.UnitySync
 
                 case SerializedPropertyType.ObjectReference:
                     state.Kind = UnitySyncSerializedValueKind.ObjectReference;
-                    return TryCaptureObjectReference(property.objectReferenceValue, out state.ObjectReference);
+                    Object objectReference = property.objectReferenceValue;
+                    if (!IsSerializedReferenceTypeCompatible(property.type, objectReference) ||
+                        !TryCaptureObjectReference(objectReference, out state.ObjectReference))
+                    {
+                        return false;
+                    }
+
+                    state.ObjectReference.SerializedPropertyTypeName = property.type;
+                    return true;
 
                 case SerializedPropertyType.LayerMask:
                     state.Kind = UnitySyncSerializedValueKind.LayerMask;
@@ -397,7 +405,13 @@ namespace Glasspage.UnitySync
 
                 case SerializedPropertyType.ExposedReference:
                     state.Kind = UnitySyncSerializedValueKind.ExposedReference;
-                    return TryCaptureObjectReference(property.exposedReferenceValue, out state.ObjectReference);
+                    if (!TryCaptureObjectReference(property.exposedReferenceValue, out state.ObjectReference))
+                    {
+                        return false;
+                    }
+
+                    state.ObjectReference.SerializedPropertyTypeName = property.type;
+                    return true;
 
                 case SerializedPropertyType.Vector2Int:
                     state.Kind = UnitySyncSerializedValueKind.Vector2Int;
@@ -487,6 +501,8 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
+            reference.ObjectTypeName = GetStableTypeName(value.GetType());
+
             if (value is GameObject gameObject)
             {
                 if (!TryCreateAddress(gameObject, out reference.SceneObject))
@@ -526,7 +542,6 @@ namespace Glasspage.UnitySync
                 reference.Kind = UnitySyncObjectReferenceKind.Asset;
                 reference.AssetGuid = guid ?? string.Empty;
                 reference.AssetPath = assetPath;
-                reference.AssetTypeName = GetStableTypeName(value.GetType());
                 reference.AssetName = value.name ?? string.Empty;
                 reference.LocalFileId = localFileId;
                 return true;
@@ -635,7 +650,14 @@ namespace Glasspage.UnitySync
                 SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
                 if (property != null)
                 {
-                    ApplyProperty(property, propertyState);
+                    if (!ApplyProperty(property, propertyState) &&
+                        (propertyState.Kind == UnitySyncSerializedValueKind.ObjectReference ||
+                         propertyState.Kind == UnitySyncSerializedValueKind.ExposedReference))
+                    {
+                        error = "Object reference " + propertyState.Path +
+                                " is incompatible with " + component.GetType().Name + ".";
+                        return false;
+                    }
                 }
             }
 
@@ -677,10 +699,9 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ObjectReference:
-                        if (!TryResolveObjectReference(
-                                state.ObjectReference,
-                                property.objectReferenceValue,
-                                out Object objectReference)) return false;
+                        if (!CanApplyObjectReference(property, state.ObjectReference) ||
+                            !TryResolveObjectReference(state.ObjectReference, out Object objectReference) ||
+                            !IsSerializedReferenceTypeCompatible(property.type, objectReference)) return false;
                         property.objectReferenceValue = objectReference;
                         return true;
 
@@ -747,10 +768,8 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ExposedReference:
-                        if (!TryResolveObjectReference(
-                                state.ObjectReference,
-                                property.exposedReferenceValue,
-                                out Object exposedReference)) return false;
+                        if (!CanApplyObjectReference(property, state.ObjectReference) ||
+                            !TryResolveObjectReference(state.ObjectReference, out Object exposedReference)) return false;
                         property.exposedReferenceValue = exposedReference;
                         return true;
 
@@ -917,7 +936,6 @@ namespace Glasspage.UnitySync
 
         private static bool TryResolveObjectReference(
             UnitySyncObjectReferenceState reference,
-            Object currentValue,
             out Object value)
         {
             value = null;
@@ -937,7 +955,7 @@ namespace Glasspage.UnitySync
                 if (reference.ComponentIndex < 0)
                 {
                     value = gameObject;
-                    return true;
+                    return TypeMatches(value.GetType(), reference.ObjectTypeName);
                 }
 
                 Component[] components = gameObject.GetComponents<Component>();
@@ -947,17 +965,11 @@ namespace Glasspage.UnitySync
                 }
 
                 value = components[reference.ComponentIndex];
-                return true;
+                return TypeMatches(value.GetType(), reference.ObjectTypeName);
             }
 
             if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
             {
-                if (AssetReferenceMatches(currentValue, reference))
-                {
-                    value = currentValue;
-                    return true;
-                }
-
                 string assetPath = AssetDatabase.GUIDToAssetPath(reference.AssetGuid);
                 if (string.IsNullOrEmpty(assetPath))
                 {
@@ -978,7 +990,7 @@ namespace Glasspage.UnitySync
 
                 if (IsBuiltinAssetReference(reference))
                 {
-                    Type assetType = ResolveType(reference.AssetTypeName);
+                    Type assetType = ResolveType(reference.ObjectTypeName);
                     if (assetType == null || !typeof(Object).IsAssignableFrom(assetType))
                     {
                         return false;
@@ -1003,7 +1015,7 @@ namespace Glasspage.UnitySync
             UnitySyncObjectReferenceState reference)
         {
             if (candidate == null ||
-                !TypeMatches(candidate.GetType(), reference.AssetTypeName) ||
+                !TypeMatches(candidate.GetType(), reference.ObjectTypeName) ||
                 candidate.name != reference.AssetName)
             {
                 return false;
@@ -1296,6 +1308,50 @@ namespace Glasspage.UnitySync
             {
                 if (propertyPath == ignoredPath ||
                     propertyPath.StartsWith(ignoredPath + ".", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool CanApplyObjectReference(
+            SerializedProperty property,
+            UnitySyncObjectReferenceState reference)
+        {
+            return reference != null &&
+                   !string.IsNullOrEmpty(reference.SerializedPropertyTypeName) &&
+                   property.type == reference.SerializedPropertyTypeName;
+        }
+
+        private static bool IsSerializedReferenceTypeCompatible(
+            string serializedPropertyTypeName,
+            Object value)
+        {
+            if (value == null || string.IsNullOrEmpty(serializedPropertyTypeName))
+            {
+                return true;
+            }
+
+            const string prefix = "PPtr<";
+            if (!serializedPropertyTypeName.StartsWith(prefix, StringComparison.Ordinal) ||
+                !serializedPropertyTypeName.EndsWith(">", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            string expectedTypeName = serializedPropertyTypeName.Substring(
+                prefix.Length,
+                serializedPropertyTypeName.Length - prefix.Length - 1);
+            if (expectedTypeName.StartsWith("$", StringComparison.Ordinal))
+            {
+                expectedTypeName = expectedTypeName.Substring(1);
+            }
+
+            for (Type type = value.GetType(); type != null; type = type.BaseType)
+            {
+                if (type.Name == expectedTypeName)
                 {
                     return true;
                 }

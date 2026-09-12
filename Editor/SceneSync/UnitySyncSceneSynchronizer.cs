@@ -103,21 +103,6 @@ namespace Glasspage.UnitySync
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
         {
-            try
-            {
-                if (TryCaptureLocalState(change, out UnitySyncSceneObjectChange localState) &&
-                    GetHash(localState) == GetHash(change))
-                {
-                    Remember(change);
-                    error = string.Empty;
-                    return true;
-                }
-            }
-            catch (Exception)
-            {
-                // Fall through and let the normal apply path report a useful error if needed.
-            }
-
             _applyingRemoteChange = true;
             try
             {
@@ -138,73 +123,6 @@ namespace Glasspage.UnitySync
             {
                 _applyingRemoteChange = false;
             }
-        }
-
-        private static bool TryCaptureLocalState(
-            UnitySyncSceneObjectChange incoming,
-            out UnitySyncSceneObjectChange local)
-        {
-            local = null;
-            if (incoming == null || incoming.Address == null)
-            {
-                return false;
-            }
-
-            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(incoming.Address);
-            if (gameObject == null)
-            {
-                return false;
-            }
-
-            if (incoming.ReconcileComponents)
-            {
-                if (!UnitySyncSceneSerializer.TryCaptureFullObject(gameObject, out local))
-                {
-                    return false;
-                }
-
-                local.Address = incoming.Address;
-                return true;
-            }
-
-            local = new UnitySyncSceneObjectChange
-            {
-                Address = incoming.Address
-            };
-
-            if (incoming.GameObject != null)
-            {
-                if (!UnitySyncSceneSerializer.TryCaptureGameObject(
-                        gameObject,
-                        out UnitySyncSceneObjectChange gameObjectState))
-                {
-                    return false;
-                }
-
-                local.GameObject = gameObjectState.GameObject;
-            }
-
-            UnitySyncComponentState[] incomingComponents =
-                incoming.Components ?? new UnitySyncComponentState[0];
-            local.Components = new UnitySyncComponentState[incomingComponents.Length];
-            Component[] components = gameObject.GetComponents<Component>();
-            for (int index = 0; index < incomingComponents.Length; index++)
-            {
-                int componentIndex = incomingComponents[index].ComponentIndex;
-                if (componentIndex < 0 ||
-                    componentIndex >= components.Length ||
-                    components[componentIndex] == null ||
-                    !UnitySyncSceneSerializer.TryCaptureComponent(
-                        components[componentIndex],
-                        out UnitySyncSceneObjectChange componentState))
-                {
-                    return false;
-                }
-
-                local.Components[index] = componentState.Components[0];
-            }
-
-            return true;
         }
 
         private static void OnChangesPublished(ref ObjectChangeEventStream stream)
