@@ -18,6 +18,7 @@ namespace Glasspage.UnitySync
     internal static class UnitySyncSession
     {
         private const double SendIntervalSeconds = 0.1;
+        private const double SelectionHeartbeatSeconds = 1.0;
         private const string PlayerIdPreference = "Glasspage.UnitySync.PlayerId";
 
         private static readonly Guid LocalPlayerId;
@@ -29,6 +30,8 @@ namespace Glasspage.UnitySync
         private static Color _color = Color.white;
         private static string _joinCode = string.Empty;
         private static double _nextSendTime;
+        private static double _nextSelectionSendTime;
+        private static string _lastSelectionSignature = string.Empty;
 
         internal static event Action Changed;
 
@@ -74,6 +77,8 @@ namespace Glasspage.UnitySync
                 _joinCode = code;
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
+                _nextSelectionSendTime = 0d;
+                _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Hosting on " + advertisedAddress + ":" + port + ".");
                 Changed?.Invoke();
@@ -119,6 +124,8 @@ namespace Glasspage.UnitySync
                 _transport.StartClient(data.Address, data.Port);
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
+                _nextSelectionSendTime = 0d;
+                _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
@@ -150,6 +157,8 @@ namespace Glasspage.UnitySync
         {
             _color = NormalizeColor(color);
             _nextSendTime = 0d;
+            _nextSelectionSendTime = 0d;
+            _lastSelectionSignature = string.Empty;
         }
 
         internal static string[] GetLogs()
@@ -198,8 +207,14 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
 
+                    case UnitySyncTransportEventKind.Selection:
+                        UnitySyncSelectionPresence.Apply(transportEvent.Selection, LocalPlayerId);
+                        SceneView.RepaintAll();
+                        break;
+
                     case UnitySyncTransportEventKind.PeerLeft:
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
+                        UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
                         SceneView.RepaintAll();
                         Changed?.Invoke();
                         break;
@@ -257,6 +272,7 @@ namespace Glasspage.UnitySync
             if (!EditorApplication.isPlayingOrWillChangePlaymode &&
                 (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
             {
+                SendSelectionIfNeeded(transport);
                 UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
             }
 
@@ -289,6 +305,35 @@ namespace Glasspage.UnitySync
             transport.SendLocalViewport(viewport);
         }
 
+        private static void SendSelectionIfNeeded(UnitySyncTransport transport)
+        {
+            List<string> objectIds = new List<string>();
+            foreach (GameObject selectedObject in Selection.gameObjects)
+            {
+                if (selectedObject != null &&
+                    UnitySyncSceneObjectRegistry.TryGetId(selectedObject, out string objectId) &&
+                    !string.IsNullOrEmpty(objectId))
+                {
+                    objectIds.Add(objectId);
+                }
+            }
+
+            objectIds.Sort(StringComparer.Ordinal);
+            string signature = string.Join("|", objectIds);
+            double now = EditorApplication.timeSinceStartup;
+            if (signature == _lastSelectionSignature && now < _nextSelectionSendTime)
+            {
+                return;
+            }
+
+            _lastSelectionSignature = signature;
+            _nextSelectionSendTime = now + SelectionHeartbeatSeconds;
+            transport.SendLocalSelection(new UnitySyncSelectionState(
+                LocalPlayerId,
+                _color,
+                objectIds.ToArray()));
+        }
+
         private static void StopInternal(bool addLog)
         {
             UnitySyncTransport transport = _transport;
@@ -299,6 +344,9 @@ namespace Glasspage.UnitySync
             _joinCode = string.Empty;
             UnitySyncSceneSynchronizer.EndSession();
             UnitySyncPresenceRoot.Clear();
+            UnitySyncSelectionPresence.Clear();
+            _lastSelectionSignature = string.Empty;
+            _nextSelectionSendTime = 0d;
             SceneView.RepaintAll();
 
             if (addLog && transport != null)

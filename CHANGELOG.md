@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5
+
+- Synchronize each collaborator's current Scene selection as lightweight session presence without creating new scene object identities just from clicking an object.
+- Render remote selections in each collaborator's color using renderer silhouettes, with a native-style ~2 px innermost outline and 1 px outward stacking for additional collaborators selecting the same object.
+- Stack the first remote outline outside the local Unity selection outline when the same object or one of its selected ancestors is selected locally.
+- Use Unity's native Handles.DrawOutline path when the running Editor exposes it, with a supersampled screen-space silhouette fallback for supported renderers on older Unity versions.
+- Add a Selection Outlines toggle to UnitySync Visual Options, enabled by default.
+- Bump the UnitySync wire protocol to version 9 for synchronized selection presence.
+
 ## 0.3.4
 
 - Resolve Unity built-in materials such as Default-Diffuse and Default-Skybox through Unity's built-in extra-resource API instead of assuming every built-in material is the primitive renderer's default material.

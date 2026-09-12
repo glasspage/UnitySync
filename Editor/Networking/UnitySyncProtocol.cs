@@ -14,7 +14,8 @@ namespace Glasspage.UnitySync
         SceneObjectChange = 5,
         SceneSnapshotRequest = 6,
         SceneSnapshotBegin = 7,
-        SceneSnapshotEnd = 8
+        SceneSnapshotEnd = 8,
+        Selection = 9
     }
 
     internal readonly struct UnitySyncViewportState
@@ -55,6 +56,20 @@ namespace Glasspage.UnitySync
         }
     }
 
+    internal readonly struct UnitySyncSelectionState
+    {
+        internal readonly Guid PlayerId;
+        internal readonly Color Color;
+        internal readonly string[] ObjectIds;
+
+        internal UnitySyncSelectionState(Guid playerId, Color color, string[] objectIds)
+        {
+            PlayerId = playerId;
+            Color = color;
+            ObjectIds = objectIds ?? new string[0];
+        }
+    }
+
     internal readonly struct UnitySyncMessage
     {
         internal readonly UnitySyncMessageType Type;
@@ -63,6 +78,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
+        internal readonly UnitySyncSelectionState Selection;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
@@ -70,7 +86,8 @@ namespace Glasspage.UnitySync
             string displayName,
             UnitySyncViewportState viewport,
             UnitySyncSceneObjectChange sceneChange = null,
-            UnitySyncSceneSnapshotBoundary sceneSnapshot = null)
+            UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
+            UnitySyncSelectionState selection = default)
         {
             Type = type;
             PlayerId = playerId;
@@ -78,12 +95,13 @@ namespace Glasspage.UnitySync
             Viewport = viewport;
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
+            Selection = selection;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 8;
+        internal const int Version = 9;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -92,6 +110,7 @@ namespace Glasspage.UnitySync
         private const int MaximumComponentsPerObject = 1024;
         private const int MaximumPropertiesPerComponent = 65536;
         private const int MaximumArrayElements = 65536;
+        private const int MaximumSelectionObjects = 4096;
 
         internal static byte[] CreateHello(Guid playerId, string displayName)
         {
@@ -137,6 +156,32 @@ namespace Glasspage.UnitySync
             {
                 writer.Write((byte)UnitySyncMessageType.PeerLeft);
                 WriteGuid(writer, playerId);
+            });
+        }
+
+        internal static byte[] CreateSelection(UnitySyncSelectionState selection)
+        {
+            string[] objectIds = selection.ObjectIds ?? new string[0];
+            if (selection.PlayerId == Guid.Empty || objectIds.Length > MaximumSelectionObjects)
+            {
+                throw new InvalidDataException("Invalid selection state.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.Selection);
+                WriteGuid(writer, selection.PlayerId);
+                WriteColor(writer, selection.Color);
+                writer.Write((ushort)objectIds.Length);
+                foreach (string objectId in objectIds)
+                {
+                    if (!Guid.TryParse(objectId, out Guid parsedId) || parsedId == Guid.Empty)
+                    {
+                        throw new InvalidDataException("A selection contains an invalid object ID.");
+                    }
+
+                    WriteGuid(writer, parsedId);
+                }
             });
         }
 
@@ -251,6 +296,37 @@ namespace Glasspage.UnitySync
                         case UnitySyncMessageType.PeerLeft:
                             playerId = ReadGuid(reader);
                             message = new UnitySyncMessage(type, playerId, string.Empty, default);
+                            break;
+
+                        case UnitySyncMessageType.Selection:
+                            playerId = ReadGuid(reader);
+                            Color selectionColor = ReadColor(reader);
+                            int selectionCount = reader.ReadUInt16();
+                            if (selectionCount > MaximumSelectionObjects)
+                            {
+                                throw new InvalidDataException("Too many objects in a selection.");
+                            }
+
+                            string[] objectIds = new string[selectionCount];
+                            for (int selectionIndex = 0; selectionIndex < selectionCount; selectionIndex++)
+                            {
+                                Guid objectId = ReadGuid(reader);
+                                if (objectId == Guid.Empty)
+                                {
+                                    throw new InvalidDataException("A selection contains an invalid object ID.");
+                                }
+
+                                objectIds[selectionIndex] = objectId.ToString("N");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                new UnitySyncSelectionState(playerId, selectionColor, objectIds));
                             break;
 
                         case UnitySyncMessageType.SceneObjectChange:

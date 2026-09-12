@@ -14,6 +14,7 @@ namespace Glasspage.UnitySync
         Connected,
         Disconnected,
         Viewport,
+        Selection,
         PeerLeft,
         SceneObjectChange,
         SceneSnapshotRequest,
@@ -26,6 +27,7 @@ namespace Glasspage.UnitySync
     {
         internal readonly UnitySyncTransportEventKind Kind;
         internal readonly UnitySyncViewportState Viewport;
+        internal readonly UnitySyncSelectionState Selection;
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly Guid PlayerId;
@@ -37,10 +39,12 @@ namespace Glasspage.UnitySync
             UnitySyncSceneObjectChange sceneChange,
             Guid playerId,
             string message,
-            UnitySyncSceneSnapshotBoundary sceneSnapshot = null)
+            UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
+            UnitySyncSelectionState selection = default)
         {
             Kind = kind;
             Viewport = viewport;
+            Selection = selection;
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
             PlayerId = playerId;
@@ -112,6 +116,7 @@ namespace Glasspage.UnitySync
         private TcpListener _listener;
         private Peer _serverPeer;
         private byte[] _pendingLocalViewport;
+        private byte[] _pendingLocalSelection;
 
         internal UnitySyncTransport(Guid localPlayerId, string localDisplayName, byte[] secret)
         {
@@ -174,6 +179,22 @@ namespace Glasspage.UnitySync
             lock (_outboundLock)
             {
                 _pendingLocalViewport = payload;
+            }
+
+            _outboundSignal.Set();
+        }
+
+        internal void SendLocalSelection(UnitySyncSelectionState selection)
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            byte[] payload = UnitySyncProtocol.CreateSelection(selection);
+            lock (_outboundLock)
+            {
+                _pendingLocalSelection = payload;
             }
 
             _outboundSignal.Set();
@@ -367,11 +388,14 @@ namespace Glasspage.UnitySync
                 _outboundSignal.WaitOne(250);
 
                 byte[] viewportPayload;
+                byte[] selectionPayload;
                 OutboundMessage[] messages;
                 lock (_outboundLock)
                 {
                     viewportPayload = _pendingLocalViewport;
                     _pendingLocalViewport = null;
+                    selectionPayload = _pendingLocalSelection;
+                    _pendingLocalSelection = null;
                     messages = _pendingMessages.ToArray();
                     _pendingMessages.Clear();
                 }
@@ -386,6 +410,11 @@ namespace Glasspage.UnitySync
                     if (viewportPayload != null)
                     {
                         Broadcast(viewportPayload, null);
+                    }
+
+                    if (selectionPayload != null)
+                    {
+                        Broadcast(selectionPayload, null);
                     }
 
                     foreach (OutboundMessage message in messages)
@@ -408,6 +437,11 @@ namespace Glasspage.UnitySync
                     if (viewportPayload != null)
                     {
                         TrySend(server, viewportPayload);
+                    }
+
+                    if (selectionPayload != null)
+                    {
+                        TrySend(server, selectionPayload);
                     }
 
                     foreach (OutboundMessage message in messages)
@@ -479,6 +513,16 @@ namespace Glasspage.UnitySync
 
                             EnqueueViewport(viewport);
                             Broadcast(UnitySyncProtocol.CreateViewport(viewport), peer);
+                            break;
+
+                        case UnitySyncMessageType.Selection:
+                            if (!IsValid(message.Selection))
+                            {
+                                throw new InvalidDataException("A collaborator sent an invalid selection.");
+                            }
+
+                            EnqueueSelection(message.Selection);
+                            Broadcast(UnitySyncProtocol.CreateSelection(message.Selection), peer);
                             break;
 
                         case UnitySyncMessageType.SceneObjectChange:
@@ -572,6 +616,15 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueViewport(message.Viewport);
+                            break;
+
+                        case UnitySyncMessageType.Selection:
+                            if (message.PlayerId == Guid.Empty || !IsValid(message.Selection))
+                            {
+                                throw new InvalidDataException("The host sent an invalid selection.");
+                            }
+
+                            EnqueueSelection(message.Selection);
                             break;
 
                         case UnitySyncMessageType.PeerLeft:
@@ -812,6 +865,32 @@ namespace Glasspage.UnitySync
                 viewport.OrthographicSize);
         }
 
+        private static bool IsValid(UnitySyncSelectionState selection)
+        {
+            if (selection.PlayerId == Guid.Empty ||
+                !IsValidColorComponent(selection.Color.r) ||
+                !IsValidColorComponent(selection.Color.g) ||
+                !IsValidColorComponent(selection.Color.b) ||
+                selection.ObjectIds == null ||
+                selection.ObjectIds.Length > 4096)
+            {
+                return false;
+            }
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string objectId in selection.ObjectIds)
+            {
+                if (!Guid.TryParse(objectId, out Guid parsedId) ||
+                    parsedId == Guid.Empty ||
+                    !seen.Add(parsedId.ToString("N")))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static bool IsValid(UnitySyncViewportState viewport)
         {
             return IsFinite(viewport.Position.x) &&
@@ -864,6 +943,21 @@ namespace Glasspage.UnitySync
                     null,
                     viewport.PlayerId,
                     string.Empty));
+            }
+        }
+
+        private void EnqueueSelection(UnitySyncSelectionState selection)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.Selection,
+                    default,
+                    null,
+                    selection.PlayerId,
+                    string.Empty,
+                    null,
+                    selection));
             }
         }
 
