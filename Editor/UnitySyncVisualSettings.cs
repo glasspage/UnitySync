@@ -19,7 +19,7 @@ namespace Glasspage.UnitySync
 
         internal const UnitySyncViewportLineLength DefaultLineLength = UnitySyncViewportLineLength.Long;
         internal const float DefaultViewportOpacity = 1f;
-        internal const float DefaultContrastIntensity = 0.4f;
+        internal const float DefaultContrastIntensity = 0.2f;
         internal const float ShortLineDistance = 0.45f;
         internal const float LongLineDistance = 1.15f;
 
