@@ -672,22 +672,94 @@ namespace Glasspage.UnitySync
 
                         SerializedObject renderSettings = GetSerializedRenderSettings();
                         renderSettings?.Update();
-                        Object target = renderSettings?.targetObject;
 
                         writer.Write(scene.path ?? string.Empty);
                         writer.Write(scene.name ?? string.Empty);
                         writer.Write(sceneIndex);
 
-                        if (target == null)
-                        {
-                            writer.Write(string.Empty);
-                            continue;
-                        }
+                        writer.Write(GetBool(renderSettings, "m_Fog", RenderSettings.fog));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(renderSettings, "m_FogColor", RenderSettings.fogColor));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_FogMode",
+                            (int)RenderSettings.fogMode));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_FogDensity",
+                            RenderSettings.fogDensity));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_LinearFogStart",
+                            RenderSettings.fogStartDistance));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_LinearFogEnd",
+                            RenderSettings.fogEndDistance));
 
-                        // This is used only for local change detection. It intentionally hashes
-                        // Unity's complete serialized RenderSettings object so Lighting-window
-                        // edits cannot be missed by a hand-maintained field list.
-                        writer.Write(EditorJsonUtility.ToJson(target, false) ?? string.Empty);
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_AmbientMode",
+                            (int)RenderSettings.ambientMode));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientSkyColor",
+                                RenderSettings.ambientSkyColor));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientEquatorColor",
+                                RenderSettings.ambientEquatorColor));
+                        WriteSignatureColor(
+                            writer,
+                            GetColor(
+                                renderSettings,
+                                "m_AmbientGroundColor",
+                                RenderSettings.ambientGroundColor));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_AmbientIntensity",
+                            RenderSettings.ambientIntensity));
+
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_SkyboxMaterial",
+                                RenderSettings.skybox));
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_Sun",
+                                RenderSettings.sun));
+
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionMode",
+                            (int)RenderSettings.defaultReflectionMode));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_DefaultReflectionResolution",
+                            RenderSettings.defaultReflectionResolution));
+                        writer.Write(GetFloat(
+                            renderSettings,
+                            "m_ReflectionIntensity",
+                            RenderSettings.reflectionIntensity));
+                        writer.Write(GetInt(
+                            renderSettings,
+                            "m_ReflectionBounces",
+                            RenderSettings.reflectionBounces));
+                        WriteRenderSettingsObjectFingerprint(
+                            writer,
+                            GetObjectReference(
+                                renderSettings,
+                                "m_CustomReflection",
+                                RenderSettings.customReflection));
                     }
 
                     writer.Flush();
@@ -701,6 +773,41 @@ namespace Glasspage.UnitySync
                     SceneManager.SetActiveScene(previousActiveScene);
                 }
             }
+        }
+
+        private static void WriteRenderSettingsObjectFingerprint(
+            BinaryWriter writer,
+            Object value)
+        {
+            writer.Write(value != null);
+            if (value == null)
+            {
+                return;
+            }
+
+            writer.Write(GetStableTypeName(value.GetType()));
+            if (EditorUtility.IsPersistent(value))
+            {
+                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+                writer.Write(assetPath);
+                if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                        value,
+                        out string guid,
+                        out long localFileId))
+                {
+                    writer.Write(guid ?? string.Empty);
+                    writer.Write(localFileId);
+                }
+                else
+                {
+                    writer.Write(string.Empty);
+                    writer.Write(0L);
+                }
+
+                return;
+            }
+
+            writer.Write(value.GetInstanceID());
         }
 
         internal static string GetSceneSettingsSignature()
