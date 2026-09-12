@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Add the missing Unity .meta file for the scene object registry so package installs import and compile the registry correctly.
+- Fix scene-change hash deduplication to initialize its hash state before conditional capture, resolving the compiler's definite-assignment error.
+
 ## 0.3.0
 
 - Replace sibling-path object identity with per-session IDs, so unrelated hierarchy differences no longer redirect scene updates to the wrong GameObject.
