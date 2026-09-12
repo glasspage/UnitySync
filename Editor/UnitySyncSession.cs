@@ -244,12 +244,13 @@ namespace Glasspage.UnitySync
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileDelete;
+                        string fileSyncError;
                         bool fileHandled = isProjectUpdate
                             ? UnitySyncProjectSynchronizer.HandleMessage(
                                 transportEvent.MessageType,
                                 transportEvent.PlayerId,
                                 transportEvent.FileSync,
-                                out string fileSyncError)
+                                out fileSyncError)
                             : UnitySyncFileSynchronizer.HandleMessage(
                                 transport,
                                 LocalPlayerId,
