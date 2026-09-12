@@ -217,7 +217,10 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.Viewport:
-                        UnitySyncPresenceRoot.Apply(transportEvent.Viewport, LocalPlayerId);
+                        UnitySyncPresenceRoot.Apply(
+                            transportEvent.Viewport,
+                            LocalPlayerId,
+                            transportEvent.ReceivedAtSeconds);
                         SceneView.RepaintAll();
                         Changed?.Invoke();
                         break;
