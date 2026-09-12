@@ -75,6 +75,7 @@ namespace Glasspage.UnitySync
             internal Guid PlayerId;
             internal string DisplayName;
             internal bool RequestedSceneSnapshot;
+            internal bool RequestedFileSync;
 
             internal Peer(TcpClient client)
             {
@@ -596,7 +597,20 @@ namespace Glasspage.UnitySync
                             break;
 
                         case UnitySyncMessageType.FileSyncRequest:
+                            if (!peer.RequestedFileSync)
+                            {
+                                peer.RequestedFileSync = true;
+                                EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            }
+                            break;
+
                         case UnitySyncMessageType.FileRequest:
+                            if (!peer.RequestedFileSync)
+                            {
+                                throw new InvalidDataException(
+                                    "A collaborator requested a file before starting file sync.");
+                            }
+
                             EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
                             break;
 
