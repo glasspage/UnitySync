@@ -380,6 +380,11 @@ namespace Glasspage.UnitySync
             _outboundSignal.Set();
         }
 
+        internal void LogLocal(string message)
+        {
+            Enqueue(UnitySyncTransportEventKind.Log, message ?? string.Empty);
+        }
+
         internal bool TryDequeue(out UnitySyncTransportEvent transportEvent)
         {
             lock (_eventsLock)
