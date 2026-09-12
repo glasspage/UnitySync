@@ -65,7 +65,7 @@ UnitySync does not currently provide accounts, permissions, host approval prompt
 ## Limitations
 
 - Direct IPv4 connectivity to the host is required.
-- **Packages** and package dependencies are not synchronized.
+- **Packages** and package dependencies are not yet synchronized.
 - Collaborators should use compatible Unity versions, packages, and third-party dependencies.
 - UnitySync does not automatically open, close, or save scenes.
 - There is no merge or conflict-resolution system for simultaneous edits.
