@@ -1097,7 +1097,9 @@ namespace Glasspage.UnitySync
                 viewport.FieldOfView,
                 viewport.Aspect,
                 viewport.Orthographic,
-                viewport.OrthographicSize);
+                viewport.OrthographicSize,
+                viewport.SceneViewSize,
+                viewport.SpectatingPlayerId);
         }
 
         private static bool IsValid(UnitySyncSelectionState selection)
@@ -1147,7 +1149,10 @@ namespace Glasspage.UnitySync
                    IsFinite(viewport.Aspect) &&
                    viewport.Aspect > 0f &&
                    IsFinite(viewport.OrthographicSize) &&
-                   viewport.OrthographicSize > 0f;
+                   viewport.OrthographicSize > 0f &&
+                   IsFinite(viewport.SceneViewSize) &&
+                   viewport.SceneViewSize > 0f &&
+                   viewport.SpectatingPlayerId != viewport.PlayerId;
         }
 
         private static bool IsFinite(float value)
