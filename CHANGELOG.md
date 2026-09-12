@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4
+
+- Restore scene component serialization and staging behavior exactly to the implementation used before PR #41.
+- Remove the PR #41/#42 stale-PPtr destination clearing and additional staging validation paths that regressed array-backed component synchronization.
+- Restore initial snapshot application for component arrays and object-reference fields to the pre-0.4.2 behavior.
+
 ## 0.4.3
 
 - Restore the dedicated typed staging-reference validator so valid object references in arrays are not rejected during initial scene synchronization.
