@@ -472,7 +472,10 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            SceneView sceneView = SceneView.lastActiveSceneView;
+            SceneView sceneView =
+                _spectatingPlayerId != Guid.Empty && _spectatedSceneView != null
+                    ? _spectatedSceneView
+                    : SceneView.lastActiveSceneView;
             Camera camera = sceneView != null ? sceneView.camera : null;
             if (camera == null)
             {
