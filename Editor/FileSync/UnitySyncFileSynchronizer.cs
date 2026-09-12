@@ -14,6 +14,7 @@ namespace Glasspage.UnitySync
             None,
             WaitingForManifest,
             Comparing,
+            WaitingForConfirmation,
             Downloading,
             Importing
         }
@@ -98,6 +99,12 @@ namespace Glasspage.UnitySync
         private static double _guestImportEarliestComplete;
 
         internal static bool IsGuestSyncing => _guestPhase != GuestPhase.None;
+        internal static bool IsGuestAwaitingDownloadConfirmation =>
+            _guestPhase == GuestPhase.WaitingForConfirmation;
+        internal static int GuestPendingDownloadFileCount =>
+            IsGuestAwaitingDownloadConfirmation ? GuestMismatches.Count : 0;
+        internal static long GuestPendingDownloadBytes =>
+            IsGuestAwaitingDownloadConfirmation ? _guestDownloadTotalBytes : 0;
 
         internal static void BeginGuestSync(UnitySyncTransport transport)
         {
@@ -109,6 +116,52 @@ namespace Glasspage.UnitySync
                 "Waiting for the host file manifest...",
                 0.01f);
             transport.RequestFileSync();
+        }
+
+        internal static bool ContinueGuestSync(
+            UnitySyncTransport transport,
+            out string error)
+        {
+            error = string.Empty;
+            if (transport == null ||
+                _guestPhase != GuestPhase.WaitingForConfirmation ||
+                _guestSyncId == Guid.Empty ||
+                GuestMismatches.Count == 0)
+            {
+                error = "There is no pending host file download to continue.";
+                return false;
+            }
+
+            _guestTempRoot = Path.Combine(
+                GetProjectRoot(),
+                "Library",
+                "UnitySyncFileSync",
+                _guestSyncId.ToString("N"));
+            try
+            {
+                if (Directory.Exists(_guestTempRoot))
+                {
+                    Directory.Delete(_guestTempRoot, true);
+                }
+
+                Directory.CreateDirectory(_guestTempRoot);
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException)
+            {
+                error = "Could not prepare temporary file sync storage: " + exception.Message;
+                FailGuestSync(error);
+                return false;
+            }
+
+            _guestRequestIndex = 0;
+            _guestCompletedFiles = 0;
+            _guestDownloadBytesReceived = 0;
+            _guestPhase = GuestPhase.Downloading;
+            UpdateGuestRequests(transport);
+            UpdateGuestDownloadProgress();
+            return true;
         }
 
         internal static void EndSession()
@@ -733,38 +786,19 @@ namespace Glasspage.UnitySync
             }
 
             _guestDownloadTotalBytes = 0;
-            foreach (FileEntry entry in GuestMismatches)
+            string[] neededPaths = new string[GuestMismatches.Count];
+            for (int index = 0; index < GuestMismatches.Count; index++)
             {
+                FileEntry entry = GuestMismatches[index];
                 _guestDownloadTotalBytes += entry.Length;
+                neededPaths[index] = entry.Path;
             }
 
-            _guestTempRoot = Path.Combine(
-                GetProjectRoot(),
-                "Library",
-                "UnitySyncFileSync",
-                _guestSyncId.ToString("N"));
-            try
-            {
-                if (Directory.Exists(_guestTempRoot))
-                {
-                    Directory.Delete(_guestTempRoot, true);
-                }
-
-                Directory.CreateDirectory(_guestTempRoot);
-            }
-            catch (Exception exception) when (
-                exception is IOException ||
-                exception is UnauthorizedAccessException)
-            {
-                FailGuestSync(
-                    "Could not prepare temporary file sync storage: " + exception.Message);
-                return;
-            }
-            _guestRequestIndex = 0;
-            _guestCompletedFiles = 0;
-            _guestDownloadBytesReceived = 0;
-            _guestPhase = GuestPhase.Downloading;
-            UpdateGuestRequests(transport);
+            _guestPhase = GuestPhase.WaitingForConfirmation;
+            EditorUtility.ClearProgressBar();
+            UnitySyncSession.ReportFileSyncDownloadRequired(
+                neededPaths,
+                _guestDownloadTotalBytes);
         }
 
         private static void UpdateGuestRequests(UnitySyncTransport transport)
