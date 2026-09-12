@@ -47,6 +47,7 @@ namespace Glasspage.UnitySync
         internal static UnitySyncSessionState State => _state;
         internal static string JoinCode => _joinCode;
         internal static bool IsActive => _transport != null;
+        internal static bool IsFileSyncing => UnitySyncFileSynchronizer.IsGuestSyncing;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
 
         static UnitySyncSession()
