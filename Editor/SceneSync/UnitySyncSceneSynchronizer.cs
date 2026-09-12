@@ -80,6 +80,7 @@ namespace Glasspage.UnitySync
         {
             ObjectChangeEvents.changesPublished += OnChangesPublished;
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
+            EditorSceneManager.sceneSaved += OnSceneSaved;
         }
 
         internal static void BeginSession()
@@ -134,6 +135,11 @@ namespace Glasspage.UnitySync
             // signature check here. A real RenderSettings Undo modification uses the stronger
             // MarkSceneSettingsChanged path above.
             _nextSceneSettingsCheckTime = 0d;
+        }
+
+        private static void OnSceneSaved(Scene scene)
+        {
+            MarkSceneSettingsChanged();
         }
 
         internal static void QueueFullSceneSnapshot(Guid targetPlayerId)
