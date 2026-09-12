@@ -276,6 +276,31 @@ namespace Glasspage.UnitySync
                 targetPlayerId);
         }
 
+        internal void SendProjectFileBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileBegin(playerId, state),
+                Guid.Empty);
+        }
+
+        internal void SendProjectFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileChunk(playerId, state),
+                Guid.Empty);
+        }
+
+        internal void SendProjectFileDelete(Guid playerId, string path)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateProjectFileDelete(playerId, path),
+                Guid.Empty);
+        }
+
         internal void SendSceneObjectChange(
             Guid playerId,
             UnitySyncSceneObjectChange change,
@@ -325,6 +350,15 @@ namespace Glasspage.UnitySync
             QueueMessage(
                 UnitySyncProtocol.CreateSceneSnapshotEnd(playerId, snapshotId, isComplete),
                 targetPlayerId);
+        }
+
+        internal void SendSceneSettingsChange(
+            Guid playerId,
+            UnitySyncSceneSnapshotBoundary snapshot)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateSceneSettingsChange(playerId, snapshot),
+                Guid.Empty);
         }
 
         private void QueueMessage(byte[] payload, Guid targetPlayerId)
