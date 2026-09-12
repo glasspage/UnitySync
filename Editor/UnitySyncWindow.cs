@@ -125,7 +125,9 @@ namespace Glasspage.UnitySync
                     break;
 
                 case UnitySyncSessionState.Connected:
-                    status = "Connected";
+                    status = UnitySyncSession.IsFileSyncing
+                        ? "Syncing host files..."
+                        : "Connected";
                     type = MessageType.Info;
                     break;
 

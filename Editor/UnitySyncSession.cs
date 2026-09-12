@@ -20,6 +20,12 @@ namespace Glasspage.UnitySync
         private const double SendIntervalSeconds = 0.1;
         private const double SelectionHeartbeatSeconds = 1.0;
         private const string PlayerIdPreference = "Glasspage.UnitySync.PlayerId";
+        private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
+        private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
+        private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
+        private const string FileSyncResumeColorKey = "Glasspage.UnitySync.FileSyncResume.Color";
+        private const int MaximumFileSyncResumeAttempts = 8;
+        private const double FileSyncResumeRetrySeconds = 0.5d;
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
@@ -29,15 +35,19 @@ namespace Glasspage.UnitySync
         private static string _displayName = "Collaborator";
         private static Color _color = Color.white;
         private static string _joinCode = string.Empty;
+        private static string _guestJoinCode = string.Empty;
         private static double _nextSendTime;
         private static double _nextSelectionSendTime;
         private static string _lastSelectionSignature = string.Empty;
+        private static int _fileSyncResumeAttempts;
+        private static double _nextFileSyncResumeAttemptTime;
 
         internal static event Action Changed;
 
         internal static UnitySyncSessionState State => _state;
         internal static string JoinCode => _joinCode;
         internal static bool IsActive => _transport != null;
+        internal static bool IsFileSyncing => UnitySyncFileSynchronizer.IsGuestSyncing;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
 
         static UnitySyncSession()
@@ -47,6 +57,7 @@ namespace Glasspage.UnitySync
             EditorApplication.quitting += Shutdown;
             AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            EditorApplication.delayCall += ScheduleFileSyncResume;
         }
 
         internal static bool StartHost(
@@ -75,6 +86,8 @@ namespace Glasspage.UnitySync
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, secret);
                 _transport.StartHost(port);
                 _joinCode = code;
+                _guestJoinCode = string.Empty;
+                ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
                 _nextSelectionSendTime = 0d;
@@ -122,6 +135,7 @@ namespace Glasspage.UnitySync
                 _color = NormalizeColor(color);
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, data.Secret);
                 _transport.StartClient(data.Address, data.Port);
+                _guestJoinCode = joinCode;
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _nextSelectionSendTime = 0d;
@@ -191,8 +205,9 @@ namespace Glasspage.UnitySync
                 {
                     case UnitySyncTransportEventKind.Connected:
                         _state = UnitySyncSessionState.Connected;
-                        transport.RequestSceneSnapshot();
+                        UnitySyncFileSynchronizer.BeginGuestSync(transport);
                         AddLog(transportEvent.Message);
+                        AddLog("Comparing host Assets before scene synchronization.");
                         Changed?.Invoke();
                         break;
 
@@ -215,11 +230,38 @@ namespace Glasspage.UnitySync
                     case UnitySyncTransportEventKind.PeerLeft:
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
                         UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
+                        UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
                         SceneView.RepaintAll();
                         Changed?.Invoke();
                         break;
 
+                    case UnitySyncTransportEventKind.FileSync:
+                        if (!UnitySyncFileSynchronizer.HandleMessage(
+                                transport,
+                                LocalPlayerId,
+                                transportEvent.MessageType,
+                                transportEvent.PlayerId,
+                                transportEvent.FileSync,
+                                out string fileSyncError))
+                        {
+                            AddLog("File sync failed: " + fileSyncError);
+                            disconnected = true;
+                        }
+                        else if (!string.IsNullOrEmpty(fileSyncError))
+                        {
+                            AddLog(fileSyncError);
+                            Changed?.Invoke();
+                        }
+                        break;
+
                     case UnitySyncTransportEventKind.SceneObjectChange:
+                        if (UnitySyncFileSynchronizer.IsGuestSyncing)
+                        {
+                            // The post-file-sync host snapshot supersedes live edits received while
+                            // the guest is still reconciling Assets.
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.ApplyRemoteChange(
                                 transportEvent.SceneChange,
                                 out string sceneError))
@@ -269,14 +311,33 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            if (!EditorApplication.isPlayingOrWillChangePlaymode &&
+            UnitySyncFileSynchronizer.Update(transport, LocalPlayerId);
+            if (UnitySyncFileSynchronizer.ConsumeGuestFailure(out string fileSyncFailure))
+            {
+                AddLog("File sync failed: " + fileSyncFailure);
+                StopInternal(false);
+                return;
+            }
+
+            if (UnitySyncFileSynchronizer.ConsumeGuestReadyForSceneSnapshot())
+            {
+                UnitySyncSceneSynchronizer.BeginSession();
+                transport.RequestSceneSnapshot();
+                AddLog("Host Assets synchronized. Requesting the current scene state.");
+                Changed?.Invoke();
+            }
+
+            bool guestFileSyncing = UnitySyncFileSynchronizer.IsGuestSyncing;
+            if (!guestFileSyncing &&
+                !EditorApplication.isPlayingOrWillChangePlaymode &&
                 (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
             {
                 SendSelectionIfNeeded(transport);
                 UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
             }
 
-            if (EditorApplication.timeSinceStartup < _nextSendTime ||
+            if (guestFileSyncing ||
+                EditorApplication.timeSinceStartup < _nextSendTime ||
                 EditorApplication.isPlayingOrWillChangePlaymode ||
                 (_state != UnitySyncSessionState.Hosting && _state != UnitySyncSessionState.Connected))
             {
@@ -342,6 +403,8 @@ namespace Glasspage.UnitySync
 
             _state = UnitySyncSessionState.Idle;
             _joinCode = string.Empty;
+            _guestJoinCode = string.Empty;
+            UnitySyncFileSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();
@@ -368,6 +431,96 @@ namespace Glasspage.UnitySync
             {
                 StopInternal(true);
             }
+        }
+
+        internal static void PrepareFileSyncReloadReconnect()
+        {
+            if (_state != UnitySyncSessionState.Connected ||
+                string.IsNullOrWhiteSpace(_guestJoinCode))
+            {
+                return;
+            }
+
+            SessionState.SetBool(FileSyncResumePendingKey, true);
+            SessionState.SetString(FileSyncResumeJoinCodeKey, _guestJoinCode);
+            SessionState.SetString(FileSyncResumeDisplayNameKey, _displayName);
+            SessionState.SetString(
+                FileSyncResumeColorKey,
+                "#" + ColorUtility.ToHtmlStringRGB(_color));
+        }
+
+        internal static void ClearFileSyncReloadReconnect()
+        {
+            SessionState.SetBool(FileSyncResumePendingKey, false);
+            SessionState.SetString(FileSyncResumeJoinCodeKey, string.Empty);
+            SessionState.SetString(FileSyncResumeDisplayNameKey, string.Empty);
+            SessionState.SetString(FileSyncResumeColorKey, string.Empty);
+        }
+
+        private static void ScheduleFileSyncResume()
+        {
+            if (!SessionState.GetBool(FileSyncResumePendingKey, false))
+            {
+                return;
+            }
+
+            _fileSyncResumeAttempts = 0;
+            _nextFileSyncResumeAttemptTime = EditorApplication.timeSinceStartup + 0.25d;
+            EditorApplication.update += TryResumeAfterFileSyncReload;
+        }
+
+        private static void TryResumeAfterFileSyncReload()
+        {
+            if (!SessionState.GetBool(FileSyncResumePendingKey, false))
+            {
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                return;
+            }
+
+            if (_transport != null ||
+                EditorApplication.timeSinceStartup < _nextFileSyncResumeAttemptTime)
+            {
+                return;
+            }
+
+            string joinCode = SessionState.GetString(FileSyncResumeJoinCodeKey, string.Empty);
+            string displayName = SessionState.GetString(
+                FileSyncResumeDisplayNameKey,
+                "Collaborator");
+            string colorText = SessionState.GetString(
+                FileSyncResumeColorKey,
+                "#FFFFFF");
+            Color color = Color.white;
+            ColorUtility.TryParseHtmlString(colorText, out color);
+
+            if (string.IsNullOrWhiteSpace(joinCode))
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                return;
+            }
+
+            _fileSyncResumeAttempts++;
+            if (Connect(joinCode, displayName, color, out string error))
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                AddLog("Resuming UnitySync after synchronized scripts reloaded.");
+                Changed?.Invoke();
+                return;
+            }
+
+            if (_fileSyncResumeAttempts >= MaximumFileSyncResumeAttempts)
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                AddLog("Could not resume UnitySync after synchronized scripts reloaded: " + error);
+                Changed?.Invoke();
+                return;
+            }
+
+            _nextFileSyncResumeAttemptTime =
+                EditorApplication.timeSinceStartup + FileSyncResumeRetrySeconds;
         }
 
         private static Guid LoadOrCreatePlayerId()

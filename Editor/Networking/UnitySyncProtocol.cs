@@ -15,7 +15,14 @@ namespace Glasspage.UnitySync
         SceneSnapshotRequest = 6,
         SceneSnapshotBegin = 7,
         SceneSnapshotEnd = 8,
-        Selection = 9
+        Selection = 9,
+        FileSyncRequest = 10,
+        FileManifestBegin = 11,
+        FileManifestEntry = 12,
+        FileManifestEnd = 13,
+        FileRequest = 14,
+        FileChunk = 15,
+        FileSyncAbort = 16
     }
 
     internal readonly struct UnitySyncViewportState
@@ -70,6 +77,19 @@ namespace Glasspage.UnitySync
         }
     }
 
+    internal sealed class UnitySyncFileSyncMessage
+    {
+        internal Guid SyncId;
+        internal string Path = string.Empty;
+        internal long Length;
+        internal long Offset;
+        internal int FileCount;
+        internal long TotalBytes;
+        internal byte[] Hash = new byte[0];
+        internal byte[] Data = new byte[0];
+        internal string Error = string.Empty;
+    }
+
     internal readonly struct UnitySyncMessage
     {
         internal readonly UnitySyncMessageType Type;
@@ -79,6 +99,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly UnitySyncSelectionState Selection;
+        internal readonly UnitySyncFileSyncMessage FileSync;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
@@ -87,7 +108,8 @@ namespace Glasspage.UnitySync
             UnitySyncViewportState viewport,
             UnitySyncSceneObjectChange sceneChange = null,
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
-            UnitySyncSelectionState selection = default)
+            UnitySyncSelectionState selection = default,
+            UnitySyncFileSyncMessage fileSync = null)
         {
             Type = type;
             PlayerId = playerId;
@@ -96,12 +118,13 @@ namespace Glasspage.UnitySync
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
             Selection = selection;
+            FileSync = fileSync;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 9;
+        internal const int Version = 10;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -111,6 +134,9 @@ namespace Glasspage.UnitySync
         private const int MaximumPropertiesPerComponent = 65536;
         private const int MaximumArrayElements = 65536;
         private const int MaximumSelectionObjects = 4096;
+        private const int MaximumFileManifestEntries = 250000;
+        private const int MaximumFilePathBytes = 4096;
+        internal const int MaximumFileChunkBytes = 512 * 1024;
 
         internal static byte[] CreateHello(Guid playerId, string displayName)
         {
@@ -182,6 +208,144 @@ namespace Glasspage.UnitySync
 
                     WriteGuid(writer, parsedId);
                 }
+            });
+        }
+
+        internal static byte[] CreateFileSyncRequest(Guid playerId)
+        {
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileSyncRequest);
+                WriteGuid(writer, playerId);
+            });
+        }
+
+        internal static byte[] CreateFileManifestBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, false);
+            if (state.FileCount < 0 ||
+                state.FileCount > MaximumFileManifestEntries ||
+                state.TotalBytes < 0)
+            {
+                throw new InvalidDataException("Invalid file manifest.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileManifestBegin);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                writer.Write(state.FileCount);
+                writer.Write(state.TotalBytes);
+            });
+        }
+
+        internal static byte[] CreateFileManifestEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            if (state.Length < 0 || state.Hash == null || state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid file manifest entry.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileManifestEntry);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Hash);
+            });
+        }
+
+        internal static byte[] CreateFileManifestEnd(
+            Guid playerId,
+            Guid syncId)
+        {
+            if (syncId == Guid.Empty)
+            {
+                throw new InvalidDataException("A file sync ID is required.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileManifestEnd);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, syncId);
+            });
+        }
+
+        internal static byte[] CreateFileRequest(
+            Guid playerId,
+            Guid syncId,
+            string path)
+        {
+            if (syncId == Guid.Empty)
+            {
+                throw new InvalidDataException("A file sync ID is required.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileRequest);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, syncId);
+                WriteFilePath(writer, path);
+            });
+        }
+
+        internal static byte[] CreateFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            byte[] data = state.Data ?? new byte[0];
+            if (state.Length < 0 ||
+                state.Offset < 0 ||
+                state.Offset > state.Length ||
+                data.Length > MaximumFileChunkBytes ||
+                state.Offset + data.Length > state.Length ||
+                state.Hash == null ||
+                state.Hash.Length != 32)
+            {
+                throw new InvalidDataException("Invalid file chunk.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileChunk);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                writer.Write(state.Length);
+                writer.Write(state.Offset);
+                writer.Write(state.Hash);
+                writer.Write(data.Length);
+                writer.Write(data);
+            });
+        }
+
+        internal static byte[] CreateFileSyncAbort(
+            Guid playerId,
+            Guid syncId,
+            string error)
+        {
+            if (syncId == Guid.Empty)
+            {
+                throw new InvalidDataException("A file sync ID is required.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileSyncAbort);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, syncId);
+                WriteLimitedString(writer, error ?? string.Empty);
             });
         }
 
@@ -329,6 +493,173 @@ namespace Glasspage.UnitySync
                                 new UnitySyncSelectionState(playerId, selectionColor, objectIds));
                             break;
 
+                        case UnitySyncMessageType.FileSyncRequest:
+                            playerId = ReadGuid(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                new UnitySyncFileSyncMessage());
+                            break;
+
+                        case UnitySyncMessageType.FileManifestBegin:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage manifestBegin = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                FileCount = reader.ReadInt32(),
+                                TotalBytes = reader.ReadInt64()
+                            };
+                            if (manifestBegin.SyncId == Guid.Empty ||
+                                manifestBegin.FileCount < 0 ||
+                                manifestBegin.FileCount > MaximumFileManifestEntries ||
+                                manifestBegin.TotalBytes < 0)
+                            {
+                                throw new InvalidDataException("Invalid file manifest.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                manifestBegin);
+                            break;
+
+                        case UnitySyncMessageType.FileManifestEntry:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage manifestEntry = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            if (manifestEntry.SyncId == Guid.Empty || manifestEntry.Length < 0)
+                            {
+                                throw new InvalidDataException("Invalid file manifest entry.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                manifestEntry);
+                            break;
+
+                        case UnitySyncMessageType.FileManifestEnd:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage manifestEnd = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader)
+                            };
+                            if (manifestEnd.SyncId == Guid.Empty)
+                            {
+                                throw new InvalidDataException("Invalid file manifest end.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                manifestEnd);
+                            break;
+
+                        case UnitySyncMessageType.FileRequest:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage fileRequest = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader)
+                            };
+                            if (fileRequest.SyncId == Guid.Empty)
+                            {
+                                throw new InvalidDataException("Invalid file request.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                fileRequest);
+                            break;
+
+                        case UnitySyncMessageType.FileChunk:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage fileChunk = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Path = ReadFilePath(reader),
+                                Length = reader.ReadInt64(),
+                                Offset = reader.ReadInt64(),
+                                Hash = ReadExactBytes(reader, 32)
+                            };
+                            int chunkLength = reader.ReadInt32();
+                            if (fileChunk.SyncId == Guid.Empty ||
+                                fileChunk.Length < 0 ||
+                                fileChunk.Offset < 0 ||
+                                fileChunk.Offset > fileChunk.Length ||
+                                chunkLength < 0 ||
+                                chunkLength > MaximumFileChunkBytes ||
+                                fileChunk.Offset + chunkLength > fileChunk.Length)
+                            {
+                                throw new InvalidDataException("Invalid file chunk.");
+                            }
+
+                            fileChunk.Data = ReadExactBytes(reader, chunkLength);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                fileChunk);
+                            break;
+
+                        case UnitySyncMessageType.FileSyncAbort:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage fileAbort = new UnitySyncFileSyncMessage
+                            {
+                                SyncId = ReadGuid(reader),
+                                Error = ReadLimitedString(reader)
+                            };
+                            if (fileAbort.SyncId == Guid.Empty)
+                            {
+                                throw new InvalidDataException("Invalid file sync abort.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                fileAbort);
+                            break;
+
                         case UnitySyncMessageType.SceneObjectChange:
                             playerId = ReadGuid(reader);
                             UnitySyncSceneObjectChange sceneChange = ReadSceneObjectChange(reader);
@@ -441,6 +772,55 @@ namespace Glasspage.UnitySync
             }
 
             return Encoding.UTF8.GetString(bytes);
+        }
+
+        private static void ValidateFileSyncState(
+            UnitySyncFileSyncMessage state,
+            bool requirePath)
+        {
+            if (state == null || state.SyncId == Guid.Empty)
+            {
+                throw new InvalidDataException("Invalid file sync state.");
+            }
+
+            if (requirePath && string.IsNullOrEmpty(state.Path))
+            {
+                throw new InvalidDataException("A file path is required.");
+            }
+        }
+
+        private static void WriteFilePath(BinaryWriter writer, string path)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(path ?? string.Empty);
+            if (bytes.Length == 0 || bytes.Length > MaximumFilePathBytes)
+            {
+                throw new InvalidDataException("Invalid file path.");
+            }
+
+            writer.Write((ushort)bytes.Length);
+            writer.Write(bytes);
+        }
+
+        private static string ReadFilePath(BinaryReader reader)
+        {
+            int byteCount = reader.ReadUInt16();
+            if (byteCount <= 0 || byteCount > MaximumFilePathBytes)
+            {
+                throw new InvalidDataException("Invalid file path.");
+            }
+
+            return Encoding.UTF8.GetString(ReadExactBytes(reader, byteCount));
+        }
+
+        private static byte[] ReadExactBytes(BinaryReader reader, int count)
+        {
+            byte[] bytes = reader.ReadBytes(count);
+            if (bytes.Length != count)
+            {
+                throw new EndOfStreamException();
+            }
+
+            return bytes;
         }
 
         private static void WriteSceneObjectChange(BinaryWriter writer, UnitySyncSceneObjectChange change)

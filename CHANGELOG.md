@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+- Add the first host-to-guest project file synchronization pass. Guests now reconcile host files before requesting the initial scene snapshot.
+- Build a SHA-256 manifest for files under Assets and transfer only files that are missing or whose local hash differs from the host.
+- Include .meta files so synchronized assets retain the host project's GUIDs and references.
+- Transfer large files in 512 KiB encrypted chunks instead of requiring an entire asset to fit inside one UnitySync frame.
+- Keep guest-only files untouched; this initial implementation only creates or replaces files represented by the host manifest.
+- Exclude every directory named SerializedUdonPrograms and its folder .meta from file synchronization.
+- Validate synchronized paths so file writes cannot escape Assets or enter an excluded SerializedUdonPrograms tree.
+- Show a modal Unity progress bar while the guest compares, downloads, imports, and compiles synchronized Assets, preventing normal editor interaction during the join reconciliation phase.
+- Suppress guest scene publishing and ignore interim remote scene edits until file reconciliation completes, then request a fresh host scene snapshot.
+- Refresh/import synchronized Assets before scene synchronization and automatically reconnect after an assembly reload when synchronized scripts trigger recompilation.
+- Bump the UnitySync wire protocol to version 10 for file manifest, request, chunk, and abort messages.
+
 ## 0.3.6
 
 - Fix the custom stacked selection-outline compositor being vertically inverted on graphics APIs whose render textures use a top-origin UV convention.
