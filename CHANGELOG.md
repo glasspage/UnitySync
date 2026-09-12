@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+
+- Restore the dedicated typed staging-reference validator so valid object references in arrays are not rejected during initial scene synchronization.
+- Keep raw instance-ID validation and clearing restricted to live destination components, preserving the stale-PPtr cast fix from 0.4.2.
+- Fix snapshot application for array-backed references such as VRCSceneDescriptor spawns and MeshRenderer materials, as well as staged MeshFilter mesh references.
+
 ## 0.4.2
 
 - Prevent initial scene synchronization from dereferencing stale local serialized object references while copying validated staging data back onto guest components.
