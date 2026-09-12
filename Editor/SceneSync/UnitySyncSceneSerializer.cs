@@ -722,12 +722,8 @@ namespace Glasspage.UnitySync
             RenderSettings.fogStartDistance = descriptor.FogStartDistance;
             RenderSettings.fogEndDistance = descriptor.FogEndDistance;
             RenderSettings.skybox = skyboxMaterial;
-            if (descriptor.DefaultReflectionMode ==
-                UnityEngine.Rendering.DefaultReflectionMode.Custom)
-            {
-                RenderSettings.customReflection = customReflection;
-            }
-
+            // Custom reflection is applied through the serialized m_CustomReflection field.
+            // Avoid the public property because Unity throws when its hidden value is not a Cubemap.
             RenderSettings.sun = sun;
 
             return true;
