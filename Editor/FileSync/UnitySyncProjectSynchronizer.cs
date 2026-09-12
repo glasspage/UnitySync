@@ -168,9 +168,13 @@ namespace Glasspage.UnitySync
             double due = GetMonotonicSeconds() + DirtyAssetSaveDelaySeconds;
             foreach (UndoPropertyModification modification in modifications)
             {
-                Object target = modification.currentValue.target != null
-                    ? modification.currentValue.target
-                    : modification.previousValue.target;
+                PropertyModification current = modification.currentValue;
+                PropertyModification previous = modification.previousValue;
+                Object target = current != null && current.target != null
+                    ? current.target
+                    : previous != null
+                        ? previous.target
+                        : null;
                 if (target == null)
                 {
                     continue;
