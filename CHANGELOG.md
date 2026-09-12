@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6
+
+- Fix the custom stacked selection-outline compositor being vertically inverted on graphics APIs whose render textures use a top-origin UV convention.
+- Increase stacked collaborator outline bands from 1 px to 2 px so outlines outside the local Unity selection remain visually comparable to the native selection outline.
+
 ## 0.3.5
 
 - Synchronize each collaborator's current Scene selection as lightweight session presence without creating new scene object identities just from clicking an object.
