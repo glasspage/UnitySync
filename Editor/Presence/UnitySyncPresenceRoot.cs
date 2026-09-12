@@ -6,6 +6,18 @@ using UnityEngine;
 
 namespace Glasspage.UnitySync
 {
+    internal readonly struct UnitySyncRemoteParticipant
+    {
+        internal readonly string DisplayName;
+        internal readonly Color Color;
+
+        internal UnitySyncRemoteParticipant(string displayName, Color color)
+        {
+            DisplayName = displayName;
+            Color = color;
+        }
+    }
+
     [InitializeOnLoad]
     internal static class UnitySyncPresenceRoot
     {
@@ -322,9 +334,10 @@ namespace Glasspage.UnitySync
             DestroyCollaboratorsContainerIfEmpty();
         }
 
-        internal static string[] GetParticipantNames()
+        internal static UnitySyncRemoteParticipant[] GetParticipants()
         {
-            List<string> names = new List<string>();
+            List<UnitySyncRemoteParticipant> participants =
+                new List<UnitySyncRemoteParticipant>();
             List<Guid> staleIds = new List<Guid>();
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
             {
@@ -338,7 +351,9 @@ namespace Glasspage.UnitySync
                 }
                 else
                 {
-                    names.Add(pair.Value.DisplayName);
+                    participants.Add(new UnitySyncRemoteParticipant(
+                        pair.Value.DisplayName,
+                        pair.Value.Color));
                 }
             }
 
@@ -349,8 +364,11 @@ namespace Glasspage.UnitySync
 
             DestroyCollaboratorsContainerIfEmpty();
 
-            names.Sort(StringComparer.OrdinalIgnoreCase);
-            return names.ToArray();
+            participants.Sort((left, right) =>
+                StringComparer.OrdinalIgnoreCase.Compare(
+                    left.DisplayName,
+                    right.DisplayName));
+            return participants.ToArray();
         }
 
         internal static void Clear()

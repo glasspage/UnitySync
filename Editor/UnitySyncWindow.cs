@@ -25,6 +25,7 @@ namespace Glasspage.UnitySync
         private bool _showJoinControls;
         private bool _showHostingControls = true;
         private bool _showJoinedControls = true;
+        private bool _showActivityLog;
         private bool _showDebug;
         private string _debugDisplayName = "Debug User";
         private Color _debugColor;
@@ -100,7 +101,7 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(14f);
             DrawParticipants();
             EditorGUILayout.Space(12f);
-            DrawActivity();
+            DrawActivityLog();
             EditorGUILayout.Space(12f);
             DrawDebug();
             EditorGUILayout.Space(8f);
@@ -363,29 +364,46 @@ namespace Glasspage.UnitySync
             state.textColor = color;
         }
 
-        private static void DrawParticipants()
+        private void DrawParticipants()
         {
-            EditorGUILayout.LabelField("Remote collaborators", EditorStyles.boldLabel);
-            string[] names = UnitySyncSession.GetParticipantNames();
-            if (names.Length == 0)
-            {
-                EditorGUILayout.LabelField("None", EditorStyles.miniLabel);
-                return;
-            }
+            EditorGUILayout.LabelField("Collaborators", EditorStyles.boldLabel);
+            DrawParticipantLabel(_displayName + " (you)", _color);
 
-            foreach (string participantName in names)
+            UnitySyncRemoteParticipant[] participants = UnitySyncSession.GetRemoteParticipants();
+            foreach (UnitySyncRemoteParticipant participant in participants)
             {
-                EditorGUILayout.LabelField("• " + participantName);
+                DrawParticipantLabel(participant.DisplayName, participant.Color);
             }
         }
 
-        private static void DrawActivity()
+        private static void DrawParticipantLabel(string displayName, Color color)
         {
-            EditorGUILayout.LabelField("Activity", EditorStyles.boldLabel);
+            GUIStyle style = new GUIStyle(EditorStyles.label);
+            SetTextColor(style.normal, color);
+            SetTextColor(style.hover, color);
+            SetTextColor(style.active, color);
+            SetTextColor(style.focused, color);
+            SetTextColor(style.onNormal, color);
+            SetTextColor(style.onHover, color);
+            SetTextColor(style.onActive, color);
+            SetTextColor(style.onFocused, color);
+            EditorGUILayout.LabelField("• " + displayName, style);
+        }
+
+        private void DrawActivityLog()
+        {
+            _showActivityLog = EditorGUILayout.Foldout(_showActivityLog, "Activity Log", true);
+            if (!_showActivityLog)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
             string[] logs = UnitySyncSession.GetLogs();
             if (logs.Length == 0)
             {
                 EditorGUILayout.LabelField("No activity yet", EditorStyles.miniLabel);
+                EditorGUI.indentLevel--;
                 return;
             }
 
@@ -394,6 +412,8 @@ namespace Glasspage.UnitySync
             {
                 EditorGUILayout.LabelField(logs[i], EditorStyles.wordWrappedMiniLabel);
             }
+
+            EditorGUI.indentLevel--;
         }
 
         private void DrawDebug()
