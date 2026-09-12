@@ -15,6 +15,7 @@ namespace Glasspage.UnitySync
         Disconnected,
         Viewport,
         Selection,
+        FileSync,
         PeerLeft,
         SceneObjectChange,
         SceneSnapshotRequest,
@@ -28,6 +29,8 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncTransportEventKind Kind;
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSelectionState Selection;
+        internal readonly UnitySyncMessageType MessageType;
+        internal readonly UnitySyncFileSyncMessage FileSync;
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly Guid PlayerId;
@@ -40,11 +43,15 @@ namespace Glasspage.UnitySync
             Guid playerId,
             string message,
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
-            UnitySyncSelectionState selection = default)
+            UnitySyncSelectionState selection = default,
+            UnitySyncMessageType messageType = 0,
+            UnitySyncFileSyncMessage fileSync = null)
         {
             Kind = kind;
             Viewport = viewport;
             Selection = selection;
+            MessageType = messageType;
+            FileSync = fileSync;
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
             PlayerId = playerId;
@@ -198,6 +205,69 @@ namespace Glasspage.UnitySync
             }
 
             _outboundSignal.Set();
+        }
+
+        internal void RequestFileSync()
+        {
+            QueueMessage(UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId), Guid.Empty);
+        }
+
+        internal void RequestFile(Guid syncId, string path)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileRequest(_localPlayerId, syncId, path),
+                Guid.Empty);
+        }
+
+        internal void SendFileManifestBegin(
+            Guid playerId,
+            UnitySyncFileSyncMessage state,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileManifestBegin(playerId, state),
+                targetPlayerId);
+        }
+
+        internal void SendFileManifestEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage state,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileManifestEntry(playerId, state),
+                targetPlayerId);
+        }
+
+        internal void SendFileManifestEnd(
+            Guid playerId,
+            Guid syncId,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileManifestEnd(playerId, syncId),
+                targetPlayerId);
+        }
+
+        internal void SendFileChunk(
+            Guid playerId,
+            UnitySyncFileSyncMessage state,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileChunk(playerId, state),
+                targetPlayerId);
+        }
+
+        internal void SendFileSyncAbort(
+            Guid playerId,
+            Guid syncId,
+            string error,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileSyncAbort(playerId, syncId, error),
+                targetPlayerId);
         }
 
         internal void SendSceneObjectChange(
@@ -525,6 +595,19 @@ namespace Glasspage.UnitySync
                             Broadcast(UnitySyncProtocol.CreateSelection(message.Selection), peer);
                             break;
 
+                        case UnitySyncMessageType.FileSyncRequest:
+                        case UnitySyncMessageType.FileRequest:
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
+                        case UnitySyncMessageType.FileManifestBegin:
+                        case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.FileManifestEnd:
+                        case UnitySyncMessageType.FileChunk:
+                        case UnitySyncMessageType.FileSyncAbort:
+                            throw new InvalidDataException(
+                                "A collaborator sent a host-only file sync message.");
+
                         case UnitySyncMessageType.SceneObjectChange:
                             EnqueueSceneChange(message.PlayerId, message.SceneChange);
                             Broadcast(
@@ -626,6 +709,25 @@ namespace Glasspage.UnitySync
 
                             EnqueueSelection(message.Selection);
                             break;
+
+                        case UnitySyncMessageType.FileManifestBegin:
+                        case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.FileManifestEnd:
+                        case UnitySyncMessageType.FileChunk:
+                        case UnitySyncMessageType.FileSyncAbort:
+                            if (message.PlayerId == Guid.Empty || message.FileSync == null)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid file sync message.");
+                            }
+
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
+                        case UnitySyncMessageType.FileSyncRequest:
+                        case UnitySyncMessageType.FileRequest:
+                            throw new InvalidDataException(
+                                "The host sent a guest-only file sync message.");
 
                         case UnitySyncMessageType.PeerLeft:
                             EnqueuePeerLeft(message.PlayerId);
@@ -958,6 +1060,26 @@ namespace Glasspage.UnitySync
                     string.Empty,
                     null,
                     selection));
+            }
+        }
+
+        private void EnqueueFileSync(
+            UnitySyncMessageType messageType,
+            Guid playerId,
+            UnitySyncFileSyncMessage fileSync)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.FileSync,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    null,
+                    default,
+                    messageType,
+                    fileSync));
             }
         }
 
