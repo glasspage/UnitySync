@@ -1,6 +1,6 @@
 # UnitySync
 
-UnitySync is an experimental real-time collaboration add-on for the Unity Editor.
+UnitySync is an experimental real-time collaboration add-on for Unity Editor 2021.3+.
 
 Version 0.2 adds the first scene-edit synchronization layer. A host can create an encrypted session, collaborators can join with a compact code, everyone can see one another's Scene view camera, and edits to matching scene objects are replicated in real time.
 
