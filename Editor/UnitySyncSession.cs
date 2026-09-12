@@ -58,6 +58,12 @@ namespace Glasspage.UnitySync
         internal static string JoinCode => _joinCode;
         internal static bool IsActive => _transport != null;
         internal static bool IsFileSyncing => UnitySyncFileSynchronizer.IsGuestSyncing;
+        internal static bool IsAwaitingFileDownloadConfirmation =>
+            UnitySyncFileSynchronizer.IsGuestAwaitingDownloadConfirmation;
+        internal static int PendingFileDownloadCount =>
+            UnitySyncFileSynchronizer.GuestPendingDownloadFileCount;
+        internal static long PendingFileDownloadBytes =>
+            UnitySyncFileSynchronizer.GuestPendingDownloadBytes;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
         internal static Guid CurrentPlayerId => LocalPlayerId;
         internal static Guid SpectatingPlayerId => _spectatingPlayerId;
@@ -182,6 +188,30 @@ namespace Glasspage.UnitySync
             StopInternal(true);
         }
 
+        internal static bool ContinueFileSync(out string error)
+        {
+            error = string.Empty;
+            if (_transport == null || _state != UnitySyncSessionState.Connected)
+            {
+                error = "UnitySync is not connected to a host.";
+                return false;
+            }
+
+            if (!UnitySyncFileSynchronizer.ContinueGuestSync(_transport, out error))
+            {
+                return false;
+            }
+
+            AddLog(
+                "Continuing host file download: " +
+                PendingFileDownloadCount +
+                " file(s), " +
+                PendingFileDownloadBytes +
+                " byte(s).");
+            Changed?.Invoke();
+            return true;
+        }
+
         internal static void SetLocalColor(Color color)
         {
             Color normalizedColor = NormalizeColor(color);
@@ -205,6 +235,27 @@ namespace Glasspage.UnitySync
         internal static void ReportSceneSyncIssue(string message)
         {
             AddLog(message);
+        }
+
+        internal static void ReportFileSyncDownloadRequired(
+            string[] neededPaths,
+            long totalBytes)
+        {
+            if (neededPaths == null || neededPaths.Length == 0)
+            {
+                return;
+            }
+
+            AddLog(
+                "Host file comparison found " +
+                neededPaths.Length +
+                " file(s) to download (" +
+                totalBytes +
+                " byte(s)).");
+            AddLog(
+                "Files needed from host:\n" +
+                string.Join("\n", neededPaths));
+            Changed?.Invoke();
         }
 
         internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
