@@ -286,10 +286,15 @@ namespace Glasspage.UnitySync
                 renderSettings,
                 "m_SkyboxMaterial",
                 RenderSettings.skybox);
-            Object reflectionValue = GetObjectReference(
-                renderSettings,
-                "m_CustomReflection",
-                RenderSettings.customReflection);
+            UnityEngine.Rendering.DefaultReflectionMode reflectionMode =
+                (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
+                    renderSettings,
+                    "m_DefaultReflectionMode",
+                    (int)RenderSettings.defaultReflectionMode);
+            Object reflectionValue = reflectionMode ==
+                    UnityEngine.Rendering.DefaultReflectionMode.Custom
+                ? GetObjectReference(renderSettings, "m_CustomReflection", null)
+                : null;
             Object sunValue = GetObjectReference(
                 renderSettings,
                 "m_Sun",
@@ -348,10 +353,7 @@ namespace Glasspage.UnitySync
                     renderSettings,
                     "m_AmbientGroundColor",
                     RenderSettings.ambientGroundColor),
-                DefaultReflectionMode = (UnityEngine.Rendering.DefaultReflectionMode)GetInt(
-                    renderSettings,
-                    "m_DefaultReflectionMode",
-                    (int)RenderSettings.defaultReflectionMode),
+                DefaultReflectionMode = reflectionMode,
                 DefaultReflectionResolution = GetInt(
                     renderSettings,
                     "m_DefaultReflectionResolution",
