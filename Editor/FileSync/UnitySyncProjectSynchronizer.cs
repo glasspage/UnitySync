@@ -209,6 +209,22 @@ namespace Glasspage.UnitySync
 
         private static void OnFileRenamed(object sender, RenamedEventArgs args)
         {
+            if (Directory.Exists(args.FullPath))
+            {
+                foreach (string movedFile in Directory.GetFiles(
+                             args.FullPath,
+                             "*",
+                             SearchOption.AllDirectories))
+                {
+                    string suffix = movedFile.Substring(args.FullPath.Length)
+                        .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    QueuePath(Path.Combine(args.OldFullPath, suffix));
+                    QueuePath(movedFile);
+                }
+
+                return;
+            }
+
             QueuePath(args.OldFullPath);
             QueuePath(args.FullPath);
         }
@@ -691,7 +707,22 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            string extension = Path.GetExtension(normalized);
+            string effectivePath = normalized;
+            if (effectivePath.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                effectivePath = effectivePath.Substring(
+                    0,
+                    effectivePath.Length - ".meta".Length);
+            }
+
+            if (effectivePath.EndsWith(
+                    "/SerializedUdonPrograms",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string extension = Path.GetExtension(effectivePath);
             if (string.Equals(extension, ".unity", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".dll", StringComparison.OrdinalIgnoreCase) ||
