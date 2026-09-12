@@ -591,15 +591,17 @@ namespace Glasspage.UnitySync
                 }
 
                 string stateKey = GetStateKey(change);
-                if (change.Kind != UnitySyncSceneChangeKind.Destroy &&
-                    TryGetHash(change, out string hash) &&
+                string hash = string.Empty;
+                bool hasHash = change.Kind != UnitySyncSceneChangeKind.Destroy &&
+                               TryGetHash(change, out hash);
+                if (hasHash &&
                     KnownHashes.TryGetValue(stateKey, out string knownHash) &&
                     knownHash == hash)
                 {
                     continue;
                 }
 
-                if (change.Kind != UnitySyncSceneChangeKind.Destroy && !string.IsNullOrEmpty(hash))
+                if (hasHash)
                 {
                     KnownHashes[stateKey] = hash;
                 }
