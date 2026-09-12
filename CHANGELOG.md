@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Fixed built-in Unity resources such as primitive meshes resolving to incompatible objects during scene synchronization.
+- Added asset path, type, and name validation to synchronized object references.
+
 ## 0.2.0
 
 - Added live synchronization for existing scene GameObjects, transforms, component lists, and serialized component settings.

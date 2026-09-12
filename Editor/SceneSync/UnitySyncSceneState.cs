@@ -61,6 +61,9 @@ namespace Glasspage.UnitySync
     {
         internal UnitySyncObjectReferenceKind Kind;
         internal string AssetGuid = string.Empty;
+        internal string AssetPath = string.Empty;
+        internal string AssetTypeName = string.Empty;
+        internal string AssetName = string.Empty;
         internal long LocalFileId;
         internal UnitySyncSceneObjectAddress SceneObject;
         internal int ComponentIndex = -1;

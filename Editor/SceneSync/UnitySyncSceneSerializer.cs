@@ -511,12 +511,23 @@ namespace Glasspage.UnitySync
                 return reference.ComponentIndex >= 0;
             }
 
-            if (EditorUtility.IsPersistent(value) &&
-                AssetDatabase.TryGetGUIDAndLocalFileIdentifier(value, out string guid, out long localFileId) &&
-                !string.IsNullOrEmpty(guid))
+            if (EditorUtility.IsPersistent(value))
             {
+                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                    value,
+                    out string guid,
+                    out long localFileId);
+                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) && !IsBuiltinAssetPath(assetPath))
+                {
+                    return false;
+                }
+
                 reference.Kind = UnitySyncObjectReferenceKind.Asset;
-                reference.AssetGuid = guid;
+                reference.AssetGuid = guid ?? string.Empty;
+                reference.AssetPath = assetPath;
+                reference.AssetTypeName = GetStableTypeName(value.GetType());
+                reference.AssetName = value.name ?? string.Empty;
                 reference.LocalFileId = localFileId;
                 return true;
             }
@@ -666,7 +677,10 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ObjectReference:
-                        if (!TryResolveObjectReference(state.ObjectReference, out Object objectReference)) return false;
+                        if (!TryResolveObjectReference(
+                                state.ObjectReference,
+                                property.objectReferenceValue,
+                                out Object objectReference)) return false;
                         property.objectReferenceValue = objectReference;
                         return true;
 
@@ -733,7 +747,10 @@ namespace Glasspage.UnitySync
                         return true;
 
                     case UnitySyncSerializedValueKind.ExposedReference:
-                        if (!TryResolveObjectReference(state.ObjectReference, out Object exposedReference)) return false;
+                        if (!TryResolveObjectReference(
+                                state.ObjectReference,
+                                property.exposedReferenceValue,
+                                out Object exposedReference)) return false;
                         property.exposedReferenceValue = exposedReference;
                         return true;
 
@@ -900,6 +917,7 @@ namespace Glasspage.UnitySync
 
         private static bool TryResolveObjectReference(
             UnitySyncObjectReferenceState reference,
+            Object currentValue,
             out Object value)
         {
             value = null;
@@ -934,28 +952,100 @@ namespace Glasspage.UnitySync
 
             if (reference.Kind == UnitySyncObjectReferenceKind.Asset)
             {
+                if (AssetReferenceMatches(currentValue, reference))
+                {
+                    value = currentValue;
+                    return true;
+                }
+
                 string assetPath = AssetDatabase.GUIDToAssetPath(reference.AssetGuid);
                 if (string.IsNullOrEmpty(assetPath))
                 {
-                    return false;
+                    assetPath = reference.AssetPath;
                 }
 
-                foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(assetPath))
+                if (!string.IsNullOrEmpty(assetPath))
                 {
-                    if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
-                            candidate,
-                            out string candidateGuid,
-                            out long candidateFileId) &&
-                        candidateGuid == reference.AssetGuid &&
-                        candidateFileId == reference.LocalFileId)
+                    foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(assetPath))
                     {
-                        value = candidate;
-                        return true;
+                        if (AssetReferenceMatches(candidate, reference))
+                        {
+                            value = candidate;
+                            return true;
+                        }
+                    }
+                }
+
+                if (IsBuiltinAssetReference(reference))
+                {
+                    Type assetType = ResolveType(reference.AssetTypeName);
+                    if (assetType == null || !typeof(Object).IsAssignableFrom(assetType))
+                    {
+                        return false;
+                    }
+
+                    foreach (Object candidate in Resources.FindObjectsOfTypeAll(assetType))
+                    {
+                        if (AssetReferenceMatches(candidate, reference))
+                        {
+                            value = candidate;
+                            return true;
+                        }
                     }
                 }
             }
 
             return false;
+        }
+
+        private static bool AssetReferenceMatches(
+            Object candidate,
+            UnitySyncObjectReferenceState reference)
+        {
+            if (candidate == null ||
+                !TypeMatches(candidate.GetType(), reference.AssetTypeName) ||
+                candidate.name != reference.AssetName)
+            {
+                return false;
+            }
+
+            if (IsBuiltinAssetReference(reference))
+            {
+                string candidatePath = AssetDatabase.GetAssetPath(candidate) ?? string.Empty;
+                return EditorUtility.IsPersistent(candidate) &&
+                       (string.IsNullOrEmpty(candidatePath) || IsBuiltinAssetPath(candidatePath));
+            }
+
+            return AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                       candidate,
+                       out string candidateGuid,
+                       out long candidateFileId) &&
+                   candidateGuid == reference.AssetGuid &&
+                   candidateFileId == reference.LocalFileId;
+        }
+
+        private static bool IsBuiltinAssetReference(UnitySyncObjectReferenceState reference)
+        {
+            return reference != null &&
+                   (IsBuiltinAssetPath(reference.AssetPath) ||
+                    reference.AssetGuid == "0000000000000000e000000000000000" ||
+                    reference.AssetGuid == "0000000000000000f000000000000000");
+        }
+
+        private static bool IsBuiltinAssetPath(string assetPath)
+        {
+            return string.Equals(
+                       assetPath,
+                       "Resources/unity_builtin_extra",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       assetPath,
+                       "Library/unity default resources",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       assetPath,
+                       "Library/unity editor resources",
+                       StringComparison.OrdinalIgnoreCase);
         }
 
         private static AnimationCurve CreateAnimationCurve(UnitySyncAnimationCurveState state)
