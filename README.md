@@ -29,7 +29,7 @@ The host listens on all local interfaces. The address field controls the address
 
 While connected, UnitySync creates temporary objects under `[UnitySync] > Collaborators`. Every remote user gets a child GameObject named `Username (Viewport)` with an `EditorOnly` tag and a Scene view camera gizmo. The generated hierarchy uses `DontSaveInEditor` and is removed when the session stops.
 
-Open **UnitySync > Visual Options** to change the length of remote viewport direction lines or the opacity of viewport indicators.
+Open **UnitySync > Visual Options** to change the length of remote viewport direction lines, the opacity of viewport indicators, or the intensity of their adaptive contrast outlines. The main UnitySync window also includes a debug foldout that can summon a customizable test viewport without starting a session.
 
 ## Security model
 

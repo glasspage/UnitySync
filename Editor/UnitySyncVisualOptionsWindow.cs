@@ -17,7 +17,7 @@ namespace Glasspage.UnitySync
         {
             UnitySyncVisualOptionsWindow window = GetWindow<UnitySyncVisualOptionsWindow>();
             window.titleContent = new GUIContent("UnitySync Visuals");
-            window.minSize = new Vector2(320f, 150f);
+            window.minSize = new Vector2(320f, 170f);
             window.Show();
         }
 
@@ -53,6 +53,13 @@ namespace Glasspage.UnitySync
                 0f,
                 1f);
             UnitySyncVisualSettings.ViewportOpacity = opacity;
+
+            float contrastIntensity = EditorGUILayout.Slider(
+                new GUIContent("Contrast Intensity", "Multiplies the opacity of the adaptive viewport and username outlines."),
+                UnitySyncVisualSettings.ContrastIntensity,
+                0f,
+                1f);
+            UnitySyncVisualSettings.ContrastIntensity = contrastIntensity;
 
             EditorGUILayout.Space(12f);
             if (GUILayout.Button("Reset to Defaults"))

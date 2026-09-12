@@ -15,9 +15,11 @@ namespace Glasspage.UnitySync
     {
         private const string LineLengthPreference = "Glasspage.UnitySync.Visuals.ViewportLineLength";
         private const string ViewportOpacityPreference = "Glasspage.UnitySync.Visuals.ViewportOpacity";
+        private const string ContrastIntensityPreference = "Glasspage.UnitySync.Visuals.ContrastIntensity";
 
         internal const UnitySyncViewportLineLength DefaultLineLength = UnitySyncViewportLineLength.Long;
         internal const float DefaultViewportOpacity = 1f;
+        internal const float DefaultContrastIntensity = 0.4f;
         internal const float ShortLineDistance = 0.45f;
         internal const float LongLineDistance = 1.15f;
 
@@ -60,6 +62,22 @@ namespace Glasspage.UnitySync
             }
         }
 
+        internal static float ContrastIntensity
+        {
+            get => Mathf.Clamp01(EditorPrefs.GetFloat(ContrastIntensityPreference, DefaultContrastIntensity));
+            set
+            {
+                float clamped = Mathf.Clamp01(value);
+                if (Mathf.Approximately(ContrastIntensity, clamped))
+                {
+                    return;
+                }
+
+                EditorPrefs.SetFloat(ContrastIntensityPreference, clamped);
+                Changed?.Invoke();
+            }
+        }
+
         internal static float LineDistance
         {
             get
@@ -82,6 +100,7 @@ namespace Glasspage.UnitySync
         {
             EditorPrefs.DeleteKey(LineLengthPreference);
             EditorPrefs.DeleteKey(ViewportOpacityPreference);
+            EditorPrefs.DeleteKey(ContrastIntensityPreference);
             Changed?.Invoke();
         }
     }
