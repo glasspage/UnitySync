@@ -213,6 +213,23 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            _applyingRemoteChange = true;
+            try
+            {
+                if (!UnitySyncSceneSerializer.PrepareScenesForSnapshot(
+                        snapshot,
+                        out error))
+                {
+                    return false;
+                }
+
+                UnitySyncSceneObjectRegistry.Clear();
+            }
+            finally
+            {
+                _applyingRemoteChange = false;
+            }
+
             _remoteSnapshot = new RemoteSnapshot
             {
                 Boundary = snapshot
