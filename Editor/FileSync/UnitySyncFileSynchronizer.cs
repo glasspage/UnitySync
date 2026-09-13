@@ -1544,6 +1544,32 @@ namespace Glasspage.UnitySync
                         attributes & ~FileAttributes.ReadOnly);
                 }
             }
+
+            string[] directories = Directory.GetDirectories(
+                root,
+                "*",
+                SearchOption.AllDirectories);
+            Array.Sort(
+                directories,
+                (left, right) => right.Length.CompareTo(left.Length));
+            foreach (string directory in directories)
+            {
+                FileAttributes attributes = File.GetAttributes(directory);
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(
+                        directory,
+                        attributes & ~FileAttributes.ReadOnly);
+                }
+            }
+
+            FileAttributes rootAttributes = File.GetAttributes(root);
+            if ((rootAttributes & FileAttributes.ReadOnly) != 0)
+            {
+                File.SetAttributes(
+                    root,
+                    rootAttributes & ~FileAttributes.ReadOnly);
+            }
         }
 
         private static bool IsUnderPackageRootToReplace(string path)
