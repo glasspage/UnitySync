@@ -531,9 +531,19 @@ namespace Glasspage.UnitySync
 
         internal static bool TryRead(byte[] payload, out UnitySyncMessage message)
         {
+            return TryRead(payload, out message, out _);
+        }
+
+        internal static bool TryRead(
+            byte[] payload,
+            out UnitySyncMessage message,
+            out string error)
+        {
             message = default;
+            error = string.Empty;
             if (payload == null || payload.Length < 2)
             {
+                error = "The message header is truncated.";
                 return false;
             }
 
@@ -542,8 +552,10 @@ namespace Glasspage.UnitySync
                 using (MemoryStream stream = new MemoryStream(payload, false))
                 using (BinaryReader reader = new BinaryReader(stream, Encoding.UTF8))
                 {
-                    if (reader.ReadByte() != Version)
+                    byte version = reader.ReadByte();
+                    if (version != Version)
                     {
+                        error = "Protocol version " + version + " does not match " + Version + ".";
                         return false;
                     }
 
@@ -937,10 +949,18 @@ namespace Glasspage.UnitySync
                             break;
 
                         default:
+                            error = "Unknown message type " + (byte)type + ".";
                             return false;
                     }
 
-                    return stream.Position == stream.Length;
+                    if (stream.Position != stream.Length)
+                    {
+                        error = type + " contains " + (stream.Length - stream.Position) +
+                            " unexpected trailing bytes.";
+                        return false;
+                    }
+
+                    return true;
                 }
             }
             catch (Exception exception) when (
@@ -951,6 +971,9 @@ namespace Glasspage.UnitySync
                 exception is OverflowException ||
                 exception is DecoderFallbackException)
             {
+                error = "Message " + (UnitySyncMessageType)payload[1] +
+                    " (type " + payload[1] + ", protocol " + payload[0] +
+                    ", " + payload.Length + " bytes): " + exception.Message;
                 return false;
             }
         }
