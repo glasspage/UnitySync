@@ -52,6 +52,7 @@ namespace Glasspage.UnitySync
         private static Color _lastSelectionColor = Color.white;
         private static int _fileSyncResumeAttempts;
         private static double _nextFileSyncResumeAttemptTime;
+        private static bool _fileSyncResumeConnectionPending;
         private static bool _guestSyncApproved;
         private static Guid _spectatingPlayerId = Guid.Empty;
         private static SceneView _spectatedSceneView;
@@ -365,6 +366,14 @@ namespace Glasspage.UnitySync
                             transport,
                             _guestSyncApproved);
                         AddLog(transportEvent.Message);
+                        if (_fileSyncResumeConnectionPending)
+                        {
+                            _fileSyncResumeConnectionPending = false;
+                            ClearFileSyncReloadReconnect();
+                            EditorApplication.update -= TryResumeAfterFileSyncReload;
+                            AddLog("Resumed UnitySync after synchronized files reloaded.");
+                        }
+
                         AddLog("Comparing host Packages and Assets before scene synchronization.");
                         Changed?.Invoke();
                         break;
@@ -551,7 +560,17 @@ namespace Glasspage.UnitySync
 
             if (disconnected)
             {
+                bool retryFileSyncResume =
+                    _fileSyncResumeConnectionPending &&
+                    SessionState.GetBool(FileSyncResumePendingKey, false);
                 StopInternal(false);
+                if (retryFileSyncResume)
+                {
+                    _fileSyncResumeConnectionPending = false;
+                    _nextFileSyncResumeAttemptTime =
+                        EditorApplication.timeSinceStartup + FileSyncResumeRetrySeconds;
+                }
+
                 return;
             }
 
@@ -923,7 +942,9 @@ namespace Glasspage.UnitySync
             }
 
             _fileSyncResumeAttempts = 0;
+            _fileSyncResumeConnectionPending = false;
             _nextFileSyncResumeAttemptTime = EditorApplication.timeSinceStartup + 0.25d;
+            EditorApplication.update -= TryResumeAfterFileSyncReload;
             EditorApplication.update += TryResumeAfterFileSyncReload;
         }
 
@@ -936,10 +957,20 @@ namespace Glasspage.UnitySync
             }
 
             if (_transport != null ||
+                _fileSyncResumeConnectionPending ||
                 EditorApplication.isCompiling ||
                 EditorApplication.isUpdating ||
                 EditorApplication.timeSinceStartup < _nextFileSyncResumeAttemptTime)
             {
+                return;
+            }
+
+            if (_fileSyncResumeAttempts >= MaximumFileSyncResumeAttempts)
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                AddLog("Could not resume UnitySync after synchronized files reloaded.");
+                Changed?.Invoke();
                 return;
             }
 
@@ -967,10 +998,7 @@ namespace Glasspage.UnitySync
             if (Connect(joinCode, displayName, color, out string error))
             {
                 _guestSyncApproved = resumeApproved;
-                ClearFileSyncReloadReconnect();
-                EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Resuming UnitySync after synchronized scripts reloaded.");
-                Changed?.Invoke();
+                _fileSyncResumeConnectionPending = true;
                 return;
             }
 
@@ -978,7 +1006,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after synchronized scripts reloaded: " + error);
+                AddLog("Could not resume UnitySync after synchronized files reloaded: " + error);
                 Changed?.Invoke();
                 return;
             }
