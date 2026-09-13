@@ -451,7 +451,9 @@ namespace Glasspage.UnitySync
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileDelete;
-                        if (isProjectUpdate && IsGuestSyncDeferred)
+                        if (isProjectUpdate &&
+                            (IsGuestSyncDeferred ||
+                             UnitySyncFileSynchronizer.IsGuestReconcilingPackages))
                         {
                             break;
                         }
