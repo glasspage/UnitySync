@@ -306,7 +306,9 @@ namespace Glasspage.UnitySync
                     fileLabel +
                     " you need to download (" +
                     FormatBytes(downloadBytes) +
-                    "). Review the file list in the Activity Log before continuing.",
+                    "). " +
+                    UnitySyncFileSynchronizer.GuestPendingDeletionCount +
+                    " guest-only files will be deleted. Review the file list in the Activity Log before continuing.",
                     MessageType.Warning);
 
                 bool disconnected = false;

@@ -143,6 +143,10 @@ namespace Glasspage.UnitySync
         private static long _guestExpectedTotalBytes;
         private static readonly List<FileEntry> GuestManifest =
             new List<FileEntry>();
+        private static readonly HashSet<string> GuestObsoletePaths =
+            new HashSet<string>(StringComparer.Ordinal);
+        internal static int GuestPendingDeletionCount => GuestObsoletePaths.Count;
+
         private static readonly Dictionary<string, FileEntry> GuestManifestByPath =
             new Dictionary<string, FileEntry>(StringComparer.Ordinal);
         private static readonly List<FileEntry> GuestMismatches =
@@ -896,6 +900,31 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            if (!_guestForceRestore)
+            {
+                try
+                {
+                    string root = _guestRequestedScope == UnitySyncFileSyncScope.Packages
+                        ? "Packages" : "Assets";
+                    List<string> localFiles = new List<string>();
+                    EnumerateSyncRoot(Path.Combine(GetProjectRoot(), root), root, root == "Assets", localFiles);
+                    foreach (string path in localFiles)
+                    {
+                        if (!GuestManifestByPath.ContainsKey(path))
+                        {
+                            GuestObsoletePaths.Add(path);
+                        }
+                    }
+                }
+                catch (Exception exception) when (
+                    exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    error = "Could not compare guest-only files: " + exception.Message;
+                    FailGuestSync(error);
+                    return false;
+                }
+            }
+
             GuestManifest.Sort(CompareManifestEntries);
             _guestCompareIndex = 0;
             _guestPhase = GuestPhase.Comparing;
@@ -976,7 +1005,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            if (GuestMismatches.Count == 0)
+            if (GuestMismatches.Count == 0 && GuestObsoletePaths.Count == 0)
             {
                 if (_guestForceRestore)
                 {
@@ -1005,6 +1034,11 @@ namespace Glasspage.UnitySync
                 FileEntry entry = GuestMismatches[index];
                 _guestDownloadTotalBytes += entry.Length;
                 neededPaths[index] = entry.Path;
+            }
+
+            foreach (string path in GuestObsoletePaths)
+            {
+                transport.LogLocal("Guest-only file to remove: " + path);
             }
 
             if (_guestAutoContinue)
@@ -1046,12 +1080,6 @@ namespace Glasspage.UnitySync
             }
             else if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
             {
-                if (!DeleteGuestPackageReplacementRoots(out error))
-                {
-                    FailGuestSync(error);
-                    return false;
-                }
-
                 BeginGuestDownloadStage(
                     GuestDownloadKind.Packages,
                     GuestPackageMismatches);
@@ -1061,6 +1089,12 @@ namespace Glasspage.UnitySync
                 BeginGuestDownloadStage(
                     GuestDownloadKind.Assets,
                     GuestAssetMismatches);
+            }
+
+            if (GuestActiveMismatches.Count == 0)
+            {
+                CompleteGuestDownloadStage();
+                return true;
             }
 
             UpdateGuestRequests(transport);
@@ -1222,6 +1256,10 @@ namespace Glasspage.UnitySync
                 {
                     targetPath = Path.Combine(_guestTempRoot, "Project", entry.Path);
                 }
+                else
+                {
+                    targetPath = Path.Combine(_guestTempRoot, "FileStage", entry.Path);
+                }
 
                 string targetDirectory = Path.GetDirectoryName(targetPath);
                 if (!string.IsNullOrEmpty(targetDirectory))
@@ -1365,6 +1403,12 @@ namespace Glasspage.UnitySync
             }
 
             GuestDownloadKind completedKind = _guestDownloadKind;
+            if (!ApplyStagedFiles(out string packageError))
+            {
+                FailGuestSync(packageError);
+                return;
+            }
+
             GuestActiveMismatches.Clear();
             _guestDownloadKind = GuestDownloadKind.None;
             _guestRequestIndex = 0;
@@ -1605,6 +1649,7 @@ namespace Glasspage.UnitySync
             _guestExpectedFileCount = 0;
             _guestExpectedTotalBytes = 0;
             GuestManifest.Clear();
+            GuestObsoletePaths.Clear();
             GuestManifestByPath.Clear();
             GuestMismatches.Clear();
             GuestPackageMismatches.Clear();
@@ -1685,6 +1730,7 @@ namespace Glasspage.UnitySync
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             GuestManifest.Clear();
+            GuestObsoletePaths.Clear();
             GuestManifestByPath.Clear();
             GuestMismatches.Clear();
             GuestPackageMismatches.Clear();
@@ -1777,83 +1823,197 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool DeleteGuestPackageReplacementRoots(out string error)
+        private static bool ApplyStagedFiles(out string error)
         {
             error = string.Empty;
+            List<string> replacements = new List<string>();
+            HashSet<string> obsolete = new HashSet<string>(GuestObsoletePaths, StringComparer.Ordinal);
+            string backupRoot = Path.Combine(GetProjectRoot(), "Library", "UnitySyncFileBackup",
+                _guestSyncId.ToString("N"));
+            List<string> backedUp = new List<string>();
+            List<string> installed = new List<string>();
+            string currentPath = string.Empty;
+            bool startedCommit = false;
+            EditorApplication.LockReloadAssemblies();
             try
             {
-                foreach (string packageRoot in GuestPackageRootsToReplace)
+                foreach (FileEntry entry in GuestActiveMismatches)
                 {
-                    if (!TryGetFullSyncPath(
-                            packageRoot + "/package.json",
-                            out string packageJsonPath))
+                    currentPath = entry.Path;
+                    if (!TryGetFullSyncPath(entry.Path, out string target))
+                    {
+                        throw new IOException("Unsafe sync path: " + entry.Path);
+                    }
+
+                    string staged = Path.Combine(_guestTempRoot, "FileStage", entry.Path);
+                    if (!File.Exists(staged) || !HashesEqual(ComputeHash(staged), entry.Hash))
+                    {
+                        throw new IOException("The staged file failed verification: " + entry.Path);
+                    }
+
+                    // Native plugins may be mapped into the Editor even when the surrounding
+                    // package metadata changes. An identical file needs no write or deletion.
+                    if (File.Exists(target) && new FileInfo(target).Length == entry.Length &&
+                        HashesEqual(ComputeHash(target), entry.Hash))
                     {
                         continue;
                     }
 
-                    string fullRoot = Path.GetDirectoryName(packageJsonPath);
-                    if (string.IsNullOrEmpty(fullRoot) || !Directory.Exists(fullRoot))
-                    {
-                        continue;
-                    }
-
-                    ClearReadOnlyAttributes(fullRoot);
-                    Directory.Delete(fullRoot, true);
+                    replacements.Add(entry.Path);
                 }
 
-                return true;
+                // Probe every changed/removed file before modifying any package content.
+                // Removing a UPM dependency cannot unload a native plugin from this process.
+                List<string> affected = new List<string>(replacements);
+                affected.AddRange(obsolete);
+                foreach (string path in affected)
+                {
+                    currentPath = path;
+                    if (!TryGetFullSyncPath(path, out string target))
+                    {
+                        throw new IOException("Unsafe sync path: " + path);
+                    }
+                    string parent = Path.GetDirectoryName(target);
+                    while (!string.IsNullOrEmpty(parent) &&
+                           !string.Equals(parent, GetProjectRoot(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (Directory.Exists(parent) &&
+                            (File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0)
+                        {
+                            throw new IOException("Cannot replace files through a linked directory: " + path);
+                        }
+                        parent = Path.GetDirectoryName(parent);
+                    }
+                    if (!File.Exists(target))
+                    {
+                        continue;
+                    }
+
+                    FileAttributes attributes = File.GetAttributes(target);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException("Cannot replace a linked file: " + path);
+                    }
+                    if ((attributes & FileAttributes.ReadOnly) != 0)
+                    {
+                        File.SetAttributes(target, attributes & ~FileAttributes.ReadOnly);
+                    }
+                    using (new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        // An open/mapped native DLL fails here, before other files are removed.
+                    }
+                }
+
+                startedCommit = true;
+                foreach (string path in affected)
+                {
+                    currentPath = path;
+                    TryGetFullSyncPath(path, out string target);
+                    if (File.Exists(target))
+                    {
+                        string backup = Path.Combine(backupRoot, path);
+                        Directory.CreateDirectory(Path.GetDirectoryName(backup));
+                        File.Move(target, backup);
+                        backedUp.Add(path);
+                    }
+                }
+
+                foreach (string path in replacements)
+                {
+                    currentPath = path;
+                    TryGetFullSyncPath(path, out string target);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target));
+                    File.Move(Path.Combine(_guestTempRoot, "FileStage", path), target);
+                    installed.Add(path);
+                }
             }
             catch (Exception exception) when (
-                exception is IOException ||
-                exception is UnauthorizedAccessException)
+                exception is IOException || exception is UnauthorizedAccessException)
             {
-                error = "Could not replace an outdated local package: " +
-                        exception.Message;
+                string rollbackError = string.Empty;
+                if (startedCommit)
+                {
+                    try
+                    {
+                        foreach (string path in installed)
+                        {
+                            TryGetFullSyncPath(path, out string target);
+                            File.Delete(target);
+                        }
+                        foreach (string path in backedUp)
+                        {
+                            TryGetFullSyncPath(path, out string target);
+                            File.Move(Path.Combine(backupRoot, path), target);
+                        }
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        rollbackError = " Originals are preserved in " + backupRoot +
+                            ". Rollback failed: " + rollbackException.Message;
+                    }
+                }
+
+                error = "Could not update synchronized file " + currentPath + ": " + exception.Message +
+                    (startedCommit ? " File changes were rolled back where possible." :
+                        " No project file contents were changed.") +
+                    " If this is a loaded native plugin, it must be replaced while Unity is closed; " +
+                    "Package Manager removal cannot unload it. Update the guest SDK/package to the " +
+                    "host version before reconnecting." + rollbackError;
                 return false;
             }
-        }
-
-        private static void ClearReadOnlyAttributes(string root)
-        {
-            foreach (string file in Directory.GetFiles(
-                         root,
-                         "*",
-                         SearchOption.AllDirectories))
+            finally
             {
-                FileAttributes attributes = File.GetAttributes(file);
-                if ((attributes & FileAttributes.ReadOnly) != 0)
+                EditorApplication.UnlockReloadAssemblies();
+            }
+
+            // Remove emptied guest-only folders too, otherwise Unity recreates their .meta files.
+            HashSet<string> obsoleteDirectories = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string path in obsolete)
+            {
+                string directory = path;
+                while (directory.LastIndexOf('/') > 0)
                 {
-                    File.SetAttributes(
-                        file,
-                        attributes & ~FileAttributes.ReadOnly);
+                    directory = directory.Substring(0, directory.LastIndexOf('/'));
+                    if (directory == "Assets" || directory == "Packages")
+                    {
+                        break;
+                    }
+                    obsoleteDirectories.Add(directory);
                 }
             }
-
-            string[] directories = Directory.GetDirectories(
-                root,
-                "*",
-                SearchOption.AllDirectories);
-            Array.Sort(
-                directories,
-                (left, right) => right.Length.CompareTo(left.Length));
-            foreach (string directory in directories)
+            List<string> cleanupDirectories = new List<string>(obsoleteDirectories);
+            cleanupDirectories.Sort((left, right) => right.Length.CompareTo(left.Length));
+            foreach (string directory in cleanupDirectories)
             {
-                FileAttributes attributes = File.GetAttributes(directory);
-                if ((attributes & FileAttributes.ReadOnly) != 0)
+                if (GuestManifestByPath.ContainsKey(directory + ".meta") ||
+                    !TryGetFullSyncPath(directory + "/placeholder", out string placeholder))
                 {
-                    File.SetAttributes(
-                        directory,
-                        attributes & ~FileAttributes.ReadOnly);
+                    continue;
+                }
+                string fullDirectory = Path.GetDirectoryName(placeholder);
+                try
+                {
+                    if (Directory.Exists(fullDirectory) &&
+                        (File.GetAttributes(fullDirectory) & FileAttributes.ReparsePoint) == 0 &&
+                        Directory.GetFileSystemEntries(fullDirectory).Length == 0)
+                    {
+                        Directory.Delete(fullDirectory);
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+
+            try
+            {
+                if (Directory.Exists(backupRoot))
+                {
+                    Directory.Delete(backupRoot, true);
                 }
             }
-
-            FileAttributes rootAttributes = File.GetAttributes(root);
-            if ((rootAttributes & FileAttributes.ReadOnly) != 0)
-            {
-                File.SetAttributes(
-                    root,
-                    rootAttributes & ~FileAttributes.ReadOnly);
-            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return true;
         }
 
         private static bool IsUnderPackageRootToReplace(string path)
