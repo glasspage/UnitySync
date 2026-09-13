@@ -804,7 +804,19 @@ namespace Glasspage.UnitySync
                 server.Stream = client.GetStream();
                 Send(server, UnitySyncProtocol.CreateHello(_localPlayerId, _localDisplayName));
 
-                UnitySyncMessage welcome = ReadMessage(server);
+                UnitySyncMessage welcome;
+                try
+                {
+                    welcome = ReadMessage(server);
+                }
+                catch (EndOfStreamException exception)
+                {
+                    throw new IOException(
+                        "The host closed the connection during the UnitySync handshake. " +
+                        "Check the host Activity Log for the rejection reason.",
+                        exception);
+                }
+
                 if (welcome.Type != UnitySyncMessageType.Welcome || welcome.PlayerId == Guid.Empty)
                 {
                     throw new InvalidDataException("The host did not complete the UnitySync handshake.");
