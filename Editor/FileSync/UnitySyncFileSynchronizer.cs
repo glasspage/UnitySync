@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
+using UnityEditor.PackageManager;
 using UnityEngine;
 
 namespace Glasspage.UnitySync
@@ -16,7 +17,15 @@ namespace Glasspage.UnitySync
             Comparing,
             WaitingForConfirmation,
             Downloading,
-            Importing
+            ResolvingPackages,
+            ImportingAssets
+        }
+
+        private enum GuestDownloadKind
+        {
+            None,
+            Packages,
+            Assets
         }
 
         private sealed class FileEntry
@@ -83,6 +92,12 @@ namespace Glasspage.UnitySync
             new Dictionary<string, FileEntry>(StringComparer.Ordinal);
         private static readonly List<FileEntry> GuestMismatches =
             new List<FileEntry>();
+        private static readonly List<FileEntry> GuestPackageMismatches =
+            new List<FileEntry>();
+        private static readonly List<FileEntry> GuestAssetMismatches =
+            new List<FileEntry>();
+        private static readonly List<FileEntry> GuestActiveMismatches =
+            new List<FileEntry>();
         private static readonly Dictionary<string, FileEntry> GuestMismatchByPath =
             new Dictionary<string, FileEntry>(StringComparer.Ordinal);
         private static readonly Dictionary<string, GuestTransfer> GuestTransfers =
@@ -92,6 +107,10 @@ namespace Glasspage.UnitySync
         private static int _guestCompletedFiles;
         private static long _guestDownloadTotalBytes;
         private static long _guestDownloadBytesReceived;
+        private static long _guestStageDownloadTotalBytes;
+        private static long _guestStageDownloadBytesReceived;
+        private static GuestDownloadKind _guestDownloadKind;
+        private static bool _guestAutoContinue;
         private static string _guestTempRoot = string.Empty;
         private static bool _guestReadyForSceneSnapshot;
         private static bool _guestAutoRefreshBlocked;
@@ -106,9 +125,12 @@ namespace Glasspage.UnitySync
         internal static long GuestPendingDownloadBytes =>
             IsGuestAwaitingDownloadConfirmation ? _guestDownloadTotalBytes : 0;
 
-        internal static void BeginGuestSync(UnitySyncTransport transport)
+        internal static void BeginGuestSync(
+            UnitySyncTransport transport,
+            bool autoContinue)
         {
             ResetGuestState();
+            _guestAutoContinue = autoContinue;
             SetGuestAutoRefreshBlocked(true);
             _guestPhase = GuestPhase.WaitingForManifest;
             EditorUtility.DisplayProgressBar(
@@ -131,42 +153,7 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            if (GuestMismatches.Count == 0)
-            {
-                BeginGuestImport();
-                return true;
-            }
-
-            _guestTempRoot = Path.Combine(
-                GetProjectRoot(),
-                "Library",
-                "UnitySyncFileSync",
-                _guestSyncId.ToString("N"));
-            try
-            {
-                if (Directory.Exists(_guestTempRoot))
-                {
-                    Directory.Delete(_guestTempRoot, true);
-                }
-
-                Directory.CreateDirectory(_guestTempRoot);
-            }
-            catch (Exception exception) when (
-                exception is IOException ||
-                exception is UnauthorizedAccessException)
-            {
-                error = "Could not prepare temporary file sync storage: " + exception.Message;
-                FailGuestSync(error);
-                return false;
-            }
-
-            _guestRequestIndex = 0;
-            _guestCompletedFiles = 0;
-            _guestDownloadBytesReceived = 0;
-            _guestPhase = GuestPhase.Downloading;
-            UpdateGuestRequests(transport);
-            UpdateGuestDownloadProgress();
-            return true;
+            return BeginApprovedGuestSync(transport, out error);
         }
 
         internal static void EndSession()
@@ -293,8 +280,12 @@ namespace Glasspage.UnitySync
                     UpdateGuestDownloadProgress();
                     break;
 
-                case GuestPhase.Importing:
-                    UpdateGuestImport();
+                case GuestPhase.ResolvingPackages:
+                    UpdateGuestPackageResolution(transport);
+                    break;
+
+                case GuestPhase.ImportingAssets:
+                    UpdateGuestAssetImport();
                     break;
             }
         }
@@ -360,9 +351,9 @@ namespace Glasspage.UnitySync
                 transport.SendFileSyncAbort(
                     localPlayerId,
                     syncId,
-                    "The host could not build its Assets manifest: " + exception.Message,
+                    "The host could not build its Packages/Assets manifest: " + exception.Message,
                     targetPlayerId);
-                error = "File sync could not build the host manifest: " + exception.Message;
+                error = "File sync could not build the host project manifest: " + exception.Message;
             }
         }
 
@@ -480,7 +471,7 @@ namespace Glasspage.UnitySync
                 {
                     if (transfer.Stream == null)
                     {
-                        if (!TryGetFullAssetPath(transfer.Entry.Path, out string fullPath) ||
+                        if (!TryGetFullSyncPath(transfer.Entry.Path, out string fullPath) ||
                             !File.Exists(fullPath))
                         {
                             AbortHostTransfer(
@@ -691,7 +682,7 @@ namespace Glasspage.UnitySync
                 message.Hash.Length != 32 ||
                 message.Length < 0 ||
                 GuestManifest.Count >= _guestExpectedFileCount ||
-                !IsSafeAssetPath(message.Path) ||
+                !IsSafeSyncPath(message.Path) ||
                 GuestManifestByPath.ContainsKey(message.Path))
             {
                 error = "The host sent an invalid file manifest entry.";
@@ -744,7 +735,7 @@ namespace Glasspage.UnitySync
                 {
                     FileEntry entry = GuestManifest[_guestCompareIndex++];
                     bool matches = false;
-                    if (TryGetFullAssetPath(entry.Path, out string fullPath) &&
+                    if (TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
                         FileInfo info = new FileInfo(fullPath);
@@ -756,6 +747,14 @@ namespace Glasspage.UnitySync
                     {
                         GuestMismatches.Add(entry);
                         GuestMismatchByPath.Add(entry.Path, entry);
+                        if (IsPackagePath(entry.Path))
+                        {
+                            GuestPackageMismatches.Add(entry);
+                        }
+                        else
+                        {
+                            GuestAssetMismatches.Add(entry);
+                        }
                     }
 
                     processed++;
@@ -767,7 +766,7 @@ namespace Glasspage.UnitySync
                 exception is CryptographicException)
             {
                 FailGuestSync(
-                    "File sync failed while comparing Assets: " + exception.Message);
+                    "File sync failed while comparing project files: " + exception.Message);
                 return;
             }
 
@@ -776,7 +775,7 @@ namespace Glasspage.UnitySync
                 : (float)_guestCompareIndex / GuestManifest.Count;
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
-                "Comparing host Assets... " + _guestCompareIndex + "/" + GuestManifest.Count,
+                "Comparing host Packages and Assets... " + _guestCompareIndex + "/" + GuestManifest.Count,
                 Mathf.Lerp(0.05f, 0.45f, compareProgress));
 
             if (_guestCompareIndex < GuestManifest.Count)
@@ -799,6 +798,15 @@ namespace Glasspage.UnitySync
                 neededPaths[index] = entry.Path;
             }
 
+            if (_guestAutoContinue)
+            {
+                if (!BeginApprovedGuestSync(transport, out string continueError))
+                {
+                    FailGuestSync(continueError);
+                }
+                return;
+            }
+
             _guestPhase = GuestPhase.WaitingForConfirmation;
             EditorUtility.ClearProgressBar();
             UnitySyncSession.ReportFileSyncDownloadRequired(
@@ -806,13 +814,96 @@ namespace Glasspage.UnitySync
                 _guestDownloadTotalBytes);
         }
 
+        private static bool BeginApprovedGuestSync(
+            UnitySyncTransport transport,
+            out string error)
+        {
+            error = string.Empty;
+            if (!PrepareGuestTempRoot(out error))
+            {
+                FailGuestSync(error);
+                return false;
+            }
+
+            _guestDownloadBytesReceived = 0;
+            if (GuestPackageMismatches.Count > 0)
+            {
+                BeginGuestDownloadStage(GuestDownloadKind.Packages, GuestPackageMismatches);
+            }
+            else if (GuestAssetMismatches.Count > 0)
+            {
+                BeginGuestDownloadStage(GuestDownloadKind.Assets, GuestAssetMismatches);
+            }
+            else
+            {
+                CompleteGuestSync();
+                return true;
+            }
+
+            UpdateGuestRequests(transport);
+            UpdateGuestDownloadProgress();
+            return true;
+        }
+
+        private static bool PrepareGuestTempRoot(out string error)
+        {
+            error = string.Empty;
+            if (!string.IsNullOrEmpty(_guestTempRoot) && Directory.Exists(_guestTempRoot))
+            {
+                return true;
+            }
+
+            _guestTempRoot = Path.Combine(
+                GetProjectRoot(),
+                "Library",
+                "UnitySyncFileSync",
+                _guestSyncId.ToString("N"));
+            try
+            {
+                if (Directory.Exists(_guestTempRoot))
+                {
+                    Directory.Delete(_guestTempRoot, true);
+                }
+
+                Directory.CreateDirectory(_guestTempRoot);
+                return true;
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException)
+            {
+                error = "Could not prepare temporary file sync storage: " + exception.Message;
+                return false;
+            }
+        }
+
+        private static void BeginGuestDownloadStage(
+            GuestDownloadKind kind,
+            List<FileEntry> entries)
+        {
+            GuestActiveMismatches.Clear();
+            GuestActiveMismatches.AddRange(entries);
+            _guestDownloadKind = kind;
+            _guestRequestIndex = 0;
+            _guestCompletedFiles = 0;
+            _guestStageDownloadBytesReceived = 0;
+            _guestStageDownloadTotalBytes = 0;
+            foreach (FileEntry entry in GuestActiveMismatches)
+            {
+                _guestStageDownloadTotalBytes += entry.Length;
+            }
+
+            SetGuestAutoRefreshBlocked(true);
+            _guestPhase = GuestPhase.Downloading;
+        }
+
         private static void UpdateGuestRequests(UnitySyncTransport transport)
         {
             int sent = 0;
             while (sent < FileRequestsPerUpdate &&
-                   _guestRequestIndex < GuestMismatches.Count)
+                   _guestRequestIndex < GuestActiveMismatches.Count)
             {
-                FileEntry entry = GuestMismatches[_guestRequestIndex++];
+                FileEntry entry = GuestActiveMismatches[_guestRequestIndex++];
                 transport.RequestFile(_guestSyncId, entry.Path);
                 sent++;
             }
@@ -827,6 +918,8 @@ namespace Glasspage.UnitySync
                 message == null ||
                 message.SyncId != _guestSyncId ||
                 !GuestMismatchByPath.TryGetValue(message.Path ?? string.Empty, out FileEntry entry) ||
+                (_guestDownloadKind == GuestDownloadKind.Packages && !IsPackagePath(entry.Path)) ||
+                (_guestDownloadKind == GuestDownloadKind.Assets && !IsAssetPath(entry.Path)) ||
                 message.Length != entry.Length ||
                 message.Hash == null ||
                 !HashesEqual(message.Hash, entry.Hash) ||
@@ -878,6 +971,7 @@ namespace Glasspage.UnitySync
                     transfer.Stream.Write(message.Data, 0, message.Data.Length);
                     transfer.Received += message.Data.Length;
                     _guestDownloadBytesReceived += message.Data.Length;
+                    _guestStageDownloadBytesReceived += message.Data.Length;
                 }
 
                 if (transfer.Received != entry.Length)
@@ -894,7 +988,7 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
-                if (!TryGetFullAssetPath(entry.Path, out string targetPath))
+                if (!TryGetFullSyncPath(entry.Path, out string targetPath))
                 {
                     error = "A synchronized file had an unsafe target path: " + entry.Path;
                     FailGuestSync(error);
@@ -921,9 +1015,9 @@ namespace Glasspage.UnitySync
                 GuestTransfers.Remove(entry.Path);
                 _guestCompletedFiles++;
 
-                if (_guestCompletedFiles == GuestMismatches.Count)
+                if (_guestCompletedFiles == GuestActiveMismatches.Count)
                 {
-                    BeginGuestImport();
+                    CompleteGuestDownloadStage();
                 }
 
                 return true;
@@ -939,28 +1033,110 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static void UpdateGuestDownloadProgress()
+        private static void CompleteGuestDownloadStage()
         {
-            float byteProgress;
-            if (_guestDownloadTotalBytes > 0)
+            GuestDownloadKind completedKind = _guestDownloadKind;
+            GuestActiveMismatches.Clear();
+            _guestDownloadKind = GuestDownloadKind.None;
+            _guestRequestIndex = 0;
+            _guestCompletedFiles = 0;
+            _guestStageDownloadTotalBytes = 0;
+            _guestStageDownloadBytesReceived = 0;
+
+            if (completedKind == GuestDownloadKind.Packages)
             {
-                byteProgress = Mathf.Clamp01(
-                    (float)((double)_guestDownloadBytesReceived / _guestDownloadTotalBytes));
+                BeginGuestPackageResolution();
             }
             else
             {
-                byteProgress = GuestMismatches.Count == 0
-                    ? 1f
-                    : (float)_guestCompletedFiles / GuestMismatches.Count;
+                BeginGuestAssetImport();
             }
-
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                "Receiving host files... " + _guestCompletedFiles + "/" + GuestMismatches.Count,
-                Mathf.Lerp(0.45f, 0.92f, byteProgress));
         }
 
-        private static void BeginGuestImport()
+        private static void UpdateGuestDownloadProgress()
+        {
+            float byteProgress;
+            if (_guestStageDownloadTotalBytes > 0)
+            {
+                byteProgress = Mathf.Clamp01(
+                    (float)((double)_guestStageDownloadBytesReceived /
+                            _guestStageDownloadTotalBytes));
+            }
+            else
+            {
+                byteProgress = GuestActiveMismatches.Count == 0
+                    ? 1f
+                    : (float)_guestCompletedFiles / GuestActiveMismatches.Count;
+            }
+
+            string stageName = _guestDownloadKind == GuestDownloadKind.Packages
+                ? "Packages"
+                : "Assets";
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                "Receiving host " + stageName + "... " +
+                _guestCompletedFiles + "/" + GuestActiveMismatches.Count,
+                Mathf.Lerp(0.45f, 0.82f, byteProgress));
+        }
+
+        private static void BeginGuestPackageResolution()
+        {
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                "Resolving synchronized Packages...",
+                0.84f);
+
+            UnitySyncSession.PrepareFileSyncReloadReconnect();
+            SetGuestAutoRefreshBlocked(false);
+            _guestPhase = GuestPhase.ResolvingPackages;
+            _guestImportEarliestComplete =
+                EditorApplication.timeSinceStartup + Math.Max(2d, ImportSettleSeconds);
+
+            try
+            {
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                Client.Resolve();
+            }
+            catch (Exception exception)
+            {
+                UnitySyncSession.ClearFileSyncReloadReconnect();
+                FailGuestSync(
+                    "Could not resolve synchronized Packages: " +
+                    exception.Message);
+            }
+        }
+
+        private static void UpdateGuestPackageResolution(UnitySyncTransport transport)
+        {
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                EditorApplication.isCompiling
+                    ? "Compiling synchronized Packages..."
+                    : "Finishing synchronized Package import...",
+                0.88f);
+
+            if (EditorApplication.isCompiling ||
+                EditorApplication.isUpdating ||
+                EditorApplication.timeSinceStartup < _guestImportEarliestComplete)
+            {
+                return;
+            }
+
+            UnitySyncSession.ClearFileSyncReloadReconnect();
+            if (GuestAssetMismatches.Count > 0)
+            {
+                BeginGuestDownloadStage(
+                    GuestDownloadKind.Assets,
+                    GuestAssetMismatches);
+                UpdateGuestRequests(transport);
+                UpdateGuestDownloadProgress();
+                return;
+            }
+
+            CompleteGuestSync();
+        }
+
+        private static void BeginGuestAssetImport()
         {
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
@@ -969,7 +1145,7 @@ namespace Glasspage.UnitySync
 
             UnitySyncSession.PrepareFileSyncReloadReconnect();
             SetGuestAutoRefreshBlocked(false);
-            _guestPhase = GuestPhase.Importing;
+            _guestPhase = GuestPhase.ImportingAssets;
             _guestImportEarliestComplete =
                 EditorApplication.timeSinceStartup + ImportSettleSeconds;
 
@@ -991,10 +1167,10 @@ namespace Glasspage.UnitySync
         private static void ForceReimportSynchronizedDependencies()
         {
             List<string> paths = new List<string>();
-            foreach (FileEntry entry in GuestMismatches)
+            foreach (FileEntry entry in GuestAssetMismatches)
             {
                 string path = entry.Path ?? string.Empty;
-                if (!IsSafeAssetPath(path) ||
+                if (!IsSafeSyncPath(path) ||
                     path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase) ||
                     path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
@@ -1032,7 +1208,7 @@ namespace Glasspage.UnitySync
             foreach (string guid in materialGuids)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!IsSafeAssetPath(path) ||
+                if (!IsSafeSyncPath(path) ||
                     !path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -1045,7 +1221,7 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static void UpdateGuestImport()
+        private static void UpdateGuestAssetImport()
         {
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
@@ -1102,12 +1278,19 @@ namespace Glasspage.UnitySync
             GuestManifest.Clear();
             GuestManifestByPath.Clear();
             GuestMismatches.Clear();
+            GuestPackageMismatches.Clear();
+            GuestAssetMismatches.Clear();
+            GuestActiveMismatches.Clear();
             GuestMismatchByPath.Clear();
             _guestCompareIndex = 0;
             _guestRequestIndex = 0;
             _guestCompletedFiles = 0;
             _guestDownloadTotalBytes = 0;
             _guestDownloadBytesReceived = 0;
+            _guestStageDownloadTotalBytes = 0;
+            _guestStageDownloadBytesReceived = 0;
+            _guestDownloadKind = GuestDownloadKind.None;
+            _guestAutoContinue = false;
             _guestImportEarliestComplete = 0d;
         }
 
@@ -1185,12 +1368,21 @@ namespace Glasspage.UnitySync
         private static List<FileEntry> BuildLocalManifest(out long totalBytes)
         {
             totalBytes = 0;
-            List<string> files = EnumerateAssetFiles();
-            files.Sort(StringComparer.Ordinal);
-            List<FileEntry> entries = new List<FileEntry>(files.Count);
-            foreach (string assetPath in files)
+            List<string> files = EnumerateProjectSyncFiles();
+            files.Sort((left, right) =>
             {
-                if (!TryGetFullAssetPath(assetPath, out string fullPath))
+                int leftGroup = IsPackagePath(left) ? 0 : 1;
+                int rightGroup = IsPackagePath(right) ? 0 : 1;
+                int groupCompare = leftGroup.CompareTo(rightGroup);
+                return groupCompare != 0
+                    ? groupCompare
+                    : StringComparer.Ordinal.Compare(left, right);
+            });
+
+            List<FileEntry> entries = new List<FileEntry>(files.Count);
+            foreach (string projectPath in files)
+            {
+                if (!TryGetFullSyncPath(projectPath, out string fullPath))
                 {
                     continue;
                 }
@@ -1198,7 +1390,7 @@ namespace Glasspage.UnitySync
                 FileInfo info = new FileInfo(fullPath);
                 FileEntry entry = new FileEntry
                 {
-                    Path = assetPath,
+                    Path = projectPath,
                     Length = info.Length,
                     Hash = ComputeHash(fullPath)
                 };
@@ -1209,23 +1401,46 @@ namespace Glasspage.UnitySync
             return entries;
         }
 
-        private static List<string> EnumerateAssetFiles()
+        private static List<string> EnumerateProjectSyncFiles()
         {
-            string assetsRoot = Path.GetFullPath(Application.dataPath);
             List<string> result = new List<string>();
-            Stack<string> directories = new Stack<string>();
-            directories.Push(assetsRoot);
+            EnumerateSyncRoot(
+                Path.GetFullPath(Path.Combine(GetProjectRoot(), "Packages")),
+                "Packages",
+                false,
+                result);
+            EnumerateSyncRoot(
+                Path.GetFullPath(Application.dataPath),
+                "Assets",
+                true,
+                result);
+            return result;
+        }
 
+        private static void EnumerateSyncRoot(
+            string root,
+            string rootName,
+            bool excludeGeneratedUdon,
+            List<string> result)
+        {
+            if (!Directory.Exists(root))
+            {
+                return;
+            }
+
+            Stack<string> directories = new Stack<string>();
+            directories.Push(root);
             while (directories.Count > 0)
             {
                 string directory = directories.Pop();
                 foreach (string childDirectory in Directory.GetDirectories(directory))
                 {
                     DirectoryInfo info = new DirectoryInfo(childDirectory);
-                    if (string.Equals(
-                            info.Name,
-                            ExcludedFolderName,
-                            StringComparison.OrdinalIgnoreCase) ||
+                    if ((excludeGeneratedUdon &&
+                         string.Equals(
+                             info.Name,
+                             ExcludedFolderName,
+                             StringComparison.OrdinalIgnoreCase)) ||
                         (info.Attributes & FileAttributes.ReparsePoint) != 0)
                     {
                         continue;
@@ -1238,46 +1453,60 @@ namespace Glasspage.UnitySync
                 {
                     FileInfo info = new FileInfo(file);
                     if ((info.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                        string.Equals(
-                            info.Name,
-                            ExcludedFolderName + ".meta",
-                            StringComparison.OrdinalIgnoreCase))
+                        (excludeGeneratedUdon &&
+                         string.Equals(
+                             info.Name,
+                             ExcludedFolderName + ".meta",
+                             StringComparison.OrdinalIgnoreCase)))
                     {
                         continue;
                     }
 
-                    string relative = file.Substring(assetsRoot.Length)
+                    string relative = file.Substring(root.Length)
                         .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                         .Replace(Path.DirectorySeparatorChar, '/')
                         .Replace(Path.AltDirectorySeparatorChar, '/');
-                    string assetPath = "Assets/" + relative;
-                    if (IsSafeAssetPath(assetPath))
+                    string projectPath = rootName + "/" + relative;
+                    if (IsSafeSyncPath(projectPath))
                     {
-                        result.Add(assetPath);
+                        result.Add(projectPath);
                     }
                 }
             }
-
-            return result;
         }
 
-        private static bool IsSafeAssetPath(string assetPath)
+        private static bool IsAssetPath(string path)
         {
-            if (string.IsNullOrEmpty(assetPath))
+            return !string.IsNullOrEmpty(path) &&
+                   path.Replace('\\', '/').StartsWith("Assets/", StringComparison.Ordinal);
+        }
+
+        private static bool IsPackagePath(string path)
+        {
+            return !string.IsNullOrEmpty(path) &&
+                   path.Replace('\\', '/').StartsWith("Packages/", StringComparison.Ordinal);
+        }
+
+        private static bool IsSafeSyncPath(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath))
             {
                 return false;
             }
 
-            string normalized = assetPath.Replace('\\', '/');
-            if (!normalized.StartsWith("Assets/", StringComparison.Ordinal) ||
-                normalized.Length <= "Assets/".Length)
+            string normalized = projectPath.Replace('\\', '/');
+            bool isAsset = normalized.StartsWith("Assets/", StringComparison.Ordinal);
+            bool isPackage = normalized.StartsWith("Packages/", StringComparison.Ordinal);
+            if ((!isAsset && !isPackage) ||
+                normalized.Length <= (isAsset ? "Assets/".Length : "Packages/".Length))
             {
                 return false;
             }
 
             string[] segments = normalized.Split('/');
+            string expectedRoot = isAsset ? "Assets" : "Packages";
             if (segments.Length < 2 ||
-                !string.Equals(segments[0], "Assets", StringComparison.Ordinal))
+                !string.Equals(segments[0], expectedRoot, StringComparison.Ordinal))
             {
                 return false;
             }
@@ -1288,43 +1517,46 @@ namespace Glasspage.UnitySync
                 if (string.IsNullOrEmpty(segment) ||
                     segment == "." ||
                     segment == ".." ||
-                    string.Equals(
-                        segment,
-                        ExcludedFolderName,
-                        StringComparison.OrdinalIgnoreCase))
+                    (isAsset &&
+                     string.Equals(
+                         segment,
+                         ExcludedFolderName,
+                         StringComparison.OrdinalIgnoreCase)))
                 {
                     return false;
                 }
             }
 
-            return !string.Equals(
-                segments[segments.Length - 1],
-                ExcludedFolderName + ".meta",
-                StringComparison.OrdinalIgnoreCase);
+            return !isAsset ||
+                   !string.Equals(
+                       segments[segments.Length - 1],
+                       ExcludedFolderName + ".meta",
+                       StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool TryGetFullAssetPath(string assetPath, out string fullPath)
+        private static bool TryGetFullSyncPath(string projectPath, out string fullPath)
         {
             fullPath = string.Empty;
-            if (!IsSafeAssetPath(assetPath))
+            if (!IsSafeSyncPath(projectPath))
             {
                 return false;
             }
 
             string projectRoot = GetProjectRoot();
-            string combined = Path.Combine(
+            string candidate = Path.GetFullPath(Path.Combine(
                 projectRoot,
-                assetPath.Replace('/', Path.DirectorySeparatorChar));
-            string candidate = Path.GetFullPath(combined);
-            string assetsRoot = Path.GetFullPath(Application.dataPath);
-            string assetsPrefix = assetsRoot.TrimEnd(
+                projectPath.Replace('/', Path.DirectorySeparatorChar)));
+            string allowedRoot = IsPackagePath(projectPath)
+                ? Path.GetFullPath(Path.Combine(projectRoot, "Packages"))
+                : Path.GetFullPath(Application.dataPath);
+            string allowedPrefix = allowedRoot.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
             StringComparison comparison = Path.DirectorySeparatorChar == '\\'
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
-            if (!candidate.StartsWith(assetsPrefix, comparison))
+            if (!candidate.StartsWith(allowedPrefix, comparison))
             {
                 return false;
             }
