@@ -936,6 +936,8 @@ namespace Glasspage.UnitySync
             }
 
             if (_transport != null ||
+                EditorApplication.isCompiling ||
+                EditorApplication.isUpdating ||
                 EditorApplication.timeSinceStartup < _nextFileSyncResumeAttemptTime)
             {
                 return;
