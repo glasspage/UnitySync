@@ -256,6 +256,22 @@ namespace Glasspage.UnitySync
             AddLog(message);
         }
 
+        internal static void ReportPackageVersionReplacement(
+            string packageName,
+            string localVersion,
+            string hostVersion)
+        {
+            AddLog(
+                "Package version differs: " +
+                packageName +
+                " (" +
+                (string.IsNullOrEmpty(localVersion) ? "local version unknown" : localVersion) +
+                " -> " +
+                hostVersion +
+                "). The local package folder will be replaced after Continue.");
+            Changed?.Invoke();
+        }
+
         internal static void ReportFileSyncDownloadRequired(
             string[] neededPaths,
             long totalBytes)
@@ -374,7 +390,7 @@ namespace Glasspage.UnitySync
                             AddLog("Resumed UnitySync after synchronized files reloaded.");
                         }
 
-                        AddLog("Comparing host Packages and Assets before scene synchronization.");
+                        AddLog("Comparing host Packages before Assets and scene synchronization.");
                         Changed?.Invoke();
                         break;
 
