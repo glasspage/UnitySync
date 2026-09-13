@@ -876,6 +876,7 @@ namespace Glasspage.UnitySync
             _joinCode = string.Empty;
             _guestJoinCode = string.Empty;
             _guestSyncApproved = false;
+            _fileSyncResumeConnectionPending = false;
             PendingGuestViewports.Clear();
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
