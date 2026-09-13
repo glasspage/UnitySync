@@ -129,6 +129,9 @@ namespace Glasspage.UnitySync
         private static double _guestImportEarliestComplete;
 
         internal static bool IsGuestSyncing => _guestPhase != GuestPhase.None;
+        internal static bool IsGuestReconcilingPackages =>
+            IsGuestSyncing &&
+            _guestRequestedScope == UnitySyncFileSyncScope.Packages;
         internal static bool IsGuestAwaitingDownloadConfirmation =>
             _guestPhase == GuestPhase.WaitingForConfirmation;
         internal static int GuestPendingDownloadFileCount =>
