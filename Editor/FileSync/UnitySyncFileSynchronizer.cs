@@ -846,6 +846,17 @@ namespace Glasspage.UnitySync
                                   HashesEqual(ComputeHash(fullPath), entry.Hash);
                     }
 
+                    if (!matches &&
+                        _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
+                        IsEmbeddedPackageJsonPath(entry.Path) &&
+                        TryGetEmbeddedPackageRoot(
+                            entry.Path,
+                            out string packageRoot,
+                            out _))
+                    {
+                        GuestPackageRootsToReplace.Add(packageRoot);
+                    }
+
                     if (!matches)
                     {
                         GuestMismatches.Add(entry);
