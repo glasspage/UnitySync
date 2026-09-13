@@ -535,25 +535,47 @@ namespace Glasspage.UnitySync
                 "including files that already match. Guest-only files and unsaved scene edits are removed. " +
                 "The host must accept the request in Debug. Downloading and importing may take a long time.",
                 MessageType.Warning);
-            if (UnitySyncSession.State == UnitySyncSessionState.Connected)
+            bool connectedGuest = UnitySyncSession.State == UnitySyncSessionState.Connected;
+            using (new EditorGUI.DisabledScope(!connectedGuest || UnitySyncSession.IsFileSyncing))
             {
-                using (new EditorGUI.DisabledScope(UnitySyncSession.IsFileSyncing))
+                if (GUILayout.Button("Delete and restore project from host"))
                 {
-                    if (GUILayout.Button("Delete and restore project from host"))
-                    {
-                        UnitySyncSession.RequestProjectRestore();
-                    }
+                    UnitySyncSession.RequestProjectRestore();
                 }
+            }
 
-                if (UnitySyncFileSynchronizer.IsWaitingForRestoreApproval)
-                {
-                    EditorGUILayout.LabelField("Waiting for the host to accept in Debug.");
-                }
+            if (UnitySyncFileSynchronizer.IsWaitingForRestoreApproval)
+            {
+                EditorGUILayout.LabelField("Waiting for the host to accept in Debug.");
+            }
+            else if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
+            {
+                EditorGUILayout.LabelField(
+                    "Guests request a restore from their Debug panel. Accept their requests below.",
+                    EditorStyles.wordWrappedMiniLabel);
+            }
+            else if (!connectedGuest)
+            {
+                EditorGUILayout.LabelField(
+                    "Join a host session to request a project restore.",
+                    EditorStyles.wordWrappedMiniLabel);
+            }
+            else if (UnitySyncSession.IsFileSyncing)
+            {
+                EditorGUILayout.LabelField(
+                    "Wait for the current file synchronization to finish.",
+                    EditorStyles.wordWrappedMiniLabel);
             }
 
             if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
             {
-                foreach (Guid playerId in UnitySyncFileSynchronizer.PendingProjectRestores)
+                Guid[] restoreRequests = UnitySyncFileSynchronizer.PendingProjectRestores;
+                if (restoreRequests.Length == 0)
+                {
+                    EditorGUILayout.LabelField("No project restore requests pending.");
+                }
+
+                foreach (Guid playerId in restoreRequests)
                 {
                     string requester = UnitySyncPresenceRoot.TryGetViewport(playerId, out UnitySyncViewportState viewport)
                         ? viewport.DisplayName : playerId.ToString("N");
