@@ -27,13 +27,17 @@ namespace Glasspage.UnitySync
         ProjectFileChunk = 18,
         ProjectFileDelete = 19,
         SceneSettingsChange = 20,
-        PackageVersionEntry = 21
+        PackageVersionEntry = 21,
+        RestoreProjectRequest = 22,
+        RestoreProjectAccepted = 23,
+        RestoreProjectDeclined = 24
     }
 
     internal enum UnitySyncFileSyncScope : byte
     {
         Packages = 1,
-        Assets = 2
+        Assets = 2,
+        Project = 3
     }
 
     internal readonly struct UnitySyncViewportState
@@ -229,6 +233,22 @@ namespace Glasspage.UnitySync
 
                     WriteGuid(writer, parsedId);
                 }
+            });
+        }
+
+        internal static byte[] CreateRestoreProjectControl(Guid playerId, UnitySyncMessageType type)
+        {
+            if (type != UnitySyncMessageType.RestoreProjectRequest &&
+                type != UnitySyncMessageType.RestoreProjectAccepted &&
+                type != UnitySyncMessageType.RestoreProjectDeclined)
+            {
+                throw new ArgumentOutOfRangeException(nameof(type));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)type);
+                WriteGuid(writer, playerId);
             });
         }
 
@@ -627,6 +647,9 @@ namespace Glasspage.UnitySync
                                 new UnitySyncSelectionState(playerId, selectionColor, objectIds));
                             break;
 
+                        case UnitySyncMessageType.RestoreProjectRequest:
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
                         case UnitySyncMessageType.FileSyncRequest:
                             playerId = ReadGuid(reader);
                             message = new UnitySyncMessage(

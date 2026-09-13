@@ -215,6 +215,11 @@ namespace Glasspage.UnitySync
             _outboundSignal.Set();
         }
 
+        internal void SendRestoreProjectControl(UnitySyncMessageType type, Guid targetPlayerId)
+        {
+            QueueMessage(UnitySyncProtocol.CreateRestoreProjectControl(_localPlayerId, type), targetPlayerId);
+        }
+
         internal void RequestFileSync(UnitySyncFileSyncScope scope)
         {
             if (scope != UnitySyncFileSyncScope.Packages &&
@@ -669,6 +674,16 @@ namespace Glasspage.UnitySync
                             Broadcast(UnitySyncProtocol.CreateSelection(message.Selection), peer);
                             break;
 
+                        case UnitySyncMessageType.RestoreProjectRequest:
+                            peer.RequestedFileSync = true;
+                            peer.RequestedSceneSnapshot = false;
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
+                            throw new InvalidDataException("A collaborator sent a host-only restore response.");
+
                         case UnitySyncMessageType.FileSyncRequest:
                             peer.RequestedFileSync = true;
                             peer.FileSyncRequestCount++;
@@ -877,6 +892,15 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueSelection(message.Selection);
+                            break;
+
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
+                            if (message.PlayerId != server.PlayerId)
+                            {
+                                throw new InvalidDataException("Invalid restore response sender.");
+                            }
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
                             break;
 
                         case UnitySyncMessageType.FileManifestBegin:

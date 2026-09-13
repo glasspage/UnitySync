@@ -529,6 +529,48 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            EditorGUILayout.Space();
+            EditorGUILayout.HelpBox(
+                "Full restore replaces Assets, Packages and ProjectSettings with the host's files, " +
+                "including files that already match. Guest-only files and unsaved scene edits are removed. " +
+                "The host must accept the request in Debug. Downloading and importing may take a long time.",
+                MessageType.Warning);
+            if (UnitySyncSession.State == UnitySyncSessionState.Connected)
+            {
+                using (new EditorGUI.DisabledScope(UnitySyncSession.IsFileSyncing))
+                {
+                    if (GUILayout.Button("Delete and restore project from host"))
+                    {
+                        UnitySyncSession.RequestProjectRestore();
+                    }
+                }
+
+                if (UnitySyncFileSynchronizer.IsWaitingForRestoreApproval)
+                {
+                    EditorGUILayout.LabelField("Waiting for the host to accept in Debug.");
+                }
+            }
+
+            if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
+            {
+                foreach (Guid playerId in UnitySyncFileSynchronizer.PendingProjectRestores)
+                {
+                    string requester = UnitySyncPresenceRoot.TryGetViewport(playerId, out UnitySyncViewportState viewport)
+                        ? viewport.DisplayName : playerId.ToString("N");
+                    EditorGUILayout.LabelField("Restore request: " + requester);
+                    EditorGUILayout.BeginHorizontal();
+                    if (GUILayout.Button("Accept project restore"))
+                    {
+                        UnitySyncSession.RespondToProjectRestore(playerId, true);
+                    }
+                    if (GUILayout.Button("Decline"))
+                    {
+                        UnitySyncSession.RespondToProjectRestore(playerId, false);
+                    }
+                    EditorGUILayout.EndHorizontal();
+                }
+            }
+
             EditorGUI.indentLevel++;
             EditorGUI.BeginChangeCheck();
             _debugDisplayName = EditorGUILayout.TextField(

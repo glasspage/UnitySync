@@ -356,6 +356,31 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        internal static void RequestProjectRestore()
+        {
+            if (_state != UnitySyncSessionState.Connected || UnitySyncFileSynchronizer.IsGuestSyncing)
+            {
+                return;
+            }
+
+            UnitySyncSceneSynchronizer.EndSession();
+            UnitySyncProjectSynchronizer.EndSession();
+            UnitySyncFileSynchronizer.RequestProjectRestore(_transport);
+            AddLog("Requested a full project restore. The host must accept it in Debug.");
+            Changed?.Invoke();
+        }
+
+        internal static void RespondToProjectRestore(Guid playerId, bool accept)
+        {
+            if (_state != UnitySyncSessionState.Hosting)
+            {
+                return;
+            }
+
+            UnitySyncFileSynchronizer.RespondToProjectRestore(_transport, LocalPlayerId, playerId, accept);
+            Changed?.Invoke();
+        }
+
         internal static void StopSpectating()
         {
             StopSpectatingInternal(true, true);

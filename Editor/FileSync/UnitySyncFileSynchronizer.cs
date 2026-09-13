@@ -13,6 +13,7 @@ namespace Glasspage.UnitySync
         private enum GuestPhase
         {
             None,
+            WaitingForRestoreApproval,
             WaitingForManifest,
             Comparing,
             WaitingForConfirmation,
@@ -90,6 +91,50 @@ namespace Glasspage.UnitySync
         private static readonly HashSet<string> HostTransferKeys =
             new HashSet<string>(StringComparer.Ordinal);
 
+        private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
+        private static bool _guestForceRestore;
+        private static readonly string[] RestoreRoots = { "Assets", "Packages", "ProjectSettings" };
+        internal static Guid[] PendingProjectRestores
+        {
+            get
+            {
+                Guid[] requests = new Guid[RestoreRequests.Count];
+                RestoreRequests.CopyTo(requests);
+                return requests;
+            }
+        }
+        internal static bool IsWaitingForRestoreApproval =>
+            _guestPhase == GuestPhase.WaitingForRestoreApproval;
+
+        internal static void RequestProjectRestore(UnitySyncTransport transport)
+        {
+            ResetGuestState();
+            _guestPhase = GuestPhase.WaitingForRestoreApproval;
+            transport.SendRestoreProjectControl(UnitySyncMessageType.RestoreProjectRequest, Guid.Empty);
+        }
+
+        internal static void RespondToProjectRestore(
+            UnitySyncTransport transport, Guid localPlayerId, Guid playerId, bool accept)
+        {
+            if (!RestoreRequests.Remove(playerId))
+            {
+                return;
+            }
+
+            transport.SendRestoreProjectControl(
+                accept ? UnitySyncMessageType.RestoreProjectAccepted :
+                         UnitySyncMessageType.RestoreProjectDeclined, playerId);
+            if (accept)
+            {
+                BeginHostManifest(transport, localPlayerId, playerId,
+                    new UnitySyncFileSyncMessage { Scope = UnitySyncFileSyncScope.Project },
+                    out string error);
+                transport.LogLocal(string.IsNullOrEmpty(error)
+                    ? "Accepted full project restore for " + playerId.ToString("N") + "."
+                    : error);
+            }
+        }
+
         private static GuestPhase _guestPhase;
         private static Guid _guestHostPlayerId;
         private static Guid _guestSyncId;
@@ -134,7 +179,9 @@ namespace Glasspage.UnitySync
         internal static bool IsGuestSyncing => _guestPhase != GuestPhase.None;
         internal static bool IsGuestReconcilingPackages =>
             IsGuestSyncing &&
-            _guestRequestedScope == UnitySyncFileSyncScope.Packages;
+            (_guestRequestedScope == UnitySyncFileSyncScope.Packages ||
+             _guestRequestedScope == UnitySyncFileSyncScope.Project ||
+             IsWaitingForRestoreApproval);
         internal static bool IsGuestAwaitingDownloadConfirmation =>
             _guestPhase == GuestPhase.WaitingForConfirmation;
         internal static int GuestPendingDownloadFileCount =>
@@ -172,6 +219,7 @@ namespace Glasspage.UnitySync
 
         internal static void EndSession()
         {
+            RestoreRequests.Clear();
             foreach (HostTransfer transfer in HostTransfers)
             {
                 CloseHostTransfer(transfer);
@@ -189,6 +237,7 @@ namespace Glasspage.UnitySync
 
         internal static void RemoveHostPlayer(Guid playerId)
         {
+            RestoreRequests.Remove(playerId);
             if (playerId == Guid.Empty)
             {
                 return;
@@ -245,6 +294,34 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             switch (messageType)
             {
+                case UnitySyncMessageType.RestoreProjectRequest:
+                    if (RestoreRequests.Add(playerId))
+                    {
+                        transport.LogLocal("Project restore requested by " + playerId.ToString("N") +
+                            ". Open Debug to accept or decline.");
+                    }
+                    return true;
+
+                case UnitySyncMessageType.RestoreProjectDeclined:
+                    if (!IsWaitingForRestoreApproval)
+                    {
+                        error = "Unexpected project restore response.";
+                        return false;
+                    }
+                    FailGuestSync("The host declined the project restore request.");
+                    return true;
+
+                case UnitySyncMessageType.RestoreProjectAccepted:
+                    if (!IsWaitingForRestoreApproval)
+                    {
+                        error = "Unexpected project restore approval.";
+                        return false;
+                    }
+                    _guestForceRestore = true;
+                    _guestAutoContinue = true;
+                    BeginGuestManifestRequest(transport, UnitySyncFileSyncScope.Project, false);
+                    return true;
+
                 case UnitySyncMessageType.FileSyncRequest:
                     BeginHostManifest(
                         transport,
@@ -345,7 +422,8 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             if (request == null ||
                 (request.Scope != UnitySyncFileSyncScope.Packages &&
-                 request.Scope != UnitySyncFileSyncScope.Assets))
+                 request.Scope != UnitySyncFileSyncScope.Assets &&
+                 request.Scope != UnitySyncFileSyncScope.Project))
             {
                 error = "A collaborator requested an invalid file sync scope.";
                 return;
@@ -837,7 +915,7 @@ namespace Glasspage.UnitySync
                     bool replaceWholePackage =
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
                         IsUnderPackageRootToReplace(entry.Path);
-                    if (!replaceWholePackage &&
+                    if (!_guestForceRestore && !replaceWholePackage &&
                         TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
@@ -900,6 +978,12 @@ namespace Glasspage.UnitySync
 
             if (GuestMismatches.Count == 0)
             {
+                if (_guestForceRestore)
+                {
+                    FailGuestSync("The host returned an empty project restore manifest.");
+                    return;
+                }
+
                 if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
                 {
                     BeginGuestManifestRequest(
@@ -925,6 +1009,11 @@ namespace Glasspage.UnitySync
 
             if (_guestAutoContinue)
             {
+                if (_guestForceRestore)
+                {
+                    transport.LogLocal("Restoring " + GuestMismatches.Count + " files (" +
+                        _guestDownloadTotalBytes + " bytes) from the host.");
+                }
                 if (!BeginApprovedGuestSync(transport, out string continueError))
                 {
                     FailGuestSync(continueError);
@@ -951,7 +1040,11 @@ namespace Glasspage.UnitySync
             }
 
             _guestDownloadBytesReceived = 0;
-            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
+            if (_guestForceRestore)
+            {
+                BeginGuestDownloadStage(GuestDownloadKind.Assets, GuestMismatches);
+            }
+            else if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
             {
                 if (!DeleteGuestPackageReplacementRoots(out error))
                 {
@@ -1125,6 +1218,11 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
+                if (_guestForceRestore)
+                {
+                    targetPath = Path.Combine(_guestTempRoot, "Project", entry.Path);
+                }
+
                 string targetDirectory = Path.GetDirectoryName(targetPath);
                 if (!string.IsNullOrEmpty(targetDirectory))
                 {
@@ -1163,8 +1261,109 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static void InstallRestoredProject()
+        {
+            string projectRoot = GetProjectRoot();
+            string stagedRoot = Path.Combine(_guestTempRoot, "Project");
+            string backupRoot = Path.Combine(projectRoot, "Library", "UnitySyncRestoreBackup",
+                _guestSyncId.ToString("N"));
+            List<string> movedOriginals = new List<string>();
+            List<string> installed = new List<string>();
+            bool committed = false;
+            EditorApplication.LockReloadAssemblies();
+            try
+            {
+                // Require a complete Unity project, not an empty/partial replacement manifest.
+                if (!File.Exists(Path.Combine(stagedRoot, "Packages", "manifest.json")) ||
+                    !File.Exists(Path.Combine(stagedRoot, "ProjectSettings", "ProjectVersion.txt")))
+                {
+                    throw new IOException("The host restore is missing its package manifest or project version.");
+                }
+
+                foreach (string root in RestoreRoots)
+                {
+                    string destination = Path.Combine(projectRoot, root);
+                    if (Directory.Exists(destination) &&
+                        (File.GetAttributes(destination) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException("Cannot replace linked project root: " + root);
+                    }
+                    Directory.CreateDirectory(Path.Combine(stagedRoot, root));
+                }
+
+                // Close scenes before replacing their files; the debug request authorizes
+                // discarding unsaved guest scene edits.
+                UnityEditor.SceneManagement.EditorSceneManager.NewScene(
+                    UnityEditor.SceneManagement.NewSceneSetup.EmptyScene,
+                    UnityEditor.SceneManagement.NewSceneMode.Single);
+                Directory.CreateDirectory(backupRoot);
+                foreach (string root in RestoreRoots)
+                {
+                    string destination = Path.Combine(projectRoot, root);
+                    if (Directory.Exists(destination))
+                    {
+                        Directory.Move(destination, Path.Combine(backupRoot, root));
+                        movedOriginals.Add(root);
+                    }
+                    Directory.Move(Path.Combine(stagedRoot, root), destination);
+                    installed.Add(root);
+                }
+
+                committed = true;
+                _guestForceRestore = false;
+                GuestActiveMismatches.Clear();
+                _guestDownloadKind = GuestDownloadKind.None;
+                UnitySyncSession.PrepareFileSyncReloadReconnect();
+            }
+            catch (Exception exception)
+            {
+                string rollbackError = string.Empty;
+                if (!committed)
+                {
+                    try
+                    {
+                        foreach (string root in installed)
+                        {
+                            Directory.Move(Path.Combine(projectRoot, root), Path.Combine(stagedRoot, root));
+                        }
+                        foreach (string root in movedOriginals)
+                        {
+                            Directory.Move(Path.Combine(backupRoot, root), Path.Combine(projectRoot, root));
+                        }
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        rollbackError = " Original files remain in " + backupRoot +
+                            ". Rollback failed: " + rollbackException.Message;
+                    }
+                }
+                FailGuestSync("Project restore failed: " + exception.Message + rollbackError);
+            }
+            finally
+            {
+                EditorApplication.UnlockReloadAssemblies();
+            }
+
+            if (committed)
+            {
+                try
+                {
+                    Directory.Delete(backupRoot, true);
+                }
+                catch (IOException) { /* A locked old file must not undo a completed restore. */ }
+                catch (UnauthorizedAccessException) { }
+                BeginGuestPackageResolution();
+            }
+        }
+
         private static void CompleteGuestDownloadStage()
         {
+            if (_guestForceRestore)
+            {
+                InstallRestoredProject();
+                return;
+            }
+
             GuestDownloadKind completedKind = _guestDownloadKind;
             GuestActiveMismatches.Clear();
             _guestDownloadKind = GuestDownloadKind.None;
@@ -1393,6 +1592,7 @@ namespace Glasspage.UnitySync
 
         private static void ResetGuestState()
         {
+            _guestForceRestore = false;
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             SetGuestAutoRefreshBlocked(false);
@@ -1479,7 +1679,8 @@ namespace Glasspage.UnitySync
 
         private static void BeginGuestManifestRequest(
             UnitySyncTransport transport,
-            UnitySyncFileSyncScope scope)
+            UnitySyncFileSyncScope scope,
+            bool sendRequest = true)
         {
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
@@ -1512,7 +1713,10 @@ namespace Glasspage.UnitySync
                 "UnitySync — Syncing Files",
                 "Waiting for the host " + scope + " manifest...",
                 scope == UnitySyncFileSyncScope.Packages ? 0.01f : 0.55f);
-            transport.RequestFileSync(scope);
+            if (sendRequest)
+            {
+                transport.RequestFileSync(scope);
+            }
         }
 
         private static bool PrepareGuestPackageVersionComparison(out string error)
@@ -1742,6 +1946,11 @@ namespace Glasspage.UnitySync
             string path,
             UnitySyncFileSyncScope scope)
         {
+            if (scope == UnitySyncFileSyncScope.Project)
+            {
+                return IsSafeSyncPath(path);
+            }
+
             return scope == UnitySyncFileSyncScope.Packages
                 ? IsPackagePath(path)
                 : scope == UnitySyncFileSyncScope.Assets &&
@@ -1773,7 +1982,20 @@ namespace Glasspage.UnitySync
         {
             totalBytes = 0;
             List<string> files = new List<string>();
-            if (scope == UnitySyncFileSyncScope.Packages)
+            if (scope == UnitySyncFileSyncScope.Project)
+            {
+                foreach (string root in RestoreRoots)
+                {
+                    string fullRoot = Path.Combine(GetProjectRoot(), root);
+                    if (Directory.Exists(fullRoot) &&
+                        (File.GetAttributes(fullRoot) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException("Cannot restore linked project root: " + root);
+                    }
+                    EnumerateSyncRoot(fullRoot, root, false, files);
+                }
+            }
+            else if (scope == UnitySyncFileSyncScope.Packages)
             {
                 EnumerateSyncRoot(
                     Path.GetFullPath(Path.Combine(GetProjectRoot(), "Packages")),
@@ -1930,18 +2152,10 @@ namespace Glasspage.UnitySync
             }
 
             string normalized = projectPath.Replace('\\', '/');
-            bool isAsset = normalized.StartsWith("Assets/", StringComparison.Ordinal);
-            bool isPackage = normalized.StartsWith("Packages/", StringComparison.Ordinal);
-            if ((!isAsset && !isPackage) ||
-                normalized.Length <= (isAsset ? "Assets/".Length : "Packages/".Length))
-            {
-                return false;
-            }
-
             string[] segments = normalized.Split('/');
-            string expectedRoot = isAsset ? "Assets" : "Packages";
             if (segments.Length < 2 ||
-                !string.Equals(segments[0], expectedRoot, StringComparison.Ordinal))
+                (segments[0] != "Assets" && segments[0] != "Packages" &&
+                 segments[0] != "ProjectSettings"))
             {
                 return false;
             }
@@ -1949,24 +2163,16 @@ namespace Glasspage.UnitySync
             for (int index = 1; index < segments.Length; index++)
             {
                 string segment = segments[index];
-                if (string.IsNullOrEmpty(segment) ||
-                    segment == "." ||
-                    segment == ".." ||
-                    (isAsset &&
-                     string.Equals(
-                         segment,
-                         ExcludedFolderName,
-                         StringComparison.OrdinalIgnoreCase)))
+                if (string.IsNullOrEmpty(segment) || segment == "." || segment == ".." ||
+                    segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                    segment.IndexOf(':') >= 0 || segment.EndsWith(" ", StringComparison.Ordinal) ||
+                    segment.EndsWith(".", StringComparison.Ordinal))
                 {
                     return false;
                 }
             }
 
-            return !isAsset ||
-                   !string.Equals(
-                       segments[segments.Length - 1],
-                       ExcludedFolderName + ".meta",
-                       StringComparison.OrdinalIgnoreCase);
+            return true;
         }
 
         private static bool TryGetFullSyncPath(string projectPath, out string fullPath)
@@ -1981,9 +2187,8 @@ namespace Glasspage.UnitySync
             string candidate = Path.GetFullPath(Path.Combine(
                 projectRoot,
                 projectPath.Replace('/', Path.DirectorySeparatorChar)));
-            string allowedRoot = IsPackagePath(projectPath)
-                ? Path.GetFullPath(Path.Combine(projectRoot, "Packages"))
-                : Path.GetFullPath(Application.dataPath);
+            string rootName = projectPath.Replace('\\', '/').Split('/')[0];
+            string allowedRoot = Path.GetFullPath(Path.Combine(projectRoot, rootName));
             string allowedPrefix = allowedRoot.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
