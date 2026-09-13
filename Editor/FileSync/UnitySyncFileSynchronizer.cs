@@ -51,6 +51,7 @@ namespace Glasspage.UnitySync
             internal Dictionary<string, FileEntry> EntriesByPath;
             internal long TotalBytes;
             internal int SendIndex;
+            internal int PackageVersionSendIndex;
             internal bool BeginSent;
             internal bool EndSent;
         }
@@ -109,6 +110,8 @@ namespace Glasspage.UnitySync
             new List<FileEntry>();
         private static readonly Dictionary<string, FileEntry> GuestMismatchByPath =
             new Dictionary<string, FileEntry>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> GuestHostPackageVersions =
+            new Dictionary<string, string>(StringComparer.Ordinal);
         private static readonly HashSet<string> GuestPackageRootsToReplace =
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, GuestTransfer> GuestTransfers =
@@ -260,6 +263,9 @@ namespace Glasspage.UnitySync
 
                 case UnitySyncMessageType.FileManifestEntry:
                     return HandleGuestManifestEntry(playerId, message, out error);
+
+                case UnitySyncMessageType.PackageVersionEntry:
+                    return HandleGuestPackageVersionEntry(playerId, message, out error);
 
                 case UnitySyncMessageType.FileManifestEnd:
                     return HandleGuestManifestEnd(playerId, message, out error);
@@ -413,6 +419,38 @@ namespace Glasspage.UnitySync
                         manifest.TargetPlayerId);
                     manifest.BeginSent = true;
                     budget--;
+                    continue;
+                }
+
+                while (manifest.PackageVersionSendIndex < manifest.Entries.Count)
+                {
+                    FileEntry versionEntry =
+                        manifest.Entries[manifest.PackageVersionSendIndex++];
+                    if (string.IsNullOrEmpty(versionEntry.PackageVersion))
+                    {
+                        continue;
+                    }
+
+                    transport.SendPackageVersionEntry(
+                        localPlayerId,
+                        new UnitySyncFileSyncMessage
+                        {
+                            SyncId = manifest.SyncId,
+                            Path = versionEntry.Path,
+                            PackageVersion = versionEntry.PackageVersion
+                        },
+                        manifest.TargetPlayerId);
+                    budget--;
+                    break;
+                }
+
+                if (budget == 0)
+                {
+                    continue;
+                }
+
+                if (manifest.PackageVersionSendIndex < manifest.Entries.Count)
+                {
                     continue;
                 }
 
@@ -679,7 +717,6 @@ namespace Glasspage.UnitySync
             if (_guestPhase != GuestPhase.WaitingForManifest ||
                 message == null ||
                 message.SyncId == Guid.Empty ||
-                message.Scope != _guestRequestedScope ||
                 message.FileCount < 0 ||
                 message.TotalBytes < 0)
             {
@@ -725,12 +762,35 @@ namespace Glasspage.UnitySync
             FileEntry entry = new FileEntry
             {
                 Path = message.Path,
-                PackageVersion = message.PackageVersion ?? string.Empty,
                 Length = message.Length,
                 Hash = CopyHash(message.Hash)
             };
             GuestManifest.Add(entry);
             GuestManifestByPath.Add(entry.Path, entry);
+            return true;
+        }
+
+        private static bool HandleGuestPackageVersionEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage message,
+            out string error)
+        {
+            error = string.Empty;
+            if (_guestPhase != GuestPhase.WaitingForManifest ||
+                _guestRequestedScope != UnitySyncFileSyncScope.Packages ||
+                playerId != _guestHostPlayerId ||
+                message == null ||
+                message.SyncId != _guestSyncId ||
+                string.IsNullOrEmpty(message.PackageVersion) ||
+                !IsEmbeddedPackageJsonPath(message.Path))
+            {
+                error = "The host sent an invalid package version entry.";
+                FailGuestSync(error);
+                return false;
+            }
+
+            GuestHostPackageVersions[message.Path] =
+                message.PackageVersion;
             return true;
         }
 
@@ -1334,6 +1394,7 @@ namespace Glasspage.UnitySync
             GuestAssetMismatches.Clear();
             GuestActiveMismatches.Clear();
             GuestMismatchByPath.Clear();
+            GuestHostPackageVersions.Clear();
             GuestPackageRootsToReplace.Clear();
             _guestCompareIndex = 0;
             _guestRequestIndex = 0;
@@ -1412,6 +1473,7 @@ namespace Glasspage.UnitySync
             GuestAssetMismatches.Clear();
             GuestActiveMismatches.Clear();
             GuestMismatchByPath.Clear();
+            GuestHostPackageVersions.Clear();
             GuestPackageRootsToReplace.Clear();
             _guestHostPlayerId = Guid.Empty;
             _guestSyncId = Guid.Empty;
@@ -1442,12 +1504,10 @@ namespace Glasspage.UnitySync
             GuestPackageRootsToReplace.Clear();
             try
             {
-                foreach (FileEntry entry in GuestManifest)
+                foreach (KeyValuePair<string, string> pair in GuestHostPackageVersions)
                 {
-                    if (entry == null ||
-                        string.IsNullOrEmpty(entry.PackageVersion) ||
-                        !TryGetEmbeddedPackageRoot(
-                            entry.Path,
+                    if (!TryGetEmbeddedPackageRoot(
+                            pair.Key,
                             out string packageRoot,
                             out string packageName))
                     {
@@ -1472,7 +1532,7 @@ namespace Glasspage.UnitySync
                         : string.Empty;
                     if (string.Equals(
                             localVersion,
-                            entry.PackageVersion,
+                            pair.Value,
                             StringComparison.Ordinal))
                     {
                         continue;
@@ -1482,7 +1542,7 @@ namespace Glasspage.UnitySync
                     UnitySyncSession.ReportPackageVersionReplacement(
                         packageName,
                         localVersion,
-                        entry.PackageVersion);
+                        pair.Value);
                 }
 
                 return true;
