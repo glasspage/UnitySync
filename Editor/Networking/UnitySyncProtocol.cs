@@ -254,7 +254,9 @@ namespace Glasspage.UnitySync
             UnitySyncFileSyncMessage state)
         {
             ValidateFileSyncState(state, false);
-            if (state.FileCount < 0 ||
+            if ((state.Scope != UnitySyncFileSyncScope.Packages &&
+                 state.Scope != UnitySyncFileSyncScope.Assets) ||
+                state.FileCount < 0 ||
                 state.FileCount > MaximumFileManifestEntries ||
                 state.TotalBytes < 0)
             {
