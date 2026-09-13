@@ -81,6 +81,7 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
+            internal int FileSyncRequestCount;
             internal bool Superseded;
 
             internal Peer(TcpClient client)
@@ -216,8 +217,14 @@ namespace Glasspage.UnitySync
 
         internal void RequestFileSync(UnitySyncFileSyncScope scope)
         {
+            if (scope != UnitySyncFileSyncScope.Packages &&
+                scope != UnitySyncFileSyncScope.Assets)
+            {
+                throw new ArgumentOutOfRangeException(nameof(scope));
+            }
+
             QueueMessage(
-                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId, scope),
+                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId),
                 Guid.Empty);
         }
 
@@ -245,6 +252,16 @@ namespace Glasspage.UnitySync
         {
             QueueMessage(
                 UnitySyncProtocol.CreateFileManifestEntry(playerId, state),
+                targetPlayerId);
+        }
+
+        internal void SendPackageVersionEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage state,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreatePackageVersionEntry(playerId, state),
                 targetPlayerId);
         }
 
@@ -655,10 +672,17 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileSyncRequest:
                             peer.RequestedFileSync = true;
+                            peer.FileSyncRequestCount++;
+                            UnitySyncFileSyncMessage scopedRequest =
+                                message.FileSync ?? new UnitySyncFileSyncMessage();
+                            scopedRequest.Scope =
+                                peer.FileSyncRequestCount == 1
+                                    ? UnitySyncFileSyncScope.Packages
+                                    : UnitySyncFileSyncScope.Assets;
                             EnqueueFileSync(
                                 message.Type,
                                 message.PlayerId,
-                                message.FileSync);
+                                scopedRequest);
                             break;
 
                         case UnitySyncMessageType.FileRequest:
@@ -673,6 +697,7 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileManifestBegin:
                         case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.PackageVersionEntry:
                         case UnitySyncMessageType.FileManifestEnd:
                         case UnitySyncMessageType.FileChunk:
                         case UnitySyncMessageType.FileSyncAbort:
@@ -856,6 +881,7 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileManifestBegin:
                         case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.PackageVersionEntry:
                         case UnitySyncMessageType.FileManifestEnd:
                         case UnitySyncMessageType.FileChunk:
                         case UnitySyncMessageType.FileSyncAbort:
