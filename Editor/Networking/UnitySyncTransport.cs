@@ -81,6 +81,7 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
+            internal bool Superseded;
 
             internal Peer(TcpClient client)
             {
@@ -592,18 +593,28 @@ namespace Glasspage.UnitySync
                     throw new InvalidDataException("The collaborator did not send a valid hello message.");
                 }
 
+                Peer supersededPeer = null;
                 lock (_peersLock)
                 {
-                    if (hello.PlayerId == _localPlayerId ||
-                        _peers.Exists(other => other != peer && other.PlayerId == hello.PlayerId))
+                    if (hello.PlayerId == _localPlayerId)
                     {
-                        throw new InvalidDataException("A collaborator with this identity is already connected.");
+                        throw new InvalidDataException(
+                            "The collaborator is using the host's player identity.");
+                    }
+
+                    supersededPeer = _peers.Find(
+                        other => other != peer && other.PlayerId == hello.PlayerId);
+                    if (supersededPeer != null)
+                    {
+                        supersededPeer.Superseded = true;
+                        _peers.Remove(supersededPeer);
                     }
 
                     peer.PlayerId = hello.PlayerId;
                     peer.DisplayName = NormalizeDisplayName(hello.DisplayName);
                 }
 
+                supersededPeer?.Close();
                 peer.Client.ReceiveTimeout = 0;
                 Send(peer, UnitySyncProtocol.CreateWelcome(_localPlayerId, _localDisplayName));
                 authenticated = true;
@@ -751,9 +762,15 @@ namespace Glasspage.UnitySync
                 exception is CryptographicException ||
                 exception is InvalidDataException)
             {
-                if (_running && authenticated)
+                if (_running && authenticated && !peer.Superseded)
                 {
                     Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " disconnected.");
+                }
+                else if (_running && !authenticated)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        "Rejected collaborator connection: " + exception.Message);
                 }
             }
             finally
@@ -764,7 +781,7 @@ namespace Glasspage.UnitySync
                     _peers.Remove(peer);
                 }
 
-                if (_running && authenticated)
+                if (_running && authenticated && !peer.Superseded)
                 {
                     EnqueuePeerLeft(peer.PlayerId);
                     Broadcast(UnitySyncProtocol.CreatePeerLeft(peer.PlayerId), peer);
