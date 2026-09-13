@@ -260,9 +260,8 @@ namespace Glasspage.UnitySync
             UnitySyncFileSyncMessage state,
             Guid targetPlayerId)
         {
-            QueueMessage(
-                UnitySyncProtocol.CreatePackageVersionEntry(playerId, state),
-                targetPlayerId);
+            // Package version comparison must stay on the existing v14
+            // manifest packet set. Do not emit the experimental metadata packet.
         }
 
         internal void SendFileManifestEnd(
