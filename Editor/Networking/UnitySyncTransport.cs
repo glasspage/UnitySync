@@ -214,9 +214,11 @@ namespace Glasspage.UnitySync
             _outboundSignal.Set();
         }
 
-        internal void RequestFileSync()
+        internal void RequestFileSync(UnitySyncFileSyncScope scope)
         {
-            QueueMessage(UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId), Guid.Empty);
+            QueueMessage(
+                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId, scope),
+                Guid.Empty);
         }
 
         internal void RequestFile(Guid syncId, string path)
@@ -652,11 +654,11 @@ namespace Glasspage.UnitySync
                             break;
 
                         case UnitySyncMessageType.FileSyncRequest:
-                            if (!peer.RequestedFileSync)
-                            {
-                                peer.RequestedFileSync = true;
-                                EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
-                            }
+                            peer.RequestedFileSync = true;
+                            EnqueueFileSync(
+                                message.Type,
+                                message.PlayerId,
+                                message.FileSync);
                             break;
 
                         case UnitySyncMessageType.FileRequest:
