@@ -29,6 +29,12 @@ namespace Glasspage.UnitySync
         SceneSettingsChange = 20
     }
 
+    internal enum UnitySyncFileSyncScope : byte
+    {
+        Packages = 1,
+        Assets = 2
+    }
+
     internal readonly struct UnitySyncViewportState
     {
         internal readonly Guid PlayerId;
@@ -90,7 +96,9 @@ namespace Glasspage.UnitySync
     internal sealed class UnitySyncFileSyncMessage
     {
         internal Guid SyncId;
+        internal UnitySyncFileSyncScope Scope;
         internal string Path = string.Empty;
+        internal string PackageVersion = string.Empty;
         internal long Length;
         internal long Offset;
         internal int FileCount;
@@ -134,7 +142,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 14;
+        internal const int Version = 15;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -223,12 +231,21 @@ namespace Glasspage.UnitySync
             });
         }
 
-        internal static byte[] CreateFileSyncRequest(Guid playerId)
+        internal static byte[] CreateFileSyncRequest(
+            Guid playerId,
+            UnitySyncFileSyncScope scope)
         {
+            if (scope != UnitySyncFileSyncScope.Packages &&
+                scope != UnitySyncFileSyncScope.Assets)
+            {
+                throw new InvalidDataException("Invalid file sync scope.");
+            }
+
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.FileSyncRequest);
                 WriteGuid(writer, playerId);
+                writer.Write((byte)scope);
             });
         }
 
@@ -249,6 +266,7 @@ namespace Glasspage.UnitySync
                 writer.Write((byte)UnitySyncMessageType.FileManifestBegin);
                 WriteGuid(writer, playerId);
                 WriteGuid(writer, state.SyncId);
+                writer.Write((byte)state.Scope);
                 writer.Write(state.FileCount);
                 writer.Write(state.TotalBytes);
             });
@@ -270,6 +288,7 @@ namespace Glasspage.UnitySync
                 WriteGuid(writer, playerId);
                 WriteGuid(writer, state.SyncId);
                 WriteFilePath(writer, state.Path);
+                WriteLimitedString(writer, state.PackageVersion ?? string.Empty);
                 writer.Write(state.Length);
                 writer.Write(state.Hash);
             });
@@ -588,6 +607,14 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileSyncRequest:
                             playerId = ReadGuid(reader);
+                            UnitySyncFileSyncScope requestedScope =
+                                (UnitySyncFileSyncScope)reader.ReadByte();
+                            if (requestedScope != UnitySyncFileSyncScope.Packages &&
+                                requestedScope != UnitySyncFileSyncScope.Assets)
+                            {
+                                throw new InvalidDataException("Invalid file sync scope.");
+                            }
+
                             message = new UnitySyncMessage(
                                 type,
                                 playerId,
@@ -596,7 +623,10 @@ namespace Glasspage.UnitySync
                                 null,
                                 null,
                                 default,
-                                new UnitySyncFileSyncMessage());
+                                new UnitySyncFileSyncMessage
+                                {
+                                    Scope = requestedScope
+                                });
                             break;
 
                         case UnitySyncMessageType.FileManifestBegin:
@@ -604,10 +634,13 @@ namespace Glasspage.UnitySync
                             UnitySyncFileSyncMessage manifestBegin = new UnitySyncFileSyncMessage
                             {
                                 SyncId = ReadGuid(reader),
+                                Scope = (UnitySyncFileSyncScope)reader.ReadByte(),
                                 FileCount = reader.ReadInt32(),
                                 TotalBytes = reader.ReadInt64()
                             };
                             if (manifestBegin.SyncId == Guid.Empty ||
+                                (manifestBegin.Scope != UnitySyncFileSyncScope.Packages &&
+                                 manifestBegin.Scope != UnitySyncFileSyncScope.Assets) ||
                                 manifestBegin.FileCount < 0 ||
                                 manifestBegin.FileCount > MaximumFileManifestEntries ||
                                 manifestBegin.TotalBytes < 0)
@@ -632,6 +665,7 @@ namespace Glasspage.UnitySync
                             {
                                 SyncId = ReadGuid(reader),
                                 Path = ReadFilePath(reader),
+                                PackageVersion = ReadLimitedString(reader),
                                 Length = reader.ReadInt64(),
                                 Hash = ReadExactBytes(reader, 32)
                             };
