@@ -1352,8 +1352,14 @@ namespace Glasspage.UnitySync
                     : "Finishing synchronized asset import...",
                 0.98f);
 
-            if (EditorApplication.isCompiling ||
-                EditorApplication.timeSinceStartup < _guestImportEarliestComplete)
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                _guestImportEarliestComplete =
+                    EditorApplication.timeSinceStartup + ImportSettleSeconds;
+                return;
+            }
+
+            if (EditorApplication.timeSinceStartup < _guestImportEarliestComplete)
             {
                 return;
             }

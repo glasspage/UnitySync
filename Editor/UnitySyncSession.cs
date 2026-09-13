@@ -361,7 +361,29 @@ namespace Glasspage.UnitySync
             StopSpectatingInternal(true, true);
         }
 
+        private static bool _updatingSession;
+
         private static void Update()
+        {
+            // Scene loading and asset import can pump editor callbacks before they return.
+            // Keep later snapshot packets queued until the current packet has finished applying.
+            if (_updatingSession)
+            {
+                return;
+            }
+
+            _updatingSession = true;
+            try
+            {
+                UpdateSession();
+            }
+            finally
+            {
+                _updatingSession = false;
+            }
+        }
+
+        private static void UpdateSession()
         {
             UpdateSpectatedSceneView();
 
@@ -372,7 +394,9 @@ namespace Glasspage.UnitySync
             }
 
             bool disconnected = false;
-            while (transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
+            while (!EditorApplication.isCompiling &&
+                   !EditorApplication.isUpdating &&
+                   transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
             {
                 switch (transportEvent.Kind)
                 {
@@ -508,7 +532,7 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotBegin:
-                        if (IsGuestSyncDeferred)
+                        if (IsGuestSyncDeferred || UnitySyncFileSynchronizer.IsGuestSyncing)
                         {
                             break;
                         }
@@ -517,13 +541,16 @@ namespace Glasspage.UnitySync
                                 transportEvent.SceneSnapshot,
                                 out string snapshotBeginError))
                         {
-                            AddLog("Scene sync skipped a snapshot: " + snapshotBeginError);
-                            Changed?.Invoke();
+                            AddLog("Scene sync could not start a snapshot: " + snapshotBeginError);
+                            // No valid boundary exists for the queued body/end packets.
+                            // Stop here instead of applying a partial snapshot or flooding the log.
+                            StopInternal(false);
+                            return;
                         }
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotEnd:
-                        if (IsGuestSyncDeferred)
+                        if (IsGuestSyncDeferred || UnitySyncFileSynchronizer.IsGuestSyncing)
                         {
                             break;
                         }
@@ -597,6 +624,11 @@ namespace Glasspage.UnitySync
             {
                 AddLog("File sync failed: " + fileSyncFailure);
                 StopInternal(false);
+                return;
+            }
+
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
                 return;
             }
 

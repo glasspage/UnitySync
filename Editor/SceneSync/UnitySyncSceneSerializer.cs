@@ -321,6 +321,11 @@ namespace Glasspage.UnitySync
             Scene openedActiveScene = default;
             try
             {
+                if (!ValidateSnapshotScriptDependencies(scenes, out error))
+                {
+                    return false;
+                }
+
                 if (!string.IsNullOrEmpty(activeScene.ScenePath))
                 {
                     if (AssetDatabase.LoadAssetAtPath<SceneAsset>(activeScene.ScenePath) == null)
@@ -2168,6 +2173,75 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static bool ValidateSnapshotScriptDependencies(
+            UnitySyncSceneDescriptor[] scenes,
+            out string error)
+        {
+            error = string.Empty;
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                error = "Unity is still importing or compiling synchronized files.";
+                return false;
+            }
+
+            List<string> scenePaths = new List<string>();
+            foreach (UnitySyncSceneDescriptor scene in scenes)
+            {
+                if (scene != null && !string.IsNullOrEmpty(scene.ScenePath))
+                {
+                    scenePaths.Add(scene.ScenePath);
+                }
+            }
+
+            if (scenePaths.Count == 0)
+            {
+                return true;
+            }
+
+            // No SDK assembly dependency: inspect the SDK's serialized program/script link.
+            // Validate before OpenScene invokes UdonSharp's scene-open proxy setup.
+            foreach (string path in AssetDatabase.GetDependencies(scenePaths.ToArray(), true))
+            {
+                if (!path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                Object asset = AssetDatabase.LoadMainAssetAtPath(path);
+                if (asset == null || asset.GetType().FullName != "UdonSharp.UdonSharpProgramAsset")
+                {
+                    continue;
+                }
+
+                using (SerializedObject program = new SerializedObject(asset))
+                {
+                    SerializedProperty source = program.FindProperty("sourceCsScript");
+                    MonoScript script = source != null ? source.objectReferenceValue as MonoScript : null;
+                    Type scriptType = script != null ? script.GetClass() : null;
+                    for (Type type = scriptType; type != null; type = type.BaseType)
+                    {
+                        if (type.FullName == "UdonSharp.UdonSharpBehaviour")
+                        {
+                            scriptType = type;
+                            break;
+                        }
+                    }
+
+                    if (scriptType == null || scriptType.FullName != "UdonSharp.UdonSharpBehaviour")
+                    {
+                        error = "Cannot open the host scene: UdonSharp program " + path +
+                            " has no valid compiled UdonSharpBehaviour for source script " +
+                            (script != null ? AssetDatabase.GetAssetPath(script) : "(missing reference)") +
+                            ". Check the guest Console for C# compilation/import errors and verify " +
+                            "the script and its .meta file match the host.";
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
         private static bool TryCaptureObjectReference(
             Object value,
             out UnitySyncObjectReferenceState reference)
@@ -2180,6 +2254,29 @@ namespace Glasspage.UnitySync
             }
 
             reference.ObjectTypeName = GetStableTypeName(value.GetType());
+
+            // Prefab GameObjects and Components are assets too. Test persistence before
+            // attempting to assign scene addresses to them.
+            if (EditorUtility.IsPersistent(value))
+            {
+                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                    value,
+                    out string guid,
+                    out long localFileId);
+                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) && !IsBuiltinAssetPath(assetPath))
+                {
+                    return false;
+                }
+
+                reference.Kind = UnitySyncObjectReferenceKind.Asset;
+                reference.AssetGuid = guid ?? string.Empty;
+                reference.AssetPath = assetPath;
+                reference.AssetName = value.name ?? string.Empty;
+                reference.AssetContentHash = GetAssetContentHash(assetPath);
+                reference.LocalFileId = localFileId;
+                return true;
+            }
 
             if (value is GameObject gameObject)
             {
@@ -2203,27 +2300,6 @@ namespace Glasspage.UnitySync
                 reference.Kind = UnitySyncObjectReferenceKind.SceneObject;
                 reference.ComponentIndex = GetComponentIndex(component.gameObject, component);
                 return reference.ComponentIndex >= 0;
-            }
-
-            if (EditorUtility.IsPersistent(value))
-            {
-                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
-                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
-                    value,
-                    out string guid,
-                    out long localFileId);
-                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) && !IsBuiltinAssetPath(assetPath))
-                {
-                    return false;
-                }
-
-                reference.Kind = UnitySyncObjectReferenceKind.Asset;
-                reference.AssetGuid = guid ?? string.Empty;
-                reference.AssetPath = assetPath;
-                reference.AssetName = value.name ?? string.Empty;
-                reference.AssetContentHash = GetAssetContentHash(assetPath);
-                reference.LocalFileId = localFileId;
-                return true;
             }
 
             return false;
@@ -3124,6 +3200,43 @@ namespace Glasspage.UnitySync
             return false;
         }
 
+        private static Object[] LoadAssetReferenceCandidates(string assetPath)
+        {
+            List<Object> candidates = new List<Object>();
+            HashSet<int> seen = new HashSet<int>();
+            foreach (Object asset in AssetDatabase.LoadAllAssetsAtPath(assetPath))
+            {
+                if (asset != null && seen.Add(asset.GetInstanceID()))
+                {
+                    candidates.Add(asset);
+                }
+            }
+
+            // LoadAllAssetsAtPath does not enumerate a prefab's hierarchy/components.
+            // Include them so a persistent component or child can resolve by GUID/file ID.
+            GameObject root = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (root != null)
+            {
+                foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (seen.Add(child.gameObject.GetInstanceID()))
+                    {
+                        candidates.Add(child.gameObject);
+                    }
+
+                    foreach (Component component in child.GetComponents<Component>())
+                    {
+                        if (component != null && seen.Add(component.GetInstanceID()))
+                        {
+                            candidates.Add(component);
+                        }
+                    }
+                }
+            }
+
+            return candidates.ToArray();
+        }
+
         private static bool TryResolveAssetAtPath(
             string assetPath,
             UnitySyncObjectReferenceState reference,
@@ -3138,7 +3251,7 @@ namespace Glasspage.UnitySync
 
             Object uniqueLocalIdCandidate = null;
             int localIdCandidateCount = 0;
-            Object[] candidates = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            Object[] candidates = LoadAssetReferenceCandidates(assetPath);
             foreach (Object candidate in candidates)
             {
                 if (candidate == null ||
@@ -3259,7 +3372,7 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(candidatePath))
+                foreach (Object candidate in LoadAssetReferenceCandidates(candidatePath))
                 {
                     if (!BasicAssetCandidateMatches(candidate, reference) ||
                         !visitedCandidates.Add(candidate.GetInstanceID()))
