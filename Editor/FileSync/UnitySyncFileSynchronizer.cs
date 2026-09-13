@@ -28,9 +28,16 @@ namespace Glasspage.UnitySync
             Assets
         }
 
+        [Serializable]
+        private sealed class PackageJsonData
+        {
+            public string version;
+        }
+
         private sealed class FileEntry
         {
             internal string Path;
+            internal string PackageVersion = string.Empty;
             internal long Length;
             internal byte[] Hash;
         }
@@ -39,6 +46,7 @@ namespace Glasspage.UnitySync
         {
             internal Guid TargetPlayerId;
             internal Guid SyncId;
+            internal UnitySyncFileSyncScope Scope;
             internal List<FileEntry> Entries;
             internal Dictionary<string, FileEntry> EntriesByPath;
             internal long TotalBytes;
@@ -84,6 +92,7 @@ namespace Glasspage.UnitySync
         private static GuestPhase _guestPhase;
         private static Guid _guestHostPlayerId;
         private static Guid _guestSyncId;
+        private static UnitySyncFileSyncScope _guestRequestedScope;
         private static int _guestExpectedFileCount;
         private static long _guestExpectedTotalBytes;
         private static readonly List<FileEntry> GuestManifest =
@@ -100,6 +109,8 @@ namespace Glasspage.UnitySync
             new List<FileEntry>();
         private static readonly Dictionary<string, FileEntry> GuestMismatchByPath =
             new Dictionary<string, FileEntry>(StringComparer.Ordinal);
+        private static readonly HashSet<string> GuestPackageRootsToReplace =
+            new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, GuestTransfer> GuestTransfers =
             new Dictionary<string, GuestTransfer>(StringComparer.Ordinal);
         private static int _guestCompareIndex;
@@ -131,13 +142,9 @@ namespace Glasspage.UnitySync
         {
             ResetGuestState();
             _guestAutoContinue = autoContinue;
-            SetGuestAutoRefreshBlocked(true);
-            _guestPhase = GuestPhase.WaitingForManifest;
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                "Waiting for the host file manifest...",
-                0.01f);
-            transport.RequestFileSync();
+            BeginGuestManifestRequest(
+                transport,
+                UnitySyncFileSyncScope.Packages);
         }
 
         internal static bool ContinueGuestSync(
@@ -153,6 +160,7 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            _guestAutoContinue = true;
             return BeginApprovedGuestSync(transport, out error);
         }
 
@@ -232,7 +240,12 @@ namespace Glasspage.UnitySync
             switch (messageType)
             {
                 case UnitySyncMessageType.FileSyncRequest:
-                    BeginHostManifest(transport, localPlayerId, playerId, out error);
+                    BeginHostManifest(
+                        transport,
+                        localPlayerId,
+                        playerId,
+                        message,
+                        out error);
                     return true;
 
                 case UnitySyncMessageType.FileRequest:
@@ -317,12 +330,22 @@ namespace Glasspage.UnitySync
             UnitySyncTransport transport,
             Guid localPlayerId,
             Guid targetPlayerId,
+            UnitySyncFileSyncMessage request,
             out string error)
         {
             error = string.Empty;
+            if (request == null ||
+                (request.Scope != UnitySyncFileSyncScope.Packages &&
+                 request.Scope != UnitySyncFileSyncScope.Assets))
+            {
+                error = "A collaborator requested an invalid file sync scope.";
+                return;
+            }
+
             try
             {
-                List<FileEntry> entries = BuildLocalManifest(out long totalBytes);
+                List<FileEntry> entries =
+                    BuildLocalManifest(request.Scope, out long totalBytes);
                 Guid syncId = Guid.NewGuid();
                 Dictionary<string, FileEntry> entriesByPath =
                     new Dictionary<string, FileEntry>(StringComparer.Ordinal);
@@ -335,6 +358,7 @@ namespace Glasspage.UnitySync
                 {
                     TargetPlayerId = targetPlayerId,
                     SyncId = syncId,
+                    Scope = request.Scope,
                     Entries = entries,
                     EntriesByPath = entriesByPath,
                     TotalBytes = totalBytes
@@ -351,7 +375,8 @@ namespace Glasspage.UnitySync
                 transport.SendFileSyncAbort(
                     localPlayerId,
                     syncId,
-                    "The host could not build its Packages/Assets manifest: " + exception.Message,
+                    "The host could not build its " + request.Scope +
+                    " manifest: " + exception.Message,
                     targetPlayerId);
                 error = "File sync could not build the host project manifest: " + exception.Message;
             }
@@ -378,6 +403,7 @@ namespace Glasspage.UnitySync
                         new UnitySyncFileSyncMessage
                         {
                             SyncId = manifest.SyncId,
+                            Scope = manifest.Scope,
                             FileCount = manifest.Entries.Count,
                             TotalBytes = manifest.TotalBytes
                         },
@@ -396,6 +422,7 @@ namespace Glasspage.UnitySync
                         {
                             SyncId = manifest.SyncId,
                             Path = entry.Path,
+                            PackageVersion = entry.PackageVersion,
                             Length = entry.Length,
                             Hash = entry.Hash
                         },
@@ -649,6 +676,7 @@ namespace Glasspage.UnitySync
             if (_guestPhase != GuestPhase.WaitingForManifest ||
                 message == null ||
                 message.SyncId == Guid.Empty ||
+                message.Scope != _guestRequestedScope ||
                 message.FileCount < 0 ||
                 message.TotalBytes < 0)
             {
@@ -663,7 +691,7 @@ namespace Glasspage.UnitySync
             _guestExpectedTotalBytes = message.TotalBytes;
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
-                "Receiving host file manifest...",
+                "Receiving host " + _guestRequestedScope + " manifest...",
                 0.03f);
             return true;
         }
@@ -683,6 +711,7 @@ namespace Glasspage.UnitySync
                 message.Length < 0 ||
                 GuestManifest.Count >= _guestExpectedFileCount ||
                 !IsSafeSyncPath(message.Path) ||
+                !PathMatchesScope(message.Path, _guestRequestedScope) ||
                 GuestManifestByPath.ContainsKey(message.Path))
             {
                 error = "The host sent an invalid file manifest entry.";
@@ -693,6 +722,7 @@ namespace Glasspage.UnitySync
             FileEntry entry = new FileEntry
             {
                 Path = message.Path,
+                PackageVersion = message.PackageVersion ?? string.Empty,
                 Length = message.Length,
                 Hash = CopyHash(message.Hash)
             };
@@ -718,8 +748,14 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            GuestManifest.Sort((left, right) =>
-                StringComparer.Ordinal.Compare(left.Path, right.Path));
+            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages &&
+                !PrepareGuestPackageVersionComparison(out error))
+            {
+                FailGuestSync(error);
+                return false;
+            }
+
+            GuestManifest.Sort(CompareManifestEntries);
             _guestCompareIndex = 0;
             _guestPhase = GuestPhase.Comparing;
             return true;
@@ -735,7 +771,11 @@ namespace Glasspage.UnitySync
                 {
                     FileEntry entry = GuestManifest[_guestCompareIndex++];
                     bool matches = false;
-                    if (TryGetFullSyncPath(entry.Path, out string fullPath) &&
+                    bool replaceWholePackage =
+                        _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
+                        IsUnderPackageRootToReplace(entry.Path);
+                    if (!replaceWholePackage &&
+                        TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
                         FileInfo info = new FileInfo(fullPath);
@@ -775,7 +815,8 @@ namespace Glasspage.UnitySync
                 : (float)_guestCompareIndex / GuestManifest.Count;
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
-                "Comparing host Packages and Assets... " + _guestCompareIndex + "/" + GuestManifest.Count,
+                "Comparing host " + _guestRequestedScope + "... " +
+                _guestCompareIndex + "/" + GuestManifest.Count,
                 Mathf.Lerp(0.05f, 0.45f, compareProgress));
 
             if (_guestCompareIndex < GuestManifest.Count)
@@ -785,7 +826,17 @@ namespace Glasspage.UnitySync
 
             if (GuestMismatches.Count == 0)
             {
-                CompleteGuestSync();
+                if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
+                {
+                    BeginGuestManifestRequest(
+                        transport,
+                        UnitySyncFileSyncScope.Assets);
+                }
+                else
+                {
+                    CompleteGuestSync();
+                }
+
                 return;
             }
 
@@ -826,18 +877,23 @@ namespace Glasspage.UnitySync
             }
 
             _guestDownloadBytesReceived = 0;
-            if (GuestPackageMismatches.Count > 0)
+            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
             {
-                BeginGuestDownloadStage(GuestDownloadKind.Packages, GuestPackageMismatches);
-            }
-            else if (GuestAssetMismatches.Count > 0)
-            {
-                BeginGuestDownloadStage(GuestDownloadKind.Assets, GuestAssetMismatches);
+                if (!DeleteGuestPackageReplacementRoots(out error))
+                {
+                    FailGuestSync(error);
+                    return false;
+                }
+
+                BeginGuestDownloadStage(
+                    GuestDownloadKind.Packages,
+                    GuestPackageMismatches);
             }
             else
             {
-                CompleteGuestSync();
-                return true;
+                BeginGuestDownloadStage(
+                    GuestDownloadKind.Assets,
+                    GuestAssetMismatches);
             }
 
             UpdateGuestRequests(transport);
@@ -1123,17 +1179,9 @@ namespace Glasspage.UnitySync
             }
 
             UnitySyncSession.ClearFileSyncReloadReconnect();
-            if (GuestAssetMismatches.Count > 0)
-            {
-                BeginGuestDownloadStage(
-                    GuestDownloadKind.Assets,
-                    GuestAssetMismatches);
-                UpdateGuestRequests(transport);
-                UpdateGuestDownloadProgress();
-                return;
-            }
-
-            CompleteGuestSync();
+            BeginGuestManifestRequest(
+                transport,
+                UnitySyncFileSyncScope.Assets);
         }
 
         private static void BeginGuestAssetImport()
@@ -1273,6 +1321,7 @@ namespace Glasspage.UnitySync
             _guestFailure = string.Empty;
             _guestHostPlayerId = Guid.Empty;
             _guestSyncId = Guid.Empty;
+            _guestRequestedScope = default(UnitySyncFileSyncScope);
             _guestExpectedFileCount = 0;
             _guestExpectedTotalBytes = 0;
             GuestManifest.Clear();
@@ -1282,6 +1331,7 @@ namespace Glasspage.UnitySync
             GuestAssetMismatches.Clear();
             GuestActiveMismatches.Clear();
             GuestMismatchByPath.Clear();
+            GuestPackageRootsToReplace.Clear();
             _guestCompareIndex = 0;
             _guestRequestIndex = 0;
             _guestCompletedFiles = 0;
@@ -1346,6 +1396,252 @@ namespace Glasspage.UnitySync
             _guestTempRoot = string.Empty;
         }
 
+        private static void BeginGuestManifestRequest(
+            UnitySyncTransport transport,
+            UnitySyncFileSyncScope scope)
+        {
+            CleanupGuestTransfers();
+            DeleteGuestTempRoot();
+            GuestManifest.Clear();
+            GuestManifestByPath.Clear();
+            GuestMismatches.Clear();
+            GuestPackageMismatches.Clear();
+            GuestAssetMismatches.Clear();
+            GuestActiveMismatches.Clear();
+            GuestMismatchByPath.Clear();
+            GuestPackageRootsToReplace.Clear();
+            _guestHostPlayerId = Guid.Empty;
+            _guestSyncId = Guid.Empty;
+            _guestRequestedScope = scope;
+            _guestExpectedFileCount = 0;
+            _guestExpectedTotalBytes = 0;
+            _guestCompareIndex = 0;
+            _guestRequestIndex = 0;
+            _guestCompletedFiles = 0;
+            _guestDownloadTotalBytes = 0;
+            _guestDownloadBytesReceived = 0;
+            _guestStageDownloadTotalBytes = 0;
+            _guestStageDownloadBytesReceived = 0;
+            _guestDownloadKind = GuestDownloadKind.None;
+
+            SetGuestAutoRefreshBlocked(true);
+            _guestPhase = GuestPhase.WaitingForManifest;
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                "Waiting for the host " + scope + " manifest...",
+                scope == UnitySyncFileSyncScope.Packages ? 0.01f : 0.55f);
+            transport.RequestFileSync(scope);
+        }
+
+        private static bool PrepareGuestPackageVersionComparison(out string error)
+        {
+            error = string.Empty;
+            GuestPackageRootsToReplace.Clear();
+            try
+            {
+                foreach (FileEntry entry in GuestManifest)
+                {
+                    if (entry == null ||
+                        string.IsNullOrEmpty(entry.PackageVersion) ||
+                        !TryGetEmbeddedPackageRoot(
+                            entry.Path,
+                            out string packageRoot,
+                            out string packageName))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetFullSyncPath(
+                            packageRoot + "/package.json",
+                            out string localPackageJson))
+                    {
+                        continue;
+                    }
+
+                    string localRoot = Path.GetDirectoryName(localPackageJson);
+                    if (string.IsNullOrEmpty(localRoot) || !Directory.Exists(localRoot))
+                    {
+                        continue;
+                    }
+
+                    string localVersion = File.Exists(localPackageJson)
+                        ? ReadPackageVersion(localPackageJson)
+                        : string.Empty;
+                    if (string.Equals(
+                            localVersion,
+                            entry.PackageVersion,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    GuestPackageRootsToReplace.Add(packageRoot);
+                    UnitySyncSession.ReportPackageVersionReplacement(
+                        packageName,
+                        localVersion,
+                        entry.PackageVersion);
+                }
+
+                return true;
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException)
+            {
+                error = "Could not compare package versions: " + exception.Message;
+                return false;
+            }
+        }
+
+        private static bool DeleteGuestPackageReplacementRoots(out string error)
+        {
+            error = string.Empty;
+            try
+            {
+                foreach (string packageRoot in GuestPackageRootsToReplace)
+                {
+                    if (!TryGetFullSyncPath(
+                            packageRoot + "/package.json",
+                            out string packageJsonPath))
+                    {
+                        continue;
+                    }
+
+                    string fullRoot = Path.GetDirectoryName(packageJsonPath);
+                    if (string.IsNullOrEmpty(fullRoot) || !Directory.Exists(fullRoot))
+                    {
+                        continue;
+                    }
+
+                    ClearReadOnlyAttributes(fullRoot);
+                    Directory.Delete(fullRoot, true);
+                }
+
+                return true;
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException)
+            {
+                error = "Could not replace an outdated local package: " +
+                        exception.Message;
+                return false;
+            }
+        }
+
+        private static void ClearReadOnlyAttributes(string root)
+        {
+            foreach (string file in Directory.GetFiles(
+                         root,
+                         "*",
+                         SearchOption.AllDirectories))
+            {
+                FileAttributes attributes = File.GetAttributes(file);
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(
+                        file,
+                        attributes & ~FileAttributes.ReadOnly);
+                }
+            }
+        }
+
+        private static bool IsUnderPackageRootToReplace(string path)
+        {
+            string normalized = (path ?? string.Empty).Replace('\\', '/');
+            foreach (string root in GuestPackageRootsToReplace)
+            {
+                if (normalized.StartsWith(
+                        root + "/",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsEmbeddedPackageJsonPath(string path)
+        {
+            return TryGetEmbeddedPackageRoot(
+                path,
+                out _,
+                out _);
+        }
+
+        private static bool TryGetEmbeddedPackageRoot(
+            string path,
+            out string packageRoot,
+            out string packageName)
+        {
+            packageRoot = string.Empty;
+            packageName = string.Empty;
+            string normalized = (path ?? string.Empty).Replace('\\', '/');
+            string[] segments = normalized.Split('/');
+            if (segments.Length != 3 ||
+                !string.Equals(segments[0], "Packages", StringComparison.Ordinal) ||
+                !string.Equals(
+                    segments[2],
+                    "package.json",
+                    StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrEmpty(segments[1]))
+            {
+                return false;
+            }
+
+            packageName = segments[1];
+            packageRoot = "Packages/" + packageName;
+            return true;
+        }
+
+        private static string ReadPackageVersion(string fullPath)
+        {
+            try
+            {
+                string json = File.ReadAllText(fullPath);
+                PackageJsonData data = JsonUtility.FromJson<PackageJsonData>(json);
+                return data != null && !string.IsNullOrEmpty(data.version)
+                    ? data.version.Trim()
+                    : string.Empty;
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException ||
+                exception is ArgumentException)
+            {
+                return string.Empty;
+            }
+        }
+
+        private static int CompareManifestEntries(
+            FileEntry left,
+            FileEntry right)
+        {
+            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
+            {
+                int groupCompare =
+                    GetPackageManifestSortGroup(left.Path).CompareTo(
+                        GetPackageManifestSortGroup(right.Path));
+                if (groupCompare != 0)
+                {
+                    return groupCompare;
+                }
+            }
+
+            return StringComparer.Ordinal.Compare(left.Path, right.Path);
+        }
+
+        private static bool PathMatchesScope(
+            string path,
+            UnitySyncFileSyncScope scope)
+        {
+            return scope == UnitySyncFileSyncScope.Packages
+                ? IsPackagePath(path)
+                : scope == UnitySyncFileSyncScope.Assets &&
+                  IsAssetPath(path);
+        }
+
         private static void SetGuestAutoRefreshBlocked(bool blocked)
         {
             if (_guestAutoRefreshBlocked == blocked)
@@ -1365,18 +1661,47 @@ namespace Glasspage.UnitySync
             _guestAutoRefreshBlocked = blocked;
         }
 
-        private static List<FileEntry> BuildLocalManifest(out long totalBytes)
+        private static List<FileEntry> BuildLocalManifest(
+            UnitySyncFileSyncScope scope,
+            out long totalBytes)
         {
             totalBytes = 0;
-            List<string> files = EnumerateProjectSyncFiles();
+            List<string> files = new List<string>();
+            if (scope == UnitySyncFileSyncScope.Packages)
+            {
+                EnumerateSyncRoot(
+                    Path.GetFullPath(Path.Combine(GetProjectRoot(), "Packages")),
+                    "Packages",
+                    false,
+                    files);
+            }
+            else if (scope == UnitySyncFileSyncScope.Assets)
+            {
+                EnumerateSyncRoot(
+                    Path.GetFullPath(Application.dataPath),
+                    "Assets",
+                    true,
+                    files);
+            }
+            else
+            {
+                throw new InvalidDataException("Invalid file sync scope.");
+            }
+
             files.Sort((left, right) =>
             {
-                int leftGroup = IsPackagePath(left) ? 0 : 1;
-                int rightGroup = IsPackagePath(right) ? 0 : 1;
-                int groupCompare = leftGroup.CompareTo(rightGroup);
-                return groupCompare != 0
-                    ? groupCompare
-                    : StringComparer.Ordinal.Compare(left, right);
+                if (scope == UnitySyncFileSyncScope.Packages)
+                {
+                    int groupCompare =
+                        GetPackageManifestSortGroup(left).CompareTo(
+                            GetPackageManifestSortGroup(right));
+                    if (groupCompare != 0)
+                    {
+                        return groupCompare;
+                    }
+                }
+
+                return StringComparer.Ordinal.Compare(left, right);
             });
 
             List<FileEntry> entries = new List<FileEntry>(files.Count);
@@ -1391,6 +1716,11 @@ namespace Glasspage.UnitySync
                 FileEntry entry = new FileEntry
                 {
                     Path = projectPath,
+                    PackageVersion =
+                        scope == UnitySyncFileSyncScope.Packages &&
+                        IsEmbeddedPackageJsonPath(projectPath)
+                            ? ReadPackageVersion(fullPath)
+                            : string.Empty,
                     Length = info.Length,
                     Hash = ComputeHash(fullPath)
                 };
@@ -1401,20 +1731,19 @@ namespace Glasspage.UnitySync
             return entries;
         }
 
-        private static List<string> EnumerateProjectSyncFiles()
+        private static int GetPackageManifestSortGroup(string path)
         {
-            List<string> result = new List<string>();
-            EnumerateSyncRoot(
-                Path.GetFullPath(Path.Combine(GetProjectRoot(), "Packages")),
-                "Packages",
-                false,
-                result);
-            EnumerateSyncRoot(
-                Path.GetFullPath(Application.dataPath),
-                "Assets",
-                true,
-                result);
-            return result;
+            if (string.Equals(path, "Packages/manifest.json", StringComparison.Ordinal))
+            {
+                return 0;
+            }
+
+            if (string.Equals(path, "Packages/packages-lock.json", StringComparison.Ordinal))
+            {
+                return 1;
+            }
+
+            return IsEmbeddedPackageJsonPath(path) ? 2 : 3;
         }
 
         private static void EnumerateSyncRoot(
