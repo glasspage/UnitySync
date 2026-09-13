@@ -46,6 +46,11 @@ namespace Glasspage.UnitySync
 
         private static readonly List<string> PackageChanges = new List<string>();
         internal static string[] RequiredPackageChanges => PackageChanges.ToArray();
+        internal const string PackageChecklistOrderHint =
+            "Install or change packages from top to bottom. com.unity.* packages are listed last " +
+            "because other packages may install them automatically. Recheck packages before " +
+            "installing any remaining Unity dependencies manually.";
+
         internal static bool IsWaitingForPackageChanges =>
             _guestPhase == GuestPhase.WaitingForPackageChanges;
 
@@ -1740,6 +1745,7 @@ namespace Glasspage.UnitySync
         {
             error = string.Empty;
             PackageChanges.Clear();
+            List<string> unityPackageChanges = new List<string>();
             if (GuestHostPackageVersions.Count != _guestExpectedFileCount)
             {
                 error = "The host package checklist was incomplete: received " +
@@ -1789,7 +1795,8 @@ namespace Glasspage.UnitySync
                             : requirement.source == "Embedded" || requirement.source == "Local" || requirement.source == "Git"
                                 ? "Use the package's manager or obtain the matching release/source from the host."
                                 : "Use Unity Package Manager to select the host version; dependencies may update with their parent package.";
-                    PackageChanges.Add(action + " " + title + " (" + requirement.name + ")" + Environment.NewLine +
+                    (requirement.name.StartsWith("com.unity.", StringComparison.Ordinal)
+                        ? unityPackageChanges : PackageChanges).Add(action + " " + title + " (" + requirement.name + ")" + Environment.NewLine +
                         "Your version: " + (installed != null ? installed.version : "Not installed") +
                         "   •   Host version: " + requirement.version + Environment.NewLine + manager);
                 }
@@ -1798,11 +1805,14 @@ namespace Glasspage.UnitySync
 
             foreach (UnityEditor.PackageManager.PackageInfo extra in local.Values)
             {
-                PackageChanges.Add("Remove " + extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
+                (extra.name.StartsWith("com.unity.", StringComparison.Ordinal)
+                    ? unityPackageChanges : PackageChanges).Add("Remove " + extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
                     "Your version: " + extra.version + "   •   Not installed on the host." + Environment.NewLine +
                     "Remove it using its package manager; dependencies may disappear when their parent package is removed.");
             }
             PackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
+            unityPackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
+            PackageChanges.AddRange(unityPackageChanges);
             SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.WaitingForPackageChanges;
             EditorUtility.ClearProgressBar();

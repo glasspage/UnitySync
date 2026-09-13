@@ -161,6 +161,7 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(8f);
             EditorGUILayout.LabelField("Match the host's packages", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
+                UnitySyncFileSynchronizer.PackageChecklistOrderHint + " " +
                 "Make the changes below manually, then select Recheck packages. UnitySync does not " +
                 "change package files. Assets and scene synchronization will start once this list is clear. " +
                 "If you close Unity to change packages, reconnect afterward.",
@@ -175,8 +176,10 @@ namespace Glasspage.UnitySync
             {
                 if (GUILayout.Button("Copy checklist"))
                 {
-                    GUIUtility.systemCopyBuffer = string.Join(
-                        Environment.NewLine + Environment.NewLine, changes);
+                    GUIUtility.systemCopyBuffer =
+                        UnitySyncFileSynchronizer.PackageChecklistOrderHint +
+                        Environment.NewLine + Environment.NewLine +
+                        string.Join(Environment.NewLine + Environment.NewLine, changes);
                 }
                 using (new EditorGUI.DisabledScope(EditorApplication.isCompiling || EditorApplication.isUpdating))
                 {
