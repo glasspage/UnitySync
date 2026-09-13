@@ -1742,7 +1742,9 @@ namespace Glasspage.UnitySync
             PackageChanges.Clear();
             if (GuestHostPackageVersions.Count != _guestExpectedFileCount)
             {
-                error = "The host package checklist was incomplete.";
+                error = "The host package checklist was incomplete: received " +
+                    GuestHostPackageVersions.Count + " of " + _guestExpectedFileCount +
+                    " package version entries.";
                 FailGuestSync(error);
                 return false;
             }
