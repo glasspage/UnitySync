@@ -147,7 +147,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 14;
+        internal const int Version = 15;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -252,12 +252,13 @@ namespace Glasspage.UnitySync
             });
         }
 
-        internal static byte[] CreateFileSyncRequest(Guid playerId)
+        internal static byte[] CreateFileSyncRequest(Guid playerId, UnitySyncFileSyncScope scope)
         {
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.FileSyncRequest);
                 WriteGuid(writer, playerId);
+                writer.Write((byte)scope);
             });
         }
 
@@ -660,7 +661,18 @@ namespace Glasspage.UnitySync
                                 null,
                                 null,
                                 default,
-                                new UnitySyncFileSyncMessage());
+                                new UnitySyncFileSyncMessage
+                                {
+                                    Scope = type == UnitySyncMessageType.FileSyncRequest
+                                        ? (UnitySyncFileSyncScope)reader.ReadByte()
+                                        : default
+                                });
+                            if (type == UnitySyncMessageType.FileSyncRequest &&
+                                message.FileSync.Scope != UnitySyncFileSyncScope.Packages &&
+                                message.FileSync.Scope != UnitySyncFileSyncScope.Assets)
+                            {
+                                throw new InvalidDataException("Invalid file sync request scope.");
+                            }
                             break;
 
                         case UnitySyncMessageType.FileManifestBegin:

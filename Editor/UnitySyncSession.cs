@@ -272,6 +272,24 @@ namespace Glasspage.UnitySync
             Changed?.Invoke();
         }
 
+        internal static void ReportPackageChecklist(string[] changes)
+        {
+            AddLog(changes.Length == 0
+                ? "Package versions match the host."
+                : "Manual package changes required:" + Environment.NewLine +
+                    string.Join(Environment.NewLine + Environment.NewLine, changes));
+            Changed?.Invoke();
+        }
+
+        internal static void RecheckPackageVersions()
+        {
+            if (_state == UnitySyncSessionState.Connected)
+            {
+                UnitySyncFileSynchronizer.RecheckPackages(_transport);
+                Changed?.Invoke();
+            }
+        }
+
         internal static void ReportFileSyncDownloadRequired(
             string[] neededPaths,
             long totalBytes)
@@ -439,7 +457,7 @@ namespace Glasspage.UnitySync
                             AddLog("Resumed UnitySync after synchronized files reloaded.");
                         }
 
-                        AddLog("Comparing host Packages before Assets and scene synchronization.");
+                        AddLog("Checking package versions before Assets and scene synchronization.");
                         Changed?.Invoke();
                         break;
 
@@ -668,7 +686,7 @@ namespace Glasspage.UnitySync
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
-                AddLog("Host Packages and Assets synchronized. Live project sync enabled.");
+                AddLog("Package versions checked and Assets synchronized. Live project sync enabled.");
                 Changed?.Invoke();
             }
 

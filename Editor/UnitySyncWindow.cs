@@ -83,6 +83,7 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(8f);
 
             DrawStatus();
+            DrawPackageChecklist();
             EditorGUILayout.Space(8f);
 
             DrawIdentity();
@@ -131,7 +132,9 @@ namespace Glasspage.UnitySync
                     break;
 
                 case UnitySyncSessionState.Connected:
-                    status = UnitySyncSession.IsAwaitingFileDownloadConfirmation
+                    status = UnitySyncFileSynchronizer.IsWaitingForPackageChanges
+                        ? "Package changes required"
+                        : UnitySyncSession.IsAwaitingFileDownloadConfirmation
                         ? "Review host file download"
                         : UnitySyncSession.IsFileSyncing
                             ? "Syncing host files..."
@@ -146,6 +149,43 @@ namespace Glasspage.UnitySync
             }
 
             EditorGUILayout.HelpBox(status, type);
+        }
+
+        private void DrawPackageChecklist()
+        {
+            if (!UnitySyncFileSynchronizer.IsWaitingForPackageChanges)
+            {
+                return;
+            }
+
+            EditorGUILayout.Space(8f);
+            EditorGUILayout.LabelField("Match the host's packages", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                "Make the changes below manually, then select Recheck packages. UnitySync does not " +
+                "change package files. Assets and scene synchronization will start once this list is clear. " +
+                "If you close Unity to change packages, reconnect afterward.",
+                MessageType.Info);
+            string[] changes = UnitySyncFileSynchronizer.RequiredPackageChanges;
+            foreach (string change in changes)
+            {
+                EditorGUILayout.HelpBox(change, MessageType.Warning);
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Copy checklist"))
+                {
+                    GUIUtility.systemCopyBuffer = string.Join(
+                        Environment.NewLine + Environment.NewLine, changes);
+                }
+                using (new EditorGUI.DisabledScope(EditorApplication.isCompiling || EditorApplication.isUpdating))
+                {
+                    if (GUILayout.Button("Recheck packages"))
+                    {
+                        UnitySyncSession.RecheckPackageVersions();
+                    }
+                }
+            }
         }
 
         private void DrawIdentity()
@@ -533,9 +573,9 @@ namespace Glasspage.UnitySync
 
             EditorGUILayout.Space();
             EditorGUILayout.HelpBox(
-                "Full restore replaces Assets, Packages and ProjectSettings with the host's files, " +
+                "Restore replaces Assets and ProjectSettings with the host's files, " +
                 "including files that already match. Guest-only files and unsaved scene edits are removed. " +
-                "The host must accept the request in Debug. Downloading and importing may take a long time.",
+                "Packages must be managed manually. The host must accept the request in Debug. Downloading and importing may take a long time.",
                 MessageType.Warning);
             bool connectedGuest = UnitySyncSession.State == UnitySyncSessionState.Connected;
             using (new EditorGUI.DisabledScope(!connectedGuest || UnitySyncSession.IsFileSyncing))

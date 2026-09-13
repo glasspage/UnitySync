@@ -81,7 +81,6 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
-            internal int FileSyncRequestCount;
             internal bool Superseded;
 
             internal Peer(TcpClient client)
@@ -229,7 +228,7 @@ namespace Glasspage.UnitySync
             }
 
             QueueMessage(
-                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId),
+                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId, scope),
                 Guid.Empty);
         }
 
@@ -686,13 +685,8 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileSyncRequest:
                             peer.RequestedFileSync = true;
-                            peer.FileSyncRequestCount++;
                             UnitySyncFileSyncMessage scopedRequest =
                                 message.FileSync ?? new UnitySyncFileSyncMessage();
-                            scopedRequest.Scope =
-                                peer.FileSyncRequestCount == 1
-                                    ? UnitySyncFileSyncScope.Packages
-                                    : UnitySyncFileSyncScope.Assets;
                             EnqueueFileSync(
                                 message.Type,
                                 message.PlayerId,

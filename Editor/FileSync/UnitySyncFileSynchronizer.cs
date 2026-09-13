@@ -18,7 +18,7 @@ namespace Glasspage.UnitySync
             Comparing,
             WaitingForConfirmation,
             Downloading,
-            ResolvingPackages,
+            WaitingForPackageChanges,
             ImportingAssets
         }
 
@@ -33,6 +33,30 @@ namespace Glasspage.UnitySync
         private sealed class PackageJsonData
         {
             public string version;
+        }
+
+        [Serializable]
+        private sealed class PackageRequirement
+        {
+            public string name;
+            public string displayName;
+            public string version;
+            public string source;
+        }
+
+        private static readonly List<string> PackageChanges = new List<string>();
+        internal static string[] RequiredPackageChanges => PackageChanges.ToArray();
+        internal static bool IsWaitingForPackageChanges =>
+            _guestPhase == GuestPhase.WaitingForPackageChanges;
+
+        internal static void RecheckPackages(UnitySyncTransport transport)
+        {
+            if (!IsWaitingForPackageChanges || EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                return;
+            }
+
+            BeginGuestManifestRequest(transport, UnitySyncFileSyncScope.Packages);
         }
 
         private sealed class FileEntry
@@ -93,7 +117,7 @@ namespace Glasspage.UnitySync
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
-        private static readonly string[] RestoreRoots = { "Assets", "Packages", "ProjectSettings" };
+        private static readonly string[] RestoreRoots = { "Assets", "ProjectSettings" };
         internal static Guid[] PendingProjectRestores
         {
             get
@@ -374,6 +398,14 @@ namespace Glasspage.UnitySync
 
             switch (_guestPhase)
             {
+                case GuestPhase.WaitingForPackageChanges:
+                    if (PackageChanges.Count == 0)
+                    {
+                        transport.LogLocal("Package versions match the host. Starting Assets comparison.");
+                        BeginGuestManifestRequest(transport, UnitySyncFileSyncScope.Assets);
+                    }
+                    break;
+
                 case GuestPhase.Comparing:
                     UpdateGuestComparison(transport);
                     break;
@@ -381,10 +413,6 @@ namespace Glasspage.UnitySync
                 case GuestPhase.Downloading:
                     UpdateGuestRequests(transport);
                     UpdateGuestDownloadProgress();
-                    break;
-
-                case GuestPhase.ResolvingPackages:
-                    UpdateGuestPackageResolution(transport);
                     break;
 
                 case GuestPhase.ImportingAssets:
@@ -579,6 +607,7 @@ namespace Glasspage.UnitySync
             if (request == null ||
                 !HostManifests.TryGetValue(request.SyncId, out HostManifest manifest) ||
                 manifest.TargetPlayerId != targetPlayerId ||
+                manifest.Scope == UnitySyncFileSyncScope.Packages ||
                 !manifest.EntriesByPath.TryGetValue(request.Path ?? string.Empty, out FileEntry entry))
             {
                 error = "A collaborator requested a file outside its active host manifest.";
@@ -893,11 +922,9 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages &&
-                !PrepareGuestPackageVersionComparison(out error))
+            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
             {
-                FailGuestSync(error);
-                return false;
+                return CompareRequiredPackages(out error);
             }
 
             if (!_guestForceRestore)
@@ -1067,6 +1094,11 @@ namespace Glasspage.UnitySync
             out string error)
         {
             error = string.Empty;
+            if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
+            {
+                error = "Packages must be changed manually before syncing Assets.";
+                return false;
+            }
             if (!PrepareGuestTempRoot(out error))
             {
                 FailGuestSync(error);
@@ -1077,12 +1109,6 @@ namespace Glasspage.UnitySync
             if (_guestForceRestore)
             {
                 BeginGuestDownloadStage(GuestDownloadKind.Assets, GuestMismatches);
-            }
-            else if (_guestRequestedScope == UnitySyncFileSyncScope.Packages)
-            {
-                BeginGuestDownloadStage(
-                    GuestDownloadKind.Packages,
-                    GuestPackageMismatches);
             }
             else
             {
@@ -1175,8 +1201,9 @@ namespace Glasspage.UnitySync
                 message == null ||
                 message.SyncId != _guestSyncId ||
                 !GuestMismatchByPath.TryGetValue(message.Path ?? string.Empty, out FileEntry entry) ||
-                (_guestDownloadKind == GuestDownloadKind.Packages && !IsPackagePath(entry.Path)) ||
-                (_guestDownloadKind == GuestDownloadKind.Assets && !IsAssetPath(entry.Path)) ||
+                (_guestForceRestore
+                    ? !PathMatchesScope(entry.Path, UnitySyncFileSyncScope.Project)
+                    : !IsAssetPath(entry.Path)) ||
                 message.Length != entry.Length ||
                 message.Hash == null ||
                 !HashesEqual(message.Hash, entry.Hash) ||
@@ -1312,10 +1339,9 @@ namespace Glasspage.UnitySync
             try
             {
                 // Require a complete Unity project, not an empty/partial replacement manifest.
-                if (!File.Exists(Path.Combine(stagedRoot, "Packages", "manifest.json")) ||
-                    !File.Exists(Path.Combine(stagedRoot, "ProjectSettings", "ProjectVersion.txt")))
+                if (!File.Exists(Path.Combine(stagedRoot, "ProjectSettings", "ProjectVersion.txt")))
                 {
-                    throw new IOException("The host restore is missing its package manifest or project version.");
+                    throw new IOException("The host restore is missing its project version.");
                 }
 
                 foreach (string root in RestoreRoots)
@@ -1390,7 +1416,7 @@ namespace Glasspage.UnitySync
                 }
                 catch (IOException) { /* A locked old file must not undo a completed restore. */ }
                 catch (UnauthorizedAccessException) { }
-                BeginGuestPackageResolution();
+                BeginGuestAssetImport();
             }
         }
 
@@ -1402,7 +1428,6 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            GuestDownloadKind completedKind = _guestDownloadKind;
             if (!ApplyStagedFiles(out string packageError))
             {
                 FailGuestSync(packageError);
@@ -1416,14 +1441,7 @@ namespace Glasspage.UnitySync
             _guestStageDownloadTotalBytes = 0;
             _guestStageDownloadBytesReceived = 0;
 
-            if (completedKind == GuestDownloadKind.Packages)
-            {
-                BeginGuestPackageResolution();
-            }
-            else
-            {
-                BeginGuestAssetImport();
-            }
+            BeginGuestAssetImport();
         }
 
         private static void UpdateGuestDownloadProgress()
@@ -1450,55 +1468,6 @@ namespace Glasspage.UnitySync
                 "Receiving host " + stageName + "... " +
                 _guestCompletedFiles + "/" + GuestActiveMismatches.Count,
                 Mathf.Lerp(0.45f, 0.82f, byteProgress));
-        }
-
-        private static void BeginGuestPackageResolution()
-        {
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                "Resolving synchronized Packages...",
-                0.84f);
-
-            UnitySyncSession.PrepareFileSyncReloadReconnect();
-            SetGuestAutoRefreshBlocked(false);
-            _guestPhase = GuestPhase.ResolvingPackages;
-            _guestImportEarliestComplete =
-                EditorApplication.timeSinceStartup + Math.Max(2d, ImportSettleSeconds);
-
-            try
-            {
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                Client.Resolve();
-            }
-            catch (Exception exception)
-            {
-                UnitySyncSession.ClearFileSyncReloadReconnect();
-                FailGuestSync(
-                    "Could not resolve synchronized Packages: " +
-                    exception.Message);
-            }
-        }
-
-        private static void UpdateGuestPackageResolution(UnitySyncTransport transport)
-        {
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                EditorApplication.isCompiling
-                    ? "Compiling synchronized Packages..."
-                    : "Finishing synchronized Package import...",
-                0.88f);
-
-            if (EditorApplication.isCompiling ||
-                EditorApplication.isUpdating ||
-                EditorApplication.timeSinceStartup < _guestImportEarliestComplete)
-            {
-                return;
-            }
-
-            UnitySyncSession.ClearFileSyncReloadReconnect();
-            BeginGuestManifestRequest(
-                transport,
-                UnitySyncFileSyncScope.Assets);
         }
 
         private static void BeginGuestAssetImport()
@@ -1637,6 +1606,7 @@ namespace Glasspage.UnitySync
         private static void ResetGuestState()
         {
             _guestForceRestore = false;
+            PackageChanges.Clear();
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             SetGuestAutoRefreshBlocked(false);
@@ -1753,7 +1723,8 @@ namespace Glasspage.UnitySync
             _guestStageDownloadBytesReceived = 0;
             _guestDownloadKind = GuestDownloadKind.None;
 
-            SetGuestAutoRefreshBlocked(true);
+            PackageChanges.Clear();
+            SetGuestAutoRefreshBlocked(scope != UnitySyncFileSyncScope.Packages);
             _guestPhase = GuestPhase.WaitingForManifest;
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
@@ -1765,62 +1736,76 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool PrepareGuestPackageVersionComparison(out string error)
+        private static bool CompareRequiredPackages(out string error)
         {
             error = string.Empty;
-            GuestPackageRootsToReplace.Clear();
-            try
+            PackageChanges.Clear();
+            if (GuestHostPackageVersions.Count != _guestExpectedFileCount)
             {
-                foreach (KeyValuePair<string, string> pair in GuestHostPackageVersions)
-                {
-                    if (!TryGetEmbeddedPackageRoot(
-                            pair.Key,
-                            out string packageRoot,
-                            out string packageName))
-                    {
-                        continue;
-                    }
-
-                    if (!TryGetFullSyncPath(
-                            packageRoot + "/package.json",
-                            out string localPackageJson))
-                    {
-                        continue;
-                    }
-
-                    string localRoot = Path.GetDirectoryName(localPackageJson);
-                    if (string.IsNullOrEmpty(localRoot) || !Directory.Exists(localRoot))
-                    {
-                        continue;
-                    }
-
-                    string localVersion = File.Exists(localPackageJson)
-                        ? ReadPackageVersion(localPackageJson)
-                        : string.Empty;
-                    if (string.Equals(
-                            localVersion,
-                            pair.Value,
-                            StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    GuestPackageRootsToReplace.Add(packageRoot);
-                    UnitySyncSession.ReportPackageVersionReplacement(
-                        packageName,
-                        localVersion,
-                        pair.Value);
-                }
-
-                return true;
-            }
-            catch (Exception exception) when (
-                exception is IOException ||
-                exception is UnauthorizedAccessException)
-            {
-                error = "Could not compare package versions: " + exception.Message;
+                error = "The host package checklist was incomplete.";
+                FailGuestSync(error);
                 return false;
             }
+
+            Dictionary<string, UnityEditor.PackageManager.PackageInfo> local =
+                new Dictionary<string, UnityEditor.PackageManager.PackageInfo>(StringComparer.Ordinal);
+            foreach (UnityEditor.PackageManager.PackageInfo package in
+                     UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
+            {
+                local[package.name] = package;
+            }
+
+            foreach (KeyValuePair<string, string> entry in GuestHostPackageVersions)
+            {
+                PackageRequirement requirement;
+                try
+                {
+                    requirement = JsonUtility.FromJson<PackageRequirement>(entry.Value);
+                }
+                catch (ArgumentException)
+                {
+                    requirement = null;
+                }
+                if (requirement == null || string.IsNullOrEmpty(requirement.name) ||
+                    string.IsNullOrEmpty(requirement.version) ||
+                    entry.Key != "Packages/" + requirement.name + "/package.json")
+                {
+                    error = "The host sent invalid package version information.";
+                    FailGuestSync(error);
+                    return false;
+                }
+
+                local.TryGetValue(requirement.name, out UnityEditor.PackageManager.PackageInfo installed);
+                if (installed == null || !string.Equals(installed.version, requirement.version, StringComparison.Ordinal))
+                {
+                    string title = string.IsNullOrEmpty(requirement.displayName) ? requirement.name : requirement.displayName;
+                    string action = installed == null ? "Install" : "Change";
+                    string manager = requirement.name.StartsWith("com.vrchat.", StringComparison.Ordinal)
+                        ? "Use Creator Companion → Manage Project and select the host version."
+                        : requirement.source == "BuiltIn"
+                            ? "Use the same Unity Editor version and enable this module in Package Manager."
+                            : requirement.source == "Embedded" || requirement.source == "Local" || requirement.source == "Git"
+                                ? "Use the package's manager or obtain the matching release/source from the host."
+                                : "Use Unity Package Manager to select the host version; dependencies may update with their parent package.";
+                    PackageChanges.Add(action + " " + title + " (" + requirement.name + ")" + Environment.NewLine +
+                        "Your version: " + (installed != null ? installed.version : "Not installed") +
+                        "   •   Host version: " + requirement.version + Environment.NewLine + manager);
+                }
+                local.Remove(requirement.name);
+            }
+
+            foreach (UnityEditor.PackageManager.PackageInfo extra in local.Values)
+            {
+                PackageChanges.Add("Remove " + extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
+                    "Your version: " + extra.version + "   •   Not installed on the host." + Environment.NewLine +
+                    "Remove it using its package manager; dependencies may disappear when their parent package is removed.");
+            }
+            PackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
+            SetGuestAutoRefreshBlocked(false);
+            _guestPhase = GuestPhase.WaitingForPackageChanges;
+            EditorUtility.ClearProgressBar();
+            UnitySyncSession.ReportPackageChecklist(PackageChanges.ToArray());
+            return true;
         }
 
         private static bool ApplyStagedFiles(out string error)
@@ -2108,7 +2093,7 @@ namespace Glasspage.UnitySync
         {
             if (scope == UnitySyncFileSyncScope.Project)
             {
-                return IsSafeSyncPath(path);
+                return IsSafeSyncPath(path) && !IsPackagePath(path);
             }
 
             return scope == UnitySyncFileSyncScope.Packages
@@ -2157,11 +2142,30 @@ namespace Glasspage.UnitySync
             }
             else if (scope == UnitySyncFileSyncScope.Packages)
             {
-                EnumerateSyncRoot(
-                    Path.GetFullPath(Path.Combine(GetProjectRoot(), "Packages")),
-                    "Packages",
-                    false,
-                    files);
+                List<FileEntry> catalog = new List<FileEntry>();
+                foreach (UnityEditor.PackageManager.PackageInfo package in
+                         UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
+                {
+                    catalog.Add(new FileEntry
+                    {
+                        Path = "Packages/" + package.name + "/package.json",
+                        PackageVersion = JsonUtility.ToJson(new PackageRequirement
+                        {
+                            name = package.name,
+                            displayName = package.displayName,
+                            version = package.version,
+                            source = package.source.ToString()
+                        }),
+                        Length = 0,
+                        Hash = new byte[32]
+                    });
+                }
+                if (catalog.Count == 0)
+                {
+                    throw new IOException("The registered package list is not available yet.");
+                }
+                catalog.Sort((left, right) => StringComparer.Ordinal.Compare(left.Path, right.Path));
+                return catalog;
             }
             else if (scope == UnitySyncFileSyncScope.Assets)
             {
@@ -2338,7 +2342,7 @@ namespace Glasspage.UnitySync
         private static bool TryGetFullSyncPath(string projectPath, out string fullPath)
         {
             fullPath = string.Empty;
-            if (!IsSafeSyncPath(projectPath))
+            if (!IsSafeSyncPath(projectPath) || IsPackagePath(projectPath))
             {
                 return false;
             }
