@@ -853,7 +853,8 @@ namespace Glasspage.UnitySync
                 server.PlayerId = welcome.PlayerId;
                 server.DisplayName = NormalizeDisplayName(welcome.DisplayName);
                 _clientReady = true;
-                Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName + ".");
+                Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName +
+                    ". Local protocol " + UnitySyncProtocol.Version + " (packet diagnostics 2).");
 
                 while (_running)
                 {
@@ -1003,9 +1004,10 @@ namespace Glasspage.UnitySync
                 plaintext = _crypto.Decrypt(envelope);
             }
 
-            if (!UnitySyncProtocol.TryRead(plaintext, out UnitySyncMessage message))
+            if (!UnitySyncProtocol.TryRead(
+                plaintext, out UnitySyncMessage message, out string error))
             {
-                throw new InvalidDataException("Invalid UnitySync message.");
+                throw new InvalidDataException("Invalid UnitySync message: " + error);
             }
 
             return message;
