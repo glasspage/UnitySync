@@ -764,7 +764,9 @@ namespace Glasspage.UnitySync
             {
                 if (_running && authenticated && !peer.Superseded)
                 {
-                    Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " disconnected.");
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        peer.DisplayName + " disconnected: " + exception.Message);
                 }
                 else if (_running && !authenticated)
                 {
