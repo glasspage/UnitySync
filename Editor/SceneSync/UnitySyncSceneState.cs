@@ -80,6 +80,7 @@ namespace Glasspage.UnitySync
         internal string ScenePath = string.Empty;
         internal string SceneName = string.Empty;
         internal int SceneIndex;
+        internal bool IsActive;
         internal UnitySyncObjectReferenceState SkyboxMaterial;
         internal AmbientMode AmbientMode;
         internal float AmbientIntensity;
