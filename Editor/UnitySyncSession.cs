@@ -23,6 +23,7 @@ namespace Glasspage.UnitySync
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
         private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
         private const string FileSyncResumeColorKey = "Glasspage.UnitySync.FileSyncResume.Color";
+        private const string FileSyncResumeApprovedKey = "Glasspage.UnitySync.FileSyncResume.Approved";
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
 
@@ -360,9 +361,11 @@ namespace Glasspage.UnitySync
                 {
                     case UnitySyncTransportEventKind.Connected:
                         _state = UnitySyncSessionState.Connected;
-                        UnitySyncFileSynchronizer.BeginGuestSync(transport);
+                        UnitySyncFileSynchronizer.BeginGuestSync(
+                            transport,
+                            _guestSyncApproved);
                         AddLog(transportEvent.Message);
-                        AddLog("Comparing host Assets before scene synchronization.");
+                        AddLog("Comparing host Packages and Assets before scene synchronization.");
                         Changed?.Invoke();
                         break;
 
@@ -571,7 +574,7 @@ namespace Glasspage.UnitySync
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
-                AddLog("Host Assets synchronized. Live project sync enabled.");
+                AddLog("Host Packages and Assets synchronized. Live project sync enabled.");
                 Changed?.Invoke();
             }
 
@@ -900,6 +903,7 @@ namespace Glasspage.UnitySync
             SessionState.SetString(
                 FileSyncResumeColorKey,
                 "#" + ColorUtility.ToHtmlStringRGB(_color));
+            SessionState.SetBool(FileSyncResumeApprovedKey, _guestSyncApproved);
         }
 
         internal static void ClearFileSyncReloadReconnect()
@@ -908,6 +912,7 @@ namespace Glasspage.UnitySync
             SessionState.SetString(FileSyncResumeJoinCodeKey, string.Empty);
             SessionState.SetString(FileSyncResumeDisplayNameKey, string.Empty);
             SessionState.SetString(FileSyncResumeColorKey, string.Empty);
+            SessionState.SetBool(FileSyncResumeApprovedKey, false);
         }
 
         private static void ScheduleFileSyncResume()
@@ -945,6 +950,9 @@ namespace Glasspage.UnitySync
                 "#FFFFFF");
             Color color = Color.white;
             ColorUtility.TryParseHtmlString(colorText, out color);
+            bool resumeApproved = SessionState.GetBool(
+                FileSyncResumeApprovedKey,
+                false);
 
             if (string.IsNullOrWhiteSpace(joinCode))
             {
@@ -956,6 +964,7 @@ namespace Glasspage.UnitySync
             _fileSyncResumeAttempts++;
             if (Connect(joinCode, displayName, color, out string error))
             {
+                _guestSyncApproved = resumeApproved;
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
                 AddLog("Resuming UnitySync after synchronized scripts reloaded.");
