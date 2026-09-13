@@ -134,7 +134,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 13;
+        internal const int Version = 14;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -1260,6 +1260,7 @@ namespace Glasspage.UnitySync
                 WriteLimitedString(writer, scene.ScenePath);
                 WriteLimitedString(writer, scene.SceneName);
                 writer.Write(scene.SceneIndex);
+                writer.Write(scene.IsActive);
                 writer.Write(scene.SkyboxMaterial != null);
                 if (scene.SkyboxMaterial != null)
                 {
@@ -1319,7 +1320,8 @@ namespace Glasspage.UnitySync
                 {
                     ScenePath = ReadLimitedString(reader),
                     SceneName = ReadLimitedString(reader),
-                    SceneIndex = reader.ReadInt32()
+                    SceneIndex = reader.ReadInt32(),
+                    IsActive = reader.ReadBoolean()
                 };
                 if (reader.ReadBoolean())
                 {
