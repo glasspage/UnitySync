@@ -223,7 +223,8 @@ namespace Glasspage.UnitySync
 
             descriptor = CaptureSceneDescriptor(
                 scene,
-                FindLoadedSceneIndex(scene));
+                FindLoadedSceneIndex(scene),
+                true);
             return true;
         }
 
@@ -247,7 +248,11 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    scenes.Add(CaptureSceneDescriptor(scene, sceneIndex));
+                    scenes.Add(CaptureSceneDescriptor(
+                        scene,
+                        sceneIndex,
+                        previousActiveScene.IsValid() &&
+                        scene.handle == previousActiveScene.handle));
                     capturedSceneHandles.Add(scene.handle);
                 }
 
@@ -263,7 +268,8 @@ namespace Glasspage.UnitySync
                     {
                         scenes.Add(CaptureSceneDescriptor(
                             previousActiveScene,
-                            FindLoadedSceneIndex(previousActiveScene)));
+                            FindLoadedSceneIndex(previousActiveScene),
+                            true));
                     }
                 }
             }
@@ -275,9 +281,125 @@ namespace Glasspage.UnitySync
             return scenes.ToArray();
         }
 
+        internal static bool PrepareScenesForSnapshot(
+            UnitySyncSceneSnapshotBoundary snapshot,
+            out string error)
+        {
+            error = string.Empty;
+            UnitySyncSceneDescriptor[] scenes =
+                snapshot != null ? snapshot.Scenes : null;
+            if (snapshot == null ||
+                snapshot.SnapshotId == Guid.Empty ||
+                scenes == null ||
+                scenes.Length == 0)
+            {
+                error = "The host snapshot did not contain any scenes to open.";
+                return false;
+            }
+
+            UnitySyncSceneDescriptor activeScene = null;
+            foreach (UnitySyncSceneDescriptor descriptor in scenes)
+            {
+                if (descriptor != null && descriptor.IsActive)
+                {
+                    activeScene = descriptor;
+                    break;
+                }
+            }
+
+            if (activeScene == null)
+            {
+                activeScene = scenes[0];
+            }
+
+            if (activeScene == null)
+            {
+                error = "The host snapshot did not identify a valid active scene.";
+                return false;
+            }
+
+            Scene openedActiveScene = default;
+            try
+            {
+                if (!string.IsNullOrEmpty(activeScene.ScenePath))
+                {
+                    if (AssetDatabase.LoadAssetAtPath<SceneAsset>(activeScene.ScenePath) == null)
+                    {
+                        error = "The host active scene is not available locally: " +
+                                activeScene.ScenePath;
+                        return false;
+                    }
+
+                    openedActiveScene = EditorSceneManager.OpenScene(
+                        activeScene.ScenePath,
+                        OpenSceneMode.Single);
+                }
+                else if (!TryResolveScene(
+                             activeScene.ScenePath,
+                             activeScene.SceneName,
+                             activeScene.SceneIndex,
+                             out openedActiveScene))
+                {
+                    error = "The host active scene has not been saved and could not be matched locally.";
+                    return false;
+                }
+
+                foreach (UnitySyncSceneDescriptor descriptor in scenes)
+                {
+                    if (descriptor == null ||
+                        ReferenceEquals(descriptor, activeScene) ||
+                        string.IsNullOrEmpty(descriptor.ScenePath))
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(
+                            descriptor.ScenePath,
+                            activeScene.ScenePath,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    Scene existing = SceneManager.GetSceneByPath(descriptor.ScenePath);
+                    if (existing.IsValid() && existing.isLoaded)
+                    {
+                        continue;
+                    }
+
+                    if (AssetDatabase.LoadAssetAtPath<SceneAsset>(descriptor.ScenePath) == null)
+                    {
+                        continue;
+                    }
+
+                    EditorSceneManager.OpenScene(
+                        descriptor.ScenePath,
+                        OpenSceneMode.Additive);
+                }
+
+                if (!openedActiveScene.IsValid() ||
+                    !openedActiveScene.isLoaded ||
+                    !SceneManager.SetActiveScene(openedActiveScene))
+                {
+                    error = "Unity could not activate the host scene " +
+                            (activeScene.SceneName ?? activeScene.ScenePath) + ".";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Could not open the host scene before synchronization: " +
+                        exception.Message;
+                return false;
+            }
+        }
+
         private static UnitySyncSceneDescriptor CaptureSceneDescriptor(
             Scene scene,
-            int sceneIndex)
+            int sceneIndex,
+            bool isActive)
         {
             SerializedObject renderSettings = GetSerializedRenderSettings();
             renderSettings?.Update();
@@ -334,6 +456,7 @@ namespace Glasspage.UnitySync
                 ScenePath = scene.path ?? string.Empty,
                 SceneName = scene.name ?? string.Empty,
                 SceneIndex = sceneIndex,
+                IsActive = isActive,
                 SkyboxMaterial = skyboxReference,
                 AmbientMode = (UnityEngine.Rendering.AmbientMode)GetInt(
                     renderSettings,
@@ -1285,6 +1408,7 @@ namespace Glasspage.UnitySync
                     writer.Write(scene.ScenePath ?? string.Empty);
                     writer.Write(scene.SceneName ?? string.Empty);
                     writer.Write(scene.SceneIndex);
+                    writer.Write(scene.IsActive);
                     writer.Write((int)scene.AmbientMode);
                     writer.Write(scene.AmbientIntensity);
                     WriteSignatureColor(writer, scene.AmbientLight);
