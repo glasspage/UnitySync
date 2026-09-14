@@ -1432,6 +1432,15 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
+            if (_guestStageDownloadTotalBytes > 0)
+            {
+                transport.SendFileDownloadProgress(
+                    _guestSyncId,
+                    _guestRequestedScope,
+                    0,
+                    _guestStageDownloadTotalBytes);
+            }
+
             UpdateGuestRequests(transport);
             UpdateGuestDownloadProgress();
             return true;
