@@ -223,7 +223,8 @@ namespace Glasspage.UnitySync
 
             descriptor = CaptureSceneDescriptor(
                 scene,
-                FindLoadedSceneIndex(scene));
+                FindLoadedSceneIndex(scene),
+                true);
             return true;
         }
 
@@ -247,7 +248,11 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    scenes.Add(CaptureSceneDescriptor(scene, sceneIndex));
+                    scenes.Add(CaptureSceneDescriptor(
+                        scene,
+                        sceneIndex,
+                        previousActiveScene.IsValid() &&
+                        scene.handle == previousActiveScene.handle));
                     capturedSceneHandles.Add(scene.handle);
                 }
 
@@ -263,7 +268,8 @@ namespace Glasspage.UnitySync
                     {
                         scenes.Add(CaptureSceneDescriptor(
                             previousActiveScene,
-                            FindLoadedSceneIndex(previousActiveScene)));
+                            FindLoadedSceneIndex(previousActiveScene),
+                            true));
                     }
                 }
             }
@@ -275,9 +281,149 @@ namespace Glasspage.UnitySync
             return scenes.ToArray();
         }
 
+        internal static bool PrepareScenesForSnapshot(
+            UnitySyncSceneSnapshotBoundary snapshot,
+            out string error)
+        {
+            error = string.Empty;
+            UnitySyncSceneDescriptor[] scenes =
+                snapshot != null ? snapshot.Scenes : null;
+            if (snapshot == null ||
+                snapshot.SnapshotId == Guid.Empty ||
+                scenes == null ||
+                scenes.Length == 0)
+            {
+                error = "The host snapshot did not contain any scenes to open.";
+                return false;
+            }
+
+            UnitySyncSceneDescriptor activeScene = null;
+            foreach (UnitySyncSceneDescriptor descriptor in scenes)
+            {
+                if (descriptor != null && descriptor.IsActive)
+                {
+                    activeScene = descriptor;
+                    break;
+                }
+            }
+
+            if (activeScene == null)
+            {
+                activeScene = scenes[0];
+            }
+
+            if (activeScene == null)
+            {
+                error = "The host snapshot did not identify a valid active scene.";
+                return false;
+            }
+
+            Scene openedActiveScene = default;
+            try
+            {
+                if (!ValidateSnapshotScriptDependencies(scenes, out error))
+                {
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(activeScene.ScenePath))
+                {
+                    if (AssetDatabase.LoadAssetAtPath<SceneAsset>(activeScene.ScenePath) == null)
+                    {
+                        error = "The host active scene is not available locally: " +
+                                activeScene.ScenePath;
+                        return false;
+                    }
+
+                    EditorSceneManager.OpenScene(
+                        activeScene.ScenePath,
+                        OpenSceneMode.Single);
+
+                    // OpenScene(Single) activates the scene as part of the open operation.
+                    // Scene-open callbacks (including SDK import/setup callbacks) may also
+                    // replace the Scene handle returned by OpenScene. Resolve the newly
+                    // imported scene again from its synchronized project path instead of
+                    // retaining a potentially stale handle.
+                    if (!TryResolveScene(
+                            activeScene.ScenePath,
+                            activeScene.SceneName,
+                            activeScene.SceneIndex,
+                            out openedActiveScene))
+                    {
+                        error = "Unity opened the host scene but could not resolve its loaded scene: " +
+                                activeScene.ScenePath + ".";
+                        return false;
+                    }
+                }
+                else if (!TryResolveScene(
+                             activeScene.ScenePath,
+                             activeScene.SceneName,
+                             activeScene.SceneIndex,
+                             out openedActiveScene))
+                {
+                    error = "The host active scene has not been saved and could not be matched locally.";
+                    return false;
+                }
+
+                foreach (UnitySyncSceneDescriptor descriptor in scenes)
+                {
+                    if (descriptor == null ||
+                        ReferenceEquals(descriptor, activeScene) ||
+                        string.IsNullOrEmpty(descriptor.ScenePath))
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(
+                            descriptor.ScenePath,
+                            activeScene.ScenePath,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    Scene existing = SceneManager.GetSceneByPath(descriptor.ScenePath);
+                    if (existing.IsValid() && existing.isLoaded)
+                    {
+                        continue;
+                    }
+
+                    if (AssetDatabase.LoadAssetAtPath<SceneAsset>(descriptor.ScenePath) == null)
+                    {
+                        continue;
+                    }
+
+                    EditorSceneManager.OpenScene(
+                        descriptor.ScenePath,
+                        OpenSceneMode.Additive);
+                }
+
+                // Opening a scene in Single mode normally makes it active already. Unity can
+                // return false when asked to activate that same scene again, which must not be
+                // treated as an activation failure.
+                if (!IsEnvironmentSceneCandidate(openedActiveScene) ||
+                    (!IsSceneCurrentlyActive(openedActiveScene) &&
+                     !SceneManager.SetActiveScene(openedActiveScene)))
+                {
+                    error = "Unity could not activate the host scene " +
+                            GetSceneDescriptorLabel(activeScene) + ".";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Could not open the host scene before synchronization: " +
+                        exception.Message;
+                return false;
+            }
+        }
+
         private static UnitySyncSceneDescriptor CaptureSceneDescriptor(
             Scene scene,
-            int sceneIndex)
+            int sceneIndex,
+            bool isActive)
         {
             SerializedObject renderSettings = GetSerializedRenderSettings();
             renderSettings?.Update();
@@ -334,6 +480,7 @@ namespace Glasspage.UnitySync
                 ScenePath = scene.path ?? string.Empty,
                 SceneName = scene.name ?? string.Empty,
                 SceneIndex = sceneIndex,
+                IsActive = isActive,
                 SkyboxMaterial = skyboxReference,
                 AmbientMode = (UnityEngine.Rendering.AmbientMode)GetInt(
                     renderSettings,
@@ -1285,6 +1432,7 @@ namespace Glasspage.UnitySync
                     writer.Write(scene.ScenePath ?? string.Empty);
                     writer.Write(scene.SceneName ?? string.Empty);
                     writer.Write(scene.SceneIndex);
+                    writer.Write(scene.IsActive);
                     writer.Write((int)scene.AmbientMode);
                     writer.Write(scene.AmbientIntensity);
                     WriteSignatureColor(writer, scene.AmbientLight);
@@ -1814,7 +1962,11 @@ namespace Glasspage.UnitySync
             while (iterator.Next(enterChildren))
             {
                 bool ignored = IsIgnoredPropertyPath(iterator.propertyPath);
-                enterChildren = !ignored;
+                // References are atomic identities. Never transmit their native pointer
+                // children: those integers belong to this Editor process only.
+                enterChildren = !ignored &&
+                                iterator.propertyType != SerializedPropertyType.ObjectReference &&
+                                iterator.propertyType != SerializedPropertyType.ExposedReference;
                 if (ignored || !iterator.editable)
                 {
                     continue;
@@ -1831,7 +1983,9 @@ namespace Glasspage.UnitySync
                 {
                     string captureError = "Scene sync skipped a local " + component.GetType().Name +
                                           " update: object reference " + iterator.propertyPath +
-                                          " has no stable cross-editor identity.";
+                                          " on '" + component.gameObject.name +
+                                          "' has no stable cross-editor identity. " +
+                                          DescribeLocalObjectReference(iterator);
                     UnitySyncSession.ReportSceneSyncIssue(captureError);
                     Debug.LogWarning(
                         "[UnitySync] " + captureError);
@@ -1877,7 +2031,12 @@ namespace Glasspage.UnitySync
 
                 case SerializedPropertyType.ObjectReference:
                     state.Kind = UnitySyncSerializedValueKind.ObjectReference;
-                    Object objectReference = property.objectReferenceValue;
+                    int instanceId = property.objectReferenceInstanceIDValue;
+                    Object objectReference = instanceId == 0 ? null : EditorUtility.InstanceIDToObject(instanceId);
+                    if (instanceId != 0 && objectReference == null)
+                    {
+                        return false;
+                    }
                     if (!IsSerializedReferenceTypeCompatible(property.type, objectReference) ||
                         !TryCaptureObjectReference(objectReference, out state.ObjectReference))
                     {
@@ -2044,6 +2203,75 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static bool ValidateSnapshotScriptDependencies(
+            UnitySyncSceneDescriptor[] scenes,
+            out string error)
+        {
+            error = string.Empty;
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                error = "Unity is still importing or compiling synchronized files.";
+                return false;
+            }
+
+            List<string> scenePaths = new List<string>();
+            foreach (UnitySyncSceneDescriptor scene in scenes)
+            {
+                if (scene != null && !string.IsNullOrEmpty(scene.ScenePath))
+                {
+                    scenePaths.Add(scene.ScenePath);
+                }
+            }
+
+            if (scenePaths.Count == 0)
+            {
+                return true;
+            }
+
+            // No SDK assembly dependency: inspect the SDK's serialized program/script link.
+            // Validate before OpenScene invokes UdonSharp's scene-open proxy setup.
+            foreach (string path in AssetDatabase.GetDependencies(scenePaths.ToArray(), true))
+            {
+                if (!path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                Object asset = AssetDatabase.LoadMainAssetAtPath(path);
+                if (asset == null || asset.GetType().FullName != "UdonSharp.UdonSharpProgramAsset")
+                {
+                    continue;
+                }
+
+                using (SerializedObject program = new SerializedObject(asset))
+                {
+                    SerializedProperty source = program.FindProperty("sourceCsScript");
+                    MonoScript script = source != null ? source.objectReferenceValue as MonoScript : null;
+                    Type scriptType = script != null ? script.GetClass() : null;
+                    for (Type type = scriptType; type != null; type = type.BaseType)
+                    {
+                        if (type.FullName == "UdonSharp.UdonSharpBehaviour")
+                        {
+                            scriptType = type;
+                            break;
+                        }
+                    }
+
+                    if (scriptType == null || scriptType.FullName != "UdonSharp.UdonSharpBehaviour")
+                    {
+                        error = "Cannot open the host scene: UdonSharp program " + path +
+                            " has no valid compiled UdonSharpBehaviour for source script " +
+                            (script != null ? AssetDatabase.GetAssetPath(script) : "(missing reference)") +
+                            ". Check the guest Console for C# compilation/import errors and verify " +
+                            "the script and its .meta file match the host.";
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
         private static bool TryCaptureObjectReference(
             Object value,
             out UnitySyncObjectReferenceState reference)
@@ -2056,6 +2284,30 @@ namespace Glasspage.UnitySync
             }
 
             reference.ObjectTypeName = GetStableTypeName(value.GetType());
+
+            // Built-in resources have engine-owned paths even when Unity does not mark
+            // the loaded object persistent. Never identify an asset by its name alone.
+            string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+            // Prefab GameObjects and Components are assets too. Test assets before scenes.
+            if (EditorUtility.IsPersistent(value) || IsBuiltinAssetPath(assetPath))
+            {
+                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                    value,
+                    out string guid,
+                    out long localFileId);
+                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) && !IsBuiltinAssetPath(assetPath))
+                {
+                    return false;
+                }
+
+                reference.Kind = UnitySyncObjectReferenceKind.Asset;
+                reference.AssetGuid = guid ?? string.Empty;
+                reference.AssetPath = assetPath;
+                reference.AssetName = value.name ?? string.Empty;
+                reference.AssetContentHash = GetAssetContentHash(assetPath);
+                reference.LocalFileId = localFileId;
+                return true;
+            }
 
             if (value is GameObject gameObject)
             {
@@ -2079,27 +2331,6 @@ namespace Glasspage.UnitySync
                 reference.Kind = UnitySyncObjectReferenceKind.SceneObject;
                 reference.ComponentIndex = GetComponentIndex(component.gameObject, component);
                 return reference.ComponentIndex >= 0;
-            }
-
-            if (EditorUtility.IsPersistent(value))
-            {
-                string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
-                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
-                    value,
-                    out string guid,
-                    out long localFileId);
-                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) && !IsBuiltinAssetPath(assetPath))
-                {
-                    return false;
-                }
-
-                reference.Kind = UnitySyncObjectReferenceKind.Asset;
-                reference.AssetGuid = guid ?? string.Empty;
-                reference.AssetPath = assetPath;
-                reference.AssetName = value.name ?? string.Empty;
-                reference.AssetContentHash = GetAssetContentHash(assetPath);
-                reference.LocalFileId = localFileId;
-                return true;
             }
 
             return false;
@@ -2339,7 +2570,8 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + propertyState.Path +
                             " could not be matched safely for local field type " +
-                            property.type + " on " + component.GetType().Name + ".";
+                            property.type + " on " + component.GetType().Name + ". " +
+                            DescribeObjectReference(propertyState.ObjectReference);
                     return false;
                 }
 
@@ -2493,7 +2725,8 @@ namespace Glasspage.UnitySync
             bool enterChildren = true;
             while (iterator.Next(enterChildren))
             {
-                enterChildren = true;
+                enterChildren = iterator.propertyType != SerializedPropertyType.ObjectReference &&
+                                iterator.propertyType != SerializedPropertyType.ExposedReference;
                 if (iterator.propertyType != SerializedPropertyType.ObjectReference)
                 {
                     continue;
@@ -2553,7 +2786,8 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + propertyState.Path +
                             " could not be matched safely for local field type " +
-                            property.type + " on " + layoutComponent.GetType().Name + ".";
+                            property.type + " on " + layoutComponent.GetType().Name + ". " +
+                            DescribeObjectReference(propertyState.ObjectReference);
                     return false;
                 }
 
@@ -2633,6 +2867,38 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static string DescribeLocalObjectReference(SerializedProperty property)
+        {
+            int instanceId = property.propertyType == SerializedPropertyType.ObjectReference
+                ? property.objectReferenceInstanceIDValue
+                : 0;
+            Object value = property.propertyType == SerializedPropertyType.ObjectReference
+                ? EditorUtility.InstanceIDToObject(instanceId)
+                : property.exposedReferenceValue;
+            if (value == null)
+            {
+                return "Field type '" + property.type + "', unresolved local instance ID " +
+                       instanceId + ".";
+            }
+
+            return "Field type '" + property.type + "', local object '" + value.name +
+                   "', type '" + GetStableTypeName(value.GetType()) + "', path '" +
+                   AssetDatabase.GetAssetPath(value) + "', persistent " +
+                   EditorUtility.IsPersistent(value) + ".";
+        }
+
+        private static string DescribeObjectReference(UnitySyncObjectReferenceState reference)
+        {
+            if (reference == null)
+            {
+                return "No reference identity was supplied.";
+            }
+
+            return "Incoming " + reference.Kind + " '" + reference.AssetName +
+                   "', type '" + reference.ObjectTypeName + "', path '" + reference.AssetPath +
+                   "', GUID '" + reference.AssetGuid + "', file ID " + reference.LocalFileId + ".";
+        }
+
         private static bool IsObjectReferenceKind(UnitySyncSerializedValueKind kind)
         {
             return kind == UnitySyncSerializedValueKind.ObjectReference ||
@@ -2673,10 +2939,38 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool IsObjectReferenceChild(SerializedProperty property)
+        {
+            string path = property.propertyPath;
+            int separator = path.LastIndexOf('.');
+            while (separator >= 0)
+            {
+                path = path.Substring(0, separator);
+                SerializedProperty ancestor = property.serializedObject.FindProperty(path);
+                if (ancestor != null &&
+                    (ancestor.propertyType == SerializedPropertyType.ObjectReference ||
+                     ancestor.propertyType == SerializedPropertyType.ExposedReference))
+                {
+                    return true;
+                }
+
+                separator = path.LastIndexOf('.');
+            }
+
+            return false;
+        }
+
         private static bool ApplyProperty(
             SerializedProperty property,
             UnitySyncSerializedPropertyState state)
         {
+            // Also reject pointer children sent by older hosts. Check the local layout,
+            // not field-name suffixes, so unrelated user fields remain synchronizable.
+            if (IsObjectReferenceChild(property))
+            {
+                return false;
+            }
+
             try
             {
                 switch (state.Kind)
@@ -3000,6 +3294,43 @@ namespace Glasspage.UnitySync
             return false;
         }
 
+        private static Object[] LoadAssetReferenceCandidates(string assetPath)
+        {
+            List<Object> candidates = new List<Object>();
+            HashSet<int> seen = new HashSet<int>();
+            foreach (Object asset in AssetDatabase.LoadAllAssetsAtPath(assetPath))
+            {
+                if (asset != null && seen.Add(asset.GetInstanceID()))
+                {
+                    candidates.Add(asset);
+                }
+            }
+
+            // LoadAllAssetsAtPath does not enumerate a prefab's hierarchy/components.
+            // Include them so a persistent component or child can resolve by GUID/file ID.
+            GameObject root = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (root != null)
+            {
+                foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (seen.Add(child.gameObject.GetInstanceID()))
+                    {
+                        candidates.Add(child.gameObject);
+                    }
+
+                    foreach (Component component in child.GetComponents<Component>())
+                    {
+                        if (component != null && seen.Add(component.GetInstanceID()))
+                        {
+                            candidates.Add(component);
+                        }
+                    }
+                }
+            }
+
+            return candidates.ToArray();
+        }
+
         private static bool TryResolveAssetAtPath(
             string assetPath,
             UnitySyncObjectReferenceState reference,
@@ -3014,7 +3345,7 @@ namespace Glasspage.UnitySync
 
             Object uniqueLocalIdCandidate = null;
             int localIdCandidateCount = 0;
-            Object[] candidates = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            Object[] candidates = LoadAssetReferenceCandidates(assetPath);
             foreach (Object candidate in candidates)
             {
                 if (candidate == null ||
@@ -3135,7 +3466,7 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(candidatePath))
+                foreach (Object candidate in LoadAssetReferenceCandidates(candidatePath))
                 {
                     if (!BasicAssetCandidateMatches(candidate, reference) ||
                         !visitedCandidates.Add(candidate.GetInstanceID()))
@@ -3191,6 +3522,73 @@ namespace Glasspage.UnitySync
             {
                 value = material;
                 return true;
+            }
+
+            if (assetType == typeof(Font))
+            {
+                string resourceName;
+                switch (reference.AssetName)
+                {
+                    case "LegacyRuntime":
+                        resourceName = "LegacyRuntime.ttf";
+                        break;
+                    case "Arial":
+                        resourceName = "Arial.ttf";
+                        break;
+                    default:
+                        return false;
+                }
+
+                try
+                {
+                    Font font = Resources.GetBuiltinResource<Font>(resourceName);
+                    // The loader itself establishes built-in provenance. Some engine
+                    // resources do not expose a persistent AssetDatabase object.
+                    if (BasicAssetCandidateMatches(font, reference))
+                    {
+                        value = font;
+                        return true;
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // A font unavailable in this Unity version remains unresolved;
+                    // do not silently replace it with a different font.
+                }
+
+                return false;
+            }
+
+            if (assetType == typeof(Sprite))
+            {
+                // The default uGUI sprites are built-in resources, not project assets.
+                // Use an explicit resource map; never substitute an arbitrary loaded sprite.
+                string resourcePath;
+                switch (reference.AssetName)
+                {
+                    case "UISprite":
+                    case "Background":
+                    case "InputFieldBackground":
+                    case "Knob":
+                    case "Checkmark":
+                    case "DropdownArrow":
+                    case "UIMask":
+                        resourcePath = "UI/Skin/" + reference.AssetName + ".psd";
+                        break;
+                    default:
+                        resourcePath = string.Empty;
+                        break;
+                }
+
+                if (!string.IsNullOrEmpty(resourcePath))
+                {
+                    Sprite sprite = AssetDatabase.GetBuiltinExtraResource<Sprite>(resourcePath);
+                    if (BasicAssetCandidateMatches(sprite, reference))
+                    {
+                        value = sprite;
+                        return true;
+                    }
+                }
             }
 
             if (assetType == typeof(Shader))
@@ -3378,8 +3776,7 @@ namespace Glasspage.UnitySync
             Object candidate,
             UnitySyncObjectReferenceState reference)
         {
-            if (!BasicAssetCandidateMatches(candidate, reference) ||
-                !EditorUtility.IsPersistent(candidate))
+            if (!BasicAssetCandidateMatches(candidate, reference))
             {
                 return false;
             }
@@ -3656,11 +4053,24 @@ namespace Glasspage.UnitySync
 
         private static bool IsEligibleSceneObject(GameObject gameObject)
         {
-            return gameObject != null &&
-                   gameObject.scene.IsValid() &&
-                   gameObject.scene.isLoaded &&
-                   !EditorUtility.IsPersistent(gameObject) &&
-                   !UnitySyncHierarchy.IsUnitySyncObject(gameObject);
+            if (gameObject == null || !gameObject.scene.IsValid() ||
+                !gameObject.scene.isLoaded || EditorUtility.IsPersistent(gameObject) ||
+                EditorSceneManager.IsPreviewScene(gameObject.scene))
+            {
+                return false;
+            }
+
+            // Staging objects and their children can produce delayed change events after
+            // remote apply finishes. They are Editor helpers, not shared scene content.
+            for (Transform current = gameObject.transform; current != null; current = current.parent)
+            {
+                if ((current.gameObject.hideFlags & HideFlags.DontSaveInEditor) != 0)
+                {
+                    return false;
+                }
+            }
+
+            return !UnitySyncHierarchy.IsUnitySyncObject(gameObject);
         }
 
         private static void AddHierarchy(GameObject gameObject, List<GameObject> result)
@@ -3684,7 +4094,7 @@ namespace Glasspage.UnitySync
             {
                 foreach (GameObject root in transform.gameObject.scene.GetRootGameObjects())
                 {
-                    if (UnitySyncHierarchy.IsUnitySyncObject(root))
+                    if (!IsEligibleSceneObject(root))
                     {
                         continue;
                     }
@@ -3702,7 +4112,7 @@ namespace Glasspage.UnitySync
                 for (int index = 0; index < transform.parent.childCount; index++)
                 {
                     Transform sibling = transform.parent.GetChild(index);
-                    if (UnitySyncHierarchy.IsUnitySyncObject(sibling.gameObject))
+                    if (!IsEligibleSceneObject(sibling.gameObject))
                     {
                         continue;
                     }
@@ -3724,7 +4134,7 @@ namespace Glasspage.UnitySync
             int currentIndex = 0;
             foreach (GameObject root in scene.GetRootGameObjects())
             {
-                if (UnitySyncHierarchy.IsUnitySyncObject(root))
+                if (!IsEligibleSceneObject(root))
                 {
                     continue;
                 }
@@ -3746,7 +4156,7 @@ namespace Glasspage.UnitySync
             for (int index = 0; index < parent.childCount; index++)
             {
                 Transform child = parent.GetChild(index);
-                if (UnitySyncHierarchy.IsUnitySyncObject(child.gameObject))
+                if (!IsEligibleSceneObject(child.gameObject))
                 {
                     continue;
                 }
@@ -3774,7 +4184,7 @@ namespace Glasspage.UnitySync
             {
                 foreach (GameObject root in transform.gameObject.scene.GetRootGameObjects())
                 {
-                    if (root.transform != transform && !UnitySyncHierarchy.IsUnitySyncObject(root))
+                    if (root.transform != transform && IsEligibleSceneObject(root))
                     {
                         siblings.Add(root.transform);
                     }
@@ -3785,7 +4195,7 @@ namespace Glasspage.UnitySync
                 for (int index = 0; index < transform.parent.childCount; index++)
                 {
                     Transform sibling = transform.parent.GetChild(index);
-                    if (sibling != transform && !UnitySyncHierarchy.IsUnitySyncObject(sibling.gameObject))
+                    if (sibling != transform && IsEligibleSceneObject(sibling.gameObject))
                     {
                         siblings.Add(sibling);
                     }

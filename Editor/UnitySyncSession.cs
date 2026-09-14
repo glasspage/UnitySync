@@ -18,16 +18,27 @@ namespace Glasspage.UnitySync
     internal static class UnitySyncSession
     {
         private const double SendIntervalSeconds = 0.1;
+        private const int MaximumIncomingEventsPerUpdate = 64;
+        private const double IncomingEventBudgetSeconds = 0.008;
         private const string PlayerIdSessionKey = "Glasspage.UnitySync.PlayerId";
         private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
         private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
         private const string FileSyncResumeColorKey = "Glasspage.UnitySync.FileSyncResume.Color";
+        private const string FileSyncResumeApprovedKey = "Glasspage.UnitySync.FileSyncResume.Approved";
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
 
+        private sealed class PendingGuestViewport
+        {
+            internal UnitySyncViewportState Viewport;
+            internal double ReceivedAtSeconds;
+        }
+
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
+        private static readonly Dictionary<Guid, PendingGuestViewport> PendingGuestViewports =
+            new Dictionary<Guid, PendingGuestViewport>();
 
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
@@ -43,6 +54,8 @@ namespace Glasspage.UnitySync
         private static Color _lastSelectionColor = Color.white;
         private static int _fileSyncResumeAttempts;
         private static double _nextFileSyncResumeAttemptTime;
+        private static bool _fileSyncResumeConnectionPending;
+        private static bool _guestSyncApproved;
         private static Guid _spectatingPlayerId = Guid.Empty;
         private static SceneView _spectatedSceneView;
         private static bool _hasSavedSceneViewState;
@@ -58,6 +71,12 @@ namespace Glasspage.UnitySync
         internal static string JoinCode => _joinCode;
         internal static bool IsActive => _transport != null;
         internal static bool IsFileSyncing => UnitySyncFileSynchronizer.IsGuestSyncing;
+        internal static bool IsAwaitingFileDownloadConfirmation =>
+            UnitySyncFileSynchronizer.IsGuestAwaitingDownloadConfirmation;
+        internal static int PendingFileDownloadCount =>
+            UnitySyncFileSynchronizer.GuestPendingDownloadFileCount;
+        internal static long PendingFileDownloadBytes =>
+            UnitySyncFileSynchronizer.GuestPendingDownloadBytes;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
         internal static Guid CurrentPlayerId => LocalPlayerId;
         internal static Guid SpectatingPlayerId => _spectatingPlayerId;
@@ -67,7 +86,7 @@ namespace Glasspage.UnitySync
             LocalPlayerId = LoadOrCreatePlayerId();
             EditorApplication.update += Update;
             EditorApplication.quitting += Shutdown;
-            AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.delayCall += ScheduleFileSyncResume;
         }
@@ -99,6 +118,8 @@ namespace Glasspage.UnitySync
                 _transport.StartHost(port);
                 _joinCode = code;
                 _guestJoinCode = string.Empty;
+                _guestSyncApproved = true;
+                PendingGuestViewports.Clear();
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
@@ -150,12 +171,13 @@ namespace Glasspage.UnitySync
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, data.Secret);
                 _transport.StartClient(data.Address, data.Port);
                 _guestJoinCode = joinCode;
+                _guestSyncApproved = false;
+                PendingGuestViewports.Clear();
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _hasLastViewportState = false;
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
-                UnitySyncSceneSynchronizer.BeginSession();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -180,6 +202,35 @@ namespace Glasspage.UnitySync
         internal static void Stop()
         {
             StopInternal(true);
+        }
+
+        internal static bool ContinueFileSync(out string error)
+        {
+            error = string.Empty;
+            if (_transport == null || _state != UnitySyncSessionState.Connected)
+            {
+                error = "UnitySync is not connected to a host.";
+                return false;
+            }
+
+            int fileCount = PendingFileDownloadCount;
+            long downloadBytes = PendingFileDownloadBytes;
+            if (!UnitySyncFileSynchronizer.ContinueGuestSync(_transport, out error))
+            {
+                return false;
+            }
+
+            _guestSyncApproved = true;
+            ApplyPendingGuestPresence();
+
+            AddLog(
+                "Continuing host file download: " +
+                fileCount +
+                " file(s), " +
+                downloadBytes +
+                " byte(s).");
+            Changed?.Invoke();
+            return true;
         }
 
         internal static void SetLocalColor(Color color)
@@ -207,9 +258,70 @@ namespace Glasspage.UnitySync
             AddLog(message);
         }
 
+        internal static void ReportPackageVersionReplacement(
+            string packageName,
+            string localVersion,
+            string hostVersion)
+        {
+            AddLog(
+                "Package version differs: " +
+                packageName +
+                " (" +
+                (string.IsNullOrEmpty(localVersion) ? "local version unknown" : localVersion) +
+                " -> " +
+                hostVersion +
+                "). The local package folder will be replaced after Continue.");
+            Changed?.Invoke();
+        }
+
+        internal static void ReportPackageChecklist(string[] changes)
+        {
+            AddLog(changes.Length == 0
+                ? "Package versions match the host."
+                : "Manual package changes required:" + Environment.NewLine +
+                    string.Join(Environment.NewLine + Environment.NewLine, changes));
+            Changed?.Invoke();
+        }
+
+        internal static void RecheckPackageVersions()
+        {
+            if (_state == UnitySyncSessionState.Connected)
+            {
+                UnitySyncFileSynchronizer.RecheckPackages(_transport);
+                Changed?.Invoke();
+            }
+        }
+
+        internal static void ReportFileSyncDownloadRequired(
+            string[] neededPaths,
+            long totalBytes)
+        {
+            if (neededPaths == null)
+            {
+                return;
+            }
+
+            AddLog(
+                "Host file comparison found " +
+                neededPaths.Length +
+                " file(s) to download (" +
+                totalBytes +
+                " byte(s)).");
+            if (neededPaths.Length > 0)
+            {
+                AddLog(
+                    "Files needed from host:\n" +
+                    string.Join("\n", neededPaths));
+            }
+
+            Changed?.Invoke();
+        }
+
         internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
         {
-            return UnitySyncPresenceRoot.GetParticipants();
+            return IsGuestSyncDeferred
+                ? new UnitySyncRemoteParticipant[0]
+                : UnitySyncPresenceRoot.GetParticipants();
         }
 
         internal static bool CanSpectate(Guid playerId)
@@ -264,12 +376,59 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        internal static void RequestProjectRestore()
+        {
+            if (_state != UnitySyncSessionState.Connected || UnitySyncFileSynchronizer.IsGuestSyncing)
+            {
+                return;
+            }
+
+            UnitySyncSceneSynchronizer.EndSession();
+            UnitySyncProjectSynchronizer.EndSession();
+            UnitySyncFileSynchronizer.RequestProjectRestore(_transport);
+            AddLog("Requested a full project restore. The host must accept it in Debug.");
+            Changed?.Invoke();
+        }
+
+        internal static void RespondToProjectRestore(Guid playerId, bool accept)
+        {
+            if (_state != UnitySyncSessionState.Hosting)
+            {
+                return;
+            }
+
+            UnitySyncFileSynchronizer.RespondToProjectRestore(_transport, LocalPlayerId, playerId, accept);
+            Changed?.Invoke();
+        }
+
         internal static void StopSpectating()
         {
             StopSpectatingInternal(true, true);
         }
 
+        private static bool _updatingSession;
+
         private static void Update()
+        {
+            // Scene loading and asset import can pump editor callbacks before they return.
+            // Keep later snapshot packets queued until the current packet has finished applying.
+            if (_updatingSession)
+            {
+                return;
+            }
+
+            _updatingSession = true;
+            try
+            {
+                UpdateSession();
+            }
+            finally
+            {
+                _updatingSession = false;
+            }
+        }
+
+        private static void UpdateSession()
         {
             UpdateSpectatedSceneView();
 
@@ -280,15 +439,37 @@ namespace Glasspage.UnitySync
             }
 
             bool disconnected = false;
-            while (transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
+            int processedEvents = 0;
+            long incomingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Yield between packets without dropping or reordering snapshot boundaries.
+            // A single Unity API call can exceed this budget; the next packet waits.
+            while (!disconnected &&
+                   !EditorApplication.isCompiling &&
+                   !EditorApplication.isUpdating &&
+                   processedEvents < MaximumIncomingEventsPerUpdate &&
+                   (processedEvents == 0 ||
+                    (System.Diagnostics.Stopwatch.GetTimestamp() - incomingStart) /
+                    (double)System.Diagnostics.Stopwatch.Frequency < IncomingEventBudgetSeconds) &&
+                   transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
             {
+                processedEvents++;
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
                         _state = UnitySyncSessionState.Connected;
-                        UnitySyncFileSynchronizer.BeginGuestSync(transport);
+                        UnitySyncFileSynchronizer.BeginGuestSync(
+                            transport,
+                            _guestSyncApproved);
                         AddLog(transportEvent.Message);
-                        AddLog("Comparing host Assets before scene synchronization.");
+                        if (_fileSyncResumeConnectionPending)
+                        {
+                            _fileSyncResumeConnectionPending = false;
+                            ClearFileSyncReloadReconnect();
+                            EditorApplication.update -= TryResumeAfterFileSyncReload;
+                            AddLog("Resumed UnitySync after Unity reloaded scripts.");
+                        }
+
+                        AddLog("Checking package versions before Assets and scene synchronization.");
                         Changed?.Invoke();
                         break;
 
@@ -298,26 +479,40 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.Viewport:
-                        UnitySyncPresenceRoot.Apply(
-                            transportEvent.Viewport,
-                            LocalPlayerId,
-                            transportEvent.ReceivedAtSeconds);
-                        if (_spectatingPlayerId == transportEvent.Viewport.PlayerId &&
-                            transportEvent.Viewport.SpectatingPlayerId == LocalPlayerId)
+                        if (IsGuestSyncDeferred)
                         {
-                            StopSpectatingInternal(true, false);
+                            PendingGuestViewports[transportEvent.Viewport.PlayerId] =
+                                new PendingGuestViewport
+                                {
+                                    Viewport = transportEvent.Viewport,
+                                    ReceivedAtSeconds = transportEvent.ReceivedAtSeconds
+                                };
+                            break;
                         }
 
-                        SceneView.RepaintAll();
-                        Changed?.Invoke();
+                        ApplyRemoteViewport(
+                            transportEvent.Viewport,
+                            transportEvent.ReceivedAtSeconds);
                         break;
 
                     case UnitySyncTransportEventKind.Selection:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         UnitySyncSelectionPresence.Apply(transportEvent.Selection, LocalPlayerId);
                         SceneView.RepaintAll();
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        if (IsGuestSyncDeferred)
+                        {
+                            PendingGuestViewports.Remove(transportEvent.PlayerId);
+                            UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
+                            break;
+                        }
+
                         if (_spectatingPlayerId == transportEvent.PlayerId)
                         {
                             StopSpectatingInternal(true, false);
@@ -335,6 +530,13 @@ namespace Glasspage.UnitySync
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileDelete;
+                        if (isProjectUpdate &&
+                            (IsGuestSyncDeferred ||
+                             UnitySyncFileSynchronizer.IsGuestReconcilingPackages))
+                        {
+                            break;
+                        }
+
                         string fileSyncError;
                         bool fileHandled = isProjectUpdate
                             ? UnitySyncProjectSynchronizer.HandleMessage(
@@ -367,7 +569,8 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneObjectChange:
-                        if (UnitySyncFileSynchronizer.IsGuestSyncing)
+                        if (IsGuestSyncDeferred ||
+                            UnitySyncFileSynchronizer.IsGuestSyncing)
                         {
                             // The post-file-sync host snapshot supersedes live edits received while
                             // the guest is still reconciling Assets.
@@ -384,16 +587,29 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotBegin:
+                        if (IsGuestSyncDeferred || UnitySyncFileSynchronizer.IsGuestSyncing)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.BeginRemoteSnapshot(
                                 transportEvent.SceneSnapshot,
                                 out string snapshotBeginError))
                         {
-                            AddLog("Scene sync skipped a snapshot: " + snapshotBeginError);
-                            Changed?.Invoke();
+                            AddLog("Scene sync could not start a snapshot: " + snapshotBeginError);
+                            // No valid boundary exists for the queued body/end packets.
+                            // Stop here instead of applying a partial snapshot or flooding the log.
+                            StopInternal(false);
+                            return;
                         }
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotEnd:
+                        if (IsGuestSyncDeferred || UnitySyncFileSynchronizer.IsGuestSyncing)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.CompleteRemoteSnapshot(
                                 transportEvent.SceneSnapshot.SnapshotId,
                                 transportEvent.SceneSnapshot.IsComplete,
@@ -405,12 +621,22 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotRequest:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         UnitySyncSceneSynchronizer.QueueFullSceneSnapshot(transportEvent.PlayerId);
                         AddLog("Sending the current scene state to a collaborator.");
                         Changed?.Invoke();
                         break;
 
                     case UnitySyncTransportEventKind.SceneSettingsChange:
+                        if (IsGuestSyncDeferred)
+                        {
+                            break;
+                        }
+
                         if (!UnitySyncSceneSynchronizer.ApplyRemoteSceneSettings(
                                 transportEvent.SceneSnapshot,
                                 out string sceneSettingsError))
@@ -434,7 +660,17 @@ namespace Glasspage.UnitySync
 
             if (disconnected)
             {
+                bool retryFileSyncResume =
+                    _fileSyncResumeConnectionPending &&
+                    SessionState.GetBool(FileSyncResumePendingKey, false);
                 StopInternal(false);
+                if (retryFileSyncResume)
+                {
+                    _fileSyncResumeConnectionPending = false;
+                    _nextFileSyncResumeAttemptTime =
+                        EditorApplication.timeSinceStartup + FileSyncResumeRetrySeconds;
+                }
+
                 return;
             }
 
@@ -446,12 +682,23 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                return;
+            }
+
             if (UnitySyncFileSynchronizer.ConsumeGuestReadyForSceneSnapshot())
             {
+                if (!_guestSyncApproved)
+                {
+                    _guestSyncApproved = true;
+                    ApplyPendingGuestPresence();
+                }
+
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
-                AddLog("Host Assets synchronized. Live project sync enabled.");
+                AddLog("Package versions checked and Assets synchronized. Live project sync enabled.");
                 Changed?.Invoke();
             }
 
@@ -678,6 +925,42 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = false;
         }
 
+        private static bool IsGuestSyncDeferred =>
+            !string.IsNullOrEmpty(_guestJoinCode) && !_guestSyncApproved;
+
+        private static void ApplyPendingGuestPresence()
+        {
+            if (PendingGuestViewports.Count == 0)
+            {
+                return;
+            }
+
+            foreach (PendingGuestViewport pending in PendingGuestViewports.Values)
+            {
+                ApplyRemoteViewport(pending.Viewport, pending.ReceivedAtSeconds);
+            }
+
+            PendingGuestViewports.Clear();
+        }
+
+        private static void ApplyRemoteViewport(
+            UnitySyncViewportState viewport,
+            double receivedAtSeconds)
+        {
+            UnitySyncPresenceRoot.Apply(
+                viewport,
+                LocalPlayerId,
+                receivedAtSeconds);
+            if (_spectatingPlayerId == viewport.PlayerId &&
+                viewport.SpectatingPlayerId == LocalPlayerId)
+            {
+                StopSpectatingInternal(true, false);
+            }
+
+            SceneView.RepaintAll();
+            Changed?.Invoke();
+        }
+
         private static bool ColorsEqual(Color left, Color right)
         {
             return Mathf.Approximately(left.r, right.r) &&
@@ -697,6 +980,9 @@ namespace Glasspage.UnitySync
             _state = UnitySyncSessionState.Idle;
             _joinCode = string.Empty;
             _guestJoinCode = string.Empty;
+            _guestSyncApproved = false;
+            _fileSyncResumeConnectionPending = false;
+            PendingGuestViewports.Clear();
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
@@ -717,6 +1003,15 @@ namespace Glasspage.UnitySync
 
         private static void Shutdown()
         {
+            StopInternal(false);
+        }
+
+        private static void BeforeAssemblyReload()
+        {
+            // Installing or changing a package reloads Unity's editor assemblies. Preserve
+            // guest connection details before the transport is disposed so the new domain
+            // can reconnect and run the package comparison again automatically.
+            PrepareFileSyncReloadReconnect();
             StopInternal(false);
         }
 
@@ -742,6 +1037,7 @@ namespace Glasspage.UnitySync
             SessionState.SetString(
                 FileSyncResumeColorKey,
                 "#" + ColorUtility.ToHtmlStringRGB(_color));
+            SessionState.SetBool(FileSyncResumeApprovedKey, _guestSyncApproved);
         }
 
         internal static void ClearFileSyncReloadReconnect()
@@ -750,6 +1046,7 @@ namespace Glasspage.UnitySync
             SessionState.SetString(FileSyncResumeJoinCodeKey, string.Empty);
             SessionState.SetString(FileSyncResumeDisplayNameKey, string.Empty);
             SessionState.SetString(FileSyncResumeColorKey, string.Empty);
+            SessionState.SetBool(FileSyncResumeApprovedKey, false);
         }
 
         private static void ScheduleFileSyncResume()
@@ -760,7 +1057,9 @@ namespace Glasspage.UnitySync
             }
 
             _fileSyncResumeAttempts = 0;
+            _fileSyncResumeConnectionPending = false;
             _nextFileSyncResumeAttemptTime = EditorApplication.timeSinceStartup + 0.25d;
+            EditorApplication.update -= TryResumeAfterFileSyncReload;
             EditorApplication.update += TryResumeAfterFileSyncReload;
         }
 
@@ -773,8 +1072,20 @@ namespace Glasspage.UnitySync
             }
 
             if (_transport != null ||
+                _fileSyncResumeConnectionPending ||
+                EditorApplication.isCompiling ||
+                EditorApplication.isUpdating ||
                 EditorApplication.timeSinceStartup < _nextFileSyncResumeAttemptTime)
             {
+                return;
+            }
+
+            if (_fileSyncResumeAttempts >= MaximumFileSyncResumeAttempts)
+            {
+                ClearFileSyncReloadReconnect();
+                EditorApplication.update -= TryResumeAfterFileSyncReload;
+                AddLog("Could not resume UnitySync after Unity reloaded scripts.");
+                Changed?.Invoke();
                 return;
             }
 
@@ -787,6 +1098,9 @@ namespace Glasspage.UnitySync
                 "#FFFFFF");
             Color color = Color.white;
             ColorUtility.TryParseHtmlString(colorText, out color);
+            bool resumeApproved = SessionState.GetBool(
+                FileSyncResumeApprovedKey,
+                false);
 
             if (string.IsNullOrWhiteSpace(joinCode))
             {
@@ -798,10 +1112,8 @@ namespace Glasspage.UnitySync
             _fileSyncResumeAttempts++;
             if (Connect(joinCode, displayName, color, out string error))
             {
-                ClearFileSyncReloadReconnect();
-                EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Resuming UnitySync after synchronized scripts reloaded.");
-                Changed?.Invoke();
+                _guestSyncApproved = resumeApproved;
+                _fileSyncResumeConnectionPending = true;
                 return;
             }
 
@@ -809,7 +1121,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after synchronized scripts reloaded: " + error);
+                AddLog("Could not resume UnitySync after Unity reloaded scripts: " + error);
                 Changed?.Invoke();
                 return;
             }

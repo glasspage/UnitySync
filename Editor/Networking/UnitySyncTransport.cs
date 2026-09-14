@@ -81,6 +81,7 @@ namespace Glasspage.UnitySync
             internal string DisplayName;
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
+            internal bool Superseded;
 
             internal Peer(TcpClient client)
             {
@@ -213,9 +214,22 @@ namespace Glasspage.UnitySync
             _outboundSignal.Set();
         }
 
-        internal void RequestFileSync()
+        internal void SendRestoreProjectControl(UnitySyncMessageType type, Guid targetPlayerId)
         {
-            QueueMessage(UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId), Guid.Empty);
+            QueueMessage(UnitySyncProtocol.CreateRestoreProjectControl(_localPlayerId, type), targetPlayerId);
+        }
+
+        internal void RequestFileSync(UnitySyncFileSyncScope scope)
+        {
+            if (scope != UnitySyncFileSyncScope.Packages &&
+                scope != UnitySyncFileSyncScope.Assets)
+            {
+                throw new ArgumentOutOfRangeException(nameof(scope));
+            }
+
+            QueueMessage(
+                UnitySyncProtocol.CreateFileSyncRequest(_localPlayerId, scope),
+                Guid.Empty);
         }
 
         internal void RequestFile(Guid syncId, string path)
@@ -242,6 +256,16 @@ namespace Glasspage.UnitySync
         {
             QueueMessage(
                 UnitySyncProtocol.CreateFileManifestEntry(playerId, state),
+                targetPlayerId);
+        }
+
+        internal void SendPackageVersionEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage state,
+            Guid targetPlayerId)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreatePackageVersionEntry(playerId, state),
                 targetPlayerId);
         }
 
@@ -592,18 +616,28 @@ namespace Glasspage.UnitySync
                     throw new InvalidDataException("The collaborator did not send a valid hello message.");
                 }
 
+                Peer supersededPeer = null;
                 lock (_peersLock)
                 {
-                    if (hello.PlayerId == _localPlayerId ||
-                        _peers.Exists(other => other != peer && other.PlayerId == hello.PlayerId))
+                    if (hello.PlayerId == _localPlayerId)
                     {
-                        throw new InvalidDataException("A collaborator with this identity is already connected.");
+                        throw new InvalidDataException(
+                            "The collaborator is using the host's player identity.");
+                    }
+
+                    supersededPeer = _peers.Find(
+                        other => other != peer && other.PlayerId == hello.PlayerId);
+                    if (supersededPeer != null)
+                    {
+                        supersededPeer.Superseded = true;
+                        _peers.Remove(supersededPeer);
                     }
 
                     peer.PlayerId = hello.PlayerId;
                     peer.DisplayName = NormalizeDisplayName(hello.DisplayName);
                 }
 
+                supersededPeer?.Close();
                 peer.Client.ReceiveTimeout = 0;
                 Send(peer, UnitySyncProtocol.CreateWelcome(_localPlayerId, _localDisplayName));
                 authenticated = true;
@@ -640,12 +674,24 @@ namespace Glasspage.UnitySync
                             Broadcast(UnitySyncProtocol.CreateSelection(message.Selection), peer);
                             break;
 
+                        case UnitySyncMessageType.RestoreProjectRequest:
+                            peer.RequestedFileSync = true;
+                            peer.RequestedSceneSnapshot = false;
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
+                            throw new InvalidDataException("A collaborator sent a host-only restore response.");
+
                         case UnitySyncMessageType.FileSyncRequest:
-                            if (!peer.RequestedFileSync)
-                            {
-                                peer.RequestedFileSync = true;
-                                EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
-                            }
+                            peer.RequestedFileSync = true;
+                            UnitySyncFileSyncMessage scopedRequest =
+                                message.FileSync ?? new UnitySyncFileSyncMessage();
+                            EnqueueFileSync(
+                                message.Type,
+                                message.PlayerId,
+                                scopedRequest);
                             break;
 
                         case UnitySyncMessageType.FileRequest:
@@ -660,6 +706,7 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileManifestBegin:
                         case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.PackageVersionEntry:
                         case UnitySyncMessageType.FileManifestEnd:
                         case UnitySyncMessageType.FileChunk:
                         case UnitySyncMessageType.FileSyncAbort:
@@ -744,6 +791,21 @@ namespace Glasspage.UnitySync
                     }
                 }
             }
+            catch (EndOfStreamException)
+            {
+                if (_running && authenticated && !peer.Superseded)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        peer.DisplayName + " disconnected.");
+                }
+                else if (_running && !authenticated)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        "Collaborator connection closed during the handshake.");
+                }
+            }
             catch (Exception exception) when (
                 exception is IOException ||
                 exception is SocketException ||
@@ -751,9 +813,17 @@ namespace Glasspage.UnitySync
                 exception is CryptographicException ||
                 exception is InvalidDataException)
             {
-                if (_running && authenticated)
+                if (_running && authenticated && !peer.Superseded)
                 {
-                    Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " disconnected.");
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        peer.DisplayName + " disconnected: " + exception.Message);
+                }
+                else if (_running && !authenticated)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        "Rejected collaborator connection: " + exception.Message);
                 }
             }
             finally
@@ -764,7 +834,7 @@ namespace Glasspage.UnitySync
                     _peers.Remove(peer);
                 }
 
-                if (_running && authenticated)
+                if (_running && authenticated && !peer.Superseded)
                 {
                     EnqueuePeerLeft(peer.PlayerId);
                     Broadcast(UnitySyncProtocol.CreatePeerLeft(peer.PlayerId), peer);
@@ -787,7 +857,19 @@ namespace Glasspage.UnitySync
                 server.Stream = client.GetStream();
                 Send(server, UnitySyncProtocol.CreateHello(_localPlayerId, _localDisplayName));
 
-                UnitySyncMessage welcome = ReadMessage(server);
+                UnitySyncMessage welcome;
+                try
+                {
+                    welcome = ReadMessage(server);
+                }
+                catch (EndOfStreamException exception)
+                {
+                    throw new IOException(
+                        "The host closed the connection during the UnitySync handshake. " +
+                        "Check the host Activity Log for the rejection reason.",
+                        exception);
+                }
+
                 if (welcome.Type != UnitySyncMessageType.Welcome || welcome.PlayerId == Guid.Empty)
                 {
                     throw new InvalidDataException("The host did not complete the UnitySync handshake.");
@@ -796,7 +878,8 @@ namespace Glasspage.UnitySync
                 server.PlayerId = welcome.PlayerId;
                 server.DisplayName = NormalizeDisplayName(welcome.DisplayName);
                 _clientReady = true;
-                Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName + ".");
+                Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName +
+                    ". Local protocol " + UnitySyncProtocol.Version + " (packet diagnostics 2).");
 
                 while (_running)
                 {
@@ -821,8 +904,18 @@ namespace Glasspage.UnitySync
                             EnqueueSelection(message.Selection);
                             break;
 
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
+                            if (message.PlayerId != server.PlayerId)
+                            {
+                                throw new InvalidDataException("Invalid restore response sender.");
+                            }
+                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                            break;
+
                         case UnitySyncMessageType.FileManifestBegin:
                         case UnitySyncMessageType.FileManifestEntry:
+                        case UnitySyncMessageType.PackageVersionEntry:
                         case UnitySyncMessageType.FileManifestEnd:
                         case UnitySyncMessageType.FileChunk:
                         case UnitySyncMessageType.FileSyncAbort:
@@ -945,9 +1038,10 @@ namespace Glasspage.UnitySync
                 plaintext = _crypto.Decrypt(envelope);
             }
 
-            if (!UnitySyncProtocol.TryRead(plaintext, out UnitySyncMessage message))
+            if (!UnitySyncProtocol.TryRead(
+                plaintext, out UnitySyncMessage message, out string error))
             {
-                throw new InvalidDataException("Invalid UnitySync message.");
+                throw new InvalidDataException("Invalid UnitySync message: " + error);
             }
 
             return message;

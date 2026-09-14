@@ -1,6 +1,13 @@
 using System;
+using System.IO;
+using System.Runtime.InteropServices;
 using UnityEditor;
 using UnityEngine;
+using Process = System.Diagnostics.Process;
+using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
+#if UNITY_EDITOR_WIN
+using Microsoft.Win32;
+#endif
 
 namespace Glasspage.UnitySync
 {
@@ -11,7 +18,7 @@ namespace Glasspage.UnitySync
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
         // Keep this in sync with package.json when releasing a new UnitySync version.
-        private const string Version = "0.5.0";
+        private const string Version = "0.6.0";
         private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
 
@@ -83,6 +90,7 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(8f);
 
             DrawStatus();
+            DrawPackageChecklist();
             EditorGUILayout.Space(8f);
 
             DrawIdentity();
@@ -131,9 +139,13 @@ namespace Glasspage.UnitySync
                     break;
 
                 case UnitySyncSessionState.Connected:
-                    status = UnitySyncSession.IsFileSyncing
-                        ? "Syncing host files..."
-                        : "Connected";
+                    status = UnitySyncFileSynchronizer.IsWaitingForPackageChanges
+                        ? "Package changes required"
+                        : UnitySyncSession.IsAwaitingFileDownloadConfirmation
+                        ? "Review host file download"
+                        : UnitySyncSession.IsFileSyncing
+                            ? "Syncing host files..."
+                            : "Connected";
                     type = MessageType.Info;
                     break;
 
@@ -145,6 +157,254 @@ namespace Glasspage.UnitySync
 
             EditorGUILayout.HelpBox(status, type);
         }
+
+        private void DrawPackageChecklist()
+        {
+            if (!UnitySyncFileSynchronizer.IsWaitingForPackageChanges)
+            {
+                return;
+            }
+
+            EditorGUILayout.Space(8f);
+            EditorGUILayout.LabelField("Match the host's packages", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                UnitySyncFileSynchronizer.PackageChecklistOrderHint,
+                MessageType.Info);
+            UnitySyncFileSynchronizer.PackageChecklistItem[] items =
+                UnitySyncFileSynchronizer.RequiredPackageChecklistItems;
+            foreach (UnitySyncFileSynchronizer.PackageChecklistItem item in items)
+            {
+                EditorGUILayout.HelpBox(item.Text, MessageType.Warning);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button(GetPackageActionLabel(item.Action)))
+                    {
+                        OpenPackageHelper(item.Action, item.PackageName);
+                    }
+                    if (item.ShowAdditionalWebSearch && GUILayout.Button("Search Google"))
+                    {
+                        OpenPackageHelper(
+                            UnitySyncFileSynchronizer.PackageChecklistAction.WebSearch,
+                            item.PackageName);
+                    }
+                }
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Copy checklist"))
+                {
+                    string[] changes = UnitySyncFileSynchronizer.RequiredPackageChanges;
+                    GUIUtility.systemCopyBuffer =
+                        UnitySyncFileSynchronizer.PackageChecklistOrderHint +
+                        Environment.NewLine + Environment.NewLine +
+                        string.Join(Environment.NewLine + Environment.NewLine, changes);
+                }
+                using (new EditorGUI.DisabledScope(EditorApplication.isCompiling || EditorApplication.isUpdating))
+                {
+                    if (GUILayout.Button("Recheck packages"))
+                    {
+                        UnitySyncSession.RecheckPackageVersions();
+                    }
+                }
+            }
+        }
+
+        private static string GetPackageActionLabel(
+            UnitySyncFileSynchronizer.PackageChecklistAction action)
+        {
+            switch (action)
+            {
+                case UnitySyncFileSynchronizer.PackageChecklistAction.CreatorCompanion:
+                    return "Open Creator Companion";
+                case UnitySyncFileSynchronizer.PackageChecklistAction.UnityPackageManager:
+                    return "Open Package Manager";
+                default:
+                    return "Search Google";
+            }
+        }
+
+        private void OpenPackageHelper(
+            UnitySyncFileSynchronizer.PackageChecklistAction action,
+            string packageName)
+        {
+            _error = string.Empty;
+            switch (action)
+            {
+                case UnitySyncFileSynchronizer.PackageChecklistAction.CreatorCompanion:
+                    if (!OpenCreatorCompanion())
+                    {
+                        _error = "Creator Companion could not be found. Open it manually or reinstall it, then try again.";
+                    }
+                    break;
+                case UnitySyncFileSynchronizer.PackageChecklistAction.UnityPackageManager:
+                    if (!EditorApplication.ExecuteMenuItem("Window/Package Manager"))
+                    {
+                        _error = "Unity Package Manager could not be opened.";
+                    }
+                    break;
+                default:
+                    Application.OpenURL(
+                        "https://www.google.com/search?q=" +
+                        Uri.EscapeDataString("\"" + packageName + "\""));
+                    break;
+            }
+        }
+
+        private static bool OpenCreatorCompanion()
+        {
+#if UNITY_EDITOR_WIN
+            foreach (Process process in Process.GetProcesses())
+            {
+                try
+                {
+                    if ((process.ProcessName.IndexOf("CreatorCompanion", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         process.ProcessName.Equals("VCC", StringComparison.OrdinalIgnoreCase)) &&
+                        process.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindow(process.MainWindowHandle, 9);
+                        SetForegroundWindow(process.MainWindowHandle);
+                        return true;
+                    }
+                }
+                catch (InvalidOperationException) { }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+
+            string executable = FindCreatorCompanionExecutable();
+            if (string.IsNullOrEmpty(executable))
+            {
+                return false;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = executable,
+                    UseShellExecute = true
+                });
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception) { }
+            catch (InvalidOperationException) { }
+            return false;
+#else
+            return false;
+#endif
+        }
+
+#if UNITY_EDITOR_WIN
+        private static string FindCreatorCompanionExecutable()
+        {
+            string registryLocation = GetCreatorCompanionRegistryLocation();
+            string registryExecutable = FindCreatorCompanionExecutableAt(registryLocation);
+            if (!string.IsNullOrEmpty(registryExecutable))
+            {
+                return registryExecutable;
+            }
+
+            string programs = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs");
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86 = Environment.GetFolderPath(
+                Environment.SpecialFolder.ProgramFilesX86);
+            string[] candidates =
+            {
+                Path.Combine(programs, "VRChat Creator Companion", "CreatorCompanion.exe"),
+                Path.Combine(programs, "VRChat Creator Companion", "CreatorCompanionBeta.exe"),
+                Path.Combine(programs, "CreatorCompanion", "CreatorCompanion.exe"),
+                Path.Combine(programs, "VRChat Creator Companion", "VCC.exe"),
+                Path.Combine(programFiles, "VRChat Creator Companion", "CreatorCompanion.exe"),
+                Path.Combine(programFilesX86, "VRChat Creator Companion", "CreatorCompanion.exe")
+            };
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            try
+            {
+                string[] executableNames =
+                {
+                    "CreatorCompanion.exe",
+                    "CreatorCompanionBeta.exe"
+                };
+                foreach (string executableName in executableNames)
+                {
+                    string[] matches = Directory.GetFiles(
+                        programs, executableName, SearchOption.AllDirectories);
+                    if (matches.Length > 0)
+                    {
+                        return matches[0];
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return string.Empty;
+        }
+
+        private static string GetCreatorCompanionRegistryLocation()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey("Software\\VCC"))
+                {
+                    return key != null
+                        ? key.GetValue("InstallPath", string.Empty) as string
+                        : string.Empty;
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+            return string.Empty;
+        }
+
+        private static string FindCreatorCompanionExecutableAt(string location)
+        {
+            if (string.IsNullOrWhiteSpace(location))
+            {
+                return string.Empty;
+            }
+
+            string path = Environment.ExpandEnvironmentVariables(location.Trim().Trim('"'));
+            if (File.Exists(path) &&
+                path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return path;
+            }
+
+            string[] executableNames =
+            {
+                "CreatorCompanion.exe",
+                "CreatorCompanionBeta.exe",
+                "VCC.exe"
+            };
+            foreach (string executableName in executableNames)
+            {
+                string candidate = Path.Combine(path, executableName);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            return string.Empty;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr windowHandle, int command);
+#endif
 
         private void DrawIdentity()
         {
@@ -292,6 +552,52 @@ namespace Glasspage.UnitySync
             }
 
             EditorGUILayout.Space(8f);
+            if (!isHosting && UnitySyncSession.IsAwaitingFileDownloadConfirmation)
+            {
+                int fileCount = UnitySyncSession.PendingFileDownloadCount;
+                long downloadBytes = UnitySyncSession.PendingFileDownloadBytes;
+                string fileLabel = fileCount == 1 ? "file" : "files";
+                EditorGUILayout.HelpBox(
+                    "The host has " +
+                    fileCount +
+                    " " +
+                    fileLabel +
+                    " you need to download (" +
+                    FormatBytes(downloadBytes) +
+                    "). " +
+                    UnitySyncFileSynchronizer.GuestPendingDeletionCount +
+                    " guest-only files will be deleted. Review the file list in the Activity Log before continuing.",
+                    MessageType.Warning);
+
+                bool disconnected = false;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("Disconnect"))
+                    {
+                        _error = string.Empty;
+                        UnitySyncSession.Stop();
+                        disconnected = true;
+                    }
+
+                    if (GUILayout.Button("Continue"))
+                    {
+                        _error = string.Empty;
+                        if (!UnitySyncSession.ContinueFileSync(out _error))
+                        {
+                            Repaint();
+                        }
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+                if (disconnected)
+                {
+                    Repaint();
+                }
+
+                return;
+            }
+
             if (GUILayout.Button("Stop Session"))
             {
                 _error = string.Empty;
@@ -332,6 +638,31 @@ namespace Glasspage.UnitySync
             }
 
             return UnitySyncSession.DefaultColor;
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024)
+            {
+                return bytes + " B";
+            }
+
+            string[] units = { "KB", "MB", "GB", "TB" };
+            double value = bytes;
+            int unitIndex = -1;
+            do
+            {
+                value /= 1024d;
+                unitIndex++;
+            }
+            while (value >= 1024d && unitIndex < units.Length - 1);
+
+            string format = value >= 100d
+                ? "0"
+                : value >= 10d
+                    ? "0.0"
+                    : "0.00";
+            return value.ToString(format) + " " + units[unitIndex];
         }
 
         private static Color NormalizeColor(Color color)
@@ -456,6 +787,70 @@ namespace Glasspage.UnitySync
             if (!_showDebug)
             {
                 return;
+            }
+
+            EditorGUILayout.Space();
+            EditorGUILayout.HelpBox(
+                "Restore replaces Assets and ProjectSettings with the host's files, " +
+                "including files that already match. Guest-only files and unsaved scene edits are removed. " +
+                "Packages must be managed manually. The host must accept the request in Debug. Downloading and importing may take a long time.",
+                MessageType.Warning);
+            bool connectedGuest = UnitySyncSession.State == UnitySyncSessionState.Connected;
+            using (new EditorGUI.DisabledScope(!connectedGuest || UnitySyncSession.IsFileSyncing))
+            {
+                if (GUILayout.Button("Delete and restore project from host"))
+                {
+                    UnitySyncSession.RequestProjectRestore();
+                }
+            }
+
+            if (UnitySyncFileSynchronizer.IsWaitingForRestoreApproval)
+            {
+                EditorGUILayout.LabelField("Waiting for the host to accept in Debug.");
+            }
+            else if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
+            {
+                EditorGUILayout.LabelField(
+                    "Guests request a restore from their Debug panel. Accept their requests below.",
+                    EditorStyles.wordWrappedMiniLabel);
+            }
+            else if (!connectedGuest)
+            {
+                EditorGUILayout.LabelField(
+                    "Join a host session to request a project restore.",
+                    EditorStyles.wordWrappedMiniLabel);
+            }
+            else if (UnitySyncSession.IsFileSyncing)
+            {
+                EditorGUILayout.LabelField(
+                    "Wait for the current file synchronization to finish.",
+                    EditorStyles.wordWrappedMiniLabel);
+            }
+
+            if (UnitySyncSession.State == UnitySyncSessionState.Hosting)
+            {
+                Guid[] restoreRequests = UnitySyncFileSynchronizer.PendingProjectRestores;
+                if (restoreRequests.Length == 0)
+                {
+                    EditorGUILayout.LabelField("No project restore requests pending.");
+                }
+
+                foreach (Guid playerId in restoreRequests)
+                {
+                    string requester = UnitySyncPresenceRoot.TryGetViewport(playerId, out UnitySyncViewportState viewport)
+                        ? viewport.DisplayName : playerId.ToString("N");
+                    EditorGUILayout.LabelField("Restore request: " + requester);
+                    EditorGUILayout.BeginHorizontal();
+                    if (GUILayout.Button("Accept project restore"))
+                    {
+                        UnitySyncSession.RespondToProjectRestore(playerId, true);
+                    }
+                    if (GUILayout.Button("Decline"))
+                    {
+                        UnitySyncSession.RespondToProjectRestore(playerId, false);
+                    }
+                    EditorGUILayout.EndHorizontal();
+                }
             }
 
             EditorGUI.indentLevel++;

@@ -26,7 +26,18 @@ namespace Glasspage.UnitySync
         ProjectFileBegin = 17,
         ProjectFileChunk = 18,
         ProjectFileDelete = 19,
-        SceneSettingsChange = 20
+        SceneSettingsChange = 20,
+        PackageVersionEntry = 21,
+        RestoreProjectRequest = 22,
+        RestoreProjectAccepted = 23,
+        RestoreProjectDeclined = 24
+    }
+
+    internal enum UnitySyncFileSyncScope : byte
+    {
+        Packages = 1,
+        Assets = 2,
+        Project = 3
     }
 
     internal readonly struct UnitySyncViewportState
@@ -90,7 +101,9 @@ namespace Glasspage.UnitySync
     internal sealed class UnitySyncFileSyncMessage
     {
         internal Guid SyncId;
+        internal UnitySyncFileSyncScope Scope;
         internal string Path = string.Empty;
+        internal string PackageVersion = string.Empty;
         internal long Length;
         internal long Offset;
         internal int FileCount;
@@ -134,7 +147,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 13;
+        internal const int Version = 15;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -223,12 +236,29 @@ namespace Glasspage.UnitySync
             });
         }
 
-        internal static byte[] CreateFileSyncRequest(Guid playerId)
+        internal static byte[] CreateRestoreProjectControl(Guid playerId, UnitySyncMessageType type)
+        {
+            if (type != UnitySyncMessageType.RestoreProjectRequest &&
+                type != UnitySyncMessageType.RestoreProjectAccepted &&
+                type != UnitySyncMessageType.RestoreProjectDeclined)
+            {
+                throw new ArgumentOutOfRangeException(nameof(type));
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)type);
+                WriteGuid(writer, playerId);
+            });
+        }
+
+        internal static byte[] CreateFileSyncRequest(Guid playerId, UnitySyncFileSyncScope scope)
         {
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.FileSyncRequest);
                 WriteGuid(writer, playerId);
+                writer.Write((byte)scope);
             });
         }
 
@@ -272,6 +302,26 @@ namespace Glasspage.UnitySync
                 WriteFilePath(writer, state.Path);
                 writer.Write(state.Length);
                 writer.Write(state.Hash);
+            });
+        }
+
+        internal static byte[] CreatePackageVersionEntry(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, true);
+            if (string.IsNullOrEmpty(state.PackageVersion))
+            {
+                throw new InvalidDataException("A package version is required.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.PackageVersionEntry);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                WriteFilePath(writer, state.Path);
+                WriteLimitedString(writer, state.PackageVersion);
             });
         }
 
@@ -502,9 +552,19 @@ namespace Glasspage.UnitySync
 
         internal static bool TryRead(byte[] payload, out UnitySyncMessage message)
         {
+            return TryRead(payload, out message, out _);
+        }
+
+        internal static bool TryRead(
+            byte[] payload,
+            out UnitySyncMessage message,
+            out string error)
+        {
             message = default;
+            error = string.Empty;
             if (payload == null || payload.Length < 2)
             {
+                error = "The message header is truncated.";
                 return false;
             }
 
@@ -513,8 +573,10 @@ namespace Glasspage.UnitySync
                 using (MemoryStream stream = new MemoryStream(payload, false))
                 using (BinaryReader reader = new BinaryReader(stream, Encoding.UTF8))
                 {
-                    if (reader.ReadByte() != Version)
+                    byte version = reader.ReadByte();
+                    if (version != Version)
                     {
+                        error = "Protocol version " + version + " does not match " + Version + ".";
                         return false;
                     }
 
@@ -586,6 +648,9 @@ namespace Glasspage.UnitySync
                                 new UnitySyncSelectionState(playerId, selectionColor, objectIds));
                             break;
 
+                        case UnitySyncMessageType.RestoreProjectRequest:
+                        case UnitySyncMessageType.RestoreProjectAccepted:
+                        case UnitySyncMessageType.RestoreProjectDeclined:
                         case UnitySyncMessageType.FileSyncRequest:
                             playerId = ReadGuid(reader);
                             message = new UnitySyncMessage(
@@ -596,7 +661,18 @@ namespace Glasspage.UnitySync
                                 null,
                                 null,
                                 default,
-                                new UnitySyncFileSyncMessage());
+                                new UnitySyncFileSyncMessage
+                                {
+                                    Scope = type == UnitySyncMessageType.FileSyncRequest
+                                        ? (UnitySyncFileSyncScope)reader.ReadByte()
+                                        : default
+                                });
+                            if (type == UnitySyncMessageType.FileSyncRequest &&
+                                message.FileSync.Scope != UnitySyncFileSyncScope.Packages &&
+                                message.FileSync.Scope != UnitySyncFileSyncScope.Assets)
+                            {
+                                throw new InvalidDataException("Invalid file sync request scope.");
+                            }
                             break;
 
                         case UnitySyncMessageType.FileManifestBegin:
@@ -649,6 +725,33 @@ namespace Glasspage.UnitySync
                                 null,
                                 default,
                                 manifestEntry);
+                            break;
+
+                        case UnitySyncMessageType.PackageVersionEntry:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage packageVersion =
+                                new UnitySyncFileSyncMessage
+                                {
+                                    SyncId = ReadGuid(reader),
+                                    Path = ReadFilePath(reader),
+                                    PackageVersion = ReadLimitedString(reader)
+                                };
+                            if (packageVersion.SyncId == Guid.Empty ||
+                                string.IsNullOrEmpty(packageVersion.PackageVersion))
+                            {
+                                throw new InvalidDataException(
+                                    "Invalid package version entry.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                packageVersion);
                             break;
 
                         case UnitySyncMessageType.FileManifestEnd:
@@ -881,10 +984,18 @@ namespace Glasspage.UnitySync
                             break;
 
                         default:
+                            error = "Unknown message type " + (byte)type + ".";
                             return false;
                     }
 
-                    return stream.Position == stream.Length;
+                    if (stream.Position != stream.Length)
+                    {
+                        error = type + " contains " + (stream.Length - stream.Position) +
+                            " unexpected trailing bytes.";
+                        return false;
+                    }
+
+                    return true;
                 }
             }
             catch (Exception exception) when (
@@ -895,6 +1006,9 @@ namespace Glasspage.UnitySync
                 exception is OverflowException ||
                 exception is DecoderFallbackException)
             {
+                error = "Message " + (UnitySyncMessageType)payload[1] +
+                    " (type " + payload[1] + ", protocol " + payload[0] +
+                    ", " + payload.Length + " bytes): " + exception.Message;
                 return false;
             }
         }
@@ -1260,6 +1374,7 @@ namespace Glasspage.UnitySync
                 WriteLimitedString(writer, scene.ScenePath);
                 WriteLimitedString(writer, scene.SceneName);
                 writer.Write(scene.SceneIndex);
+                writer.Write(scene.IsActive);
                 writer.Write(scene.SkyboxMaterial != null);
                 if (scene.SkyboxMaterial != null)
                 {
@@ -1319,7 +1434,8 @@ namespace Glasspage.UnitySync
                 {
                     ScenePath = ReadLimitedString(reader),
                     SceneName = ReadLimitedString(reader),
-                    SceneIndex = reader.ReadInt32()
+                    SceneIndex = reader.ReadInt32(),
+                    IsActive = reader.ReadBoolean()
                 };
                 if (reader.ReadBoolean())
                 {

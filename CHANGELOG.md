@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 (in progress)
+
+- Replace automatic package syncing with a registered-package version checklist showing missing packages, version differences, and guest-only packages.
+- Add manual install/change/remove guidance, Copy checklist, and Recheck packages before Assets and scene synchronization.
+- Never transfer or mutate Packages, including during Debug restore; the restore now targets Assets and ProjectSettings.
+- Use explicit request scopes and wire protocol 15 so package rechecks work repeatedly. Both editors must use this build.
+
 ## 0.4.4
 
 - Restore scene component serialization and staging behavior exactly to the implementation used before PR #41.
