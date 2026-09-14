@@ -5,6 +5,9 @@ using UnityEditor;
 using UnityEngine;
 using Process = System.Diagnostics.Process;
 using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
+#if UNITY_EDITOR_WIN
+using Microsoft.Win32;
+#endif
 
 namespace Glasspage.UnitySync
 {
@@ -172,9 +175,18 @@ namespace Glasspage.UnitySync
             foreach (UnitySyncFileSynchronizer.PackageChecklistItem item in items)
             {
                 EditorGUILayout.HelpBox(item.Text, MessageType.Warning);
-                if (GUILayout.Button(GetPackageActionLabel(item.Action)))
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    OpenPackageHelper(item);
+                    if (GUILayout.Button(GetPackageActionLabel(item.Action)))
+                    {
+                        OpenPackageHelper(item.Action, item.PackageName);
+                    }
+                    if (item.ShowAdditionalWebSearch && GUILayout.Button("Search Google"))
+                    {
+                        OpenPackageHelper(
+                            UnitySyncFileSynchronizer.PackageChecklistAction.WebSearch,
+                            item.PackageName);
+                    }
                 }
             }
 
@@ -212,16 +224,17 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private void OpenPackageHelper(UnitySyncFileSynchronizer.PackageChecklistItem item)
+        private void OpenPackageHelper(
+            UnitySyncFileSynchronizer.PackageChecklistAction action,
+            string packageName)
         {
             _error = string.Empty;
-            switch (item.Action)
+            switch (action)
             {
                 case UnitySyncFileSynchronizer.PackageChecklistAction.CreatorCompanion:
                     if (!OpenCreatorCompanion())
                     {
-                        _error = "Creator Companion could not be found. Install it from the VRChat website, then try again.";
-                        Application.OpenURL("https://vrchat.com/home/download");
+                        _error = "Creator Companion could not be found. Open it manually or reinstall it, then try again.";
                     }
                     break;
                 case UnitySyncFileSynchronizer.PackageChecklistAction.UnityPackageManager:
@@ -232,7 +245,8 @@ namespace Glasspage.UnitySync
                     break;
                 default:
                     Application.OpenURL(
-                        "https://www.google.com/search?q=" + Uri.EscapeDataString(item.PackageName));
+                        "https://www.google.com/search?q=" +
+                        Uri.EscapeDataString("\"" + packageName + "\""));
                     break;
             }
         }
@@ -286,14 +300,27 @@ namespace Glasspage.UnitySync
 #if UNITY_EDITOR_WIN
         private static string FindCreatorCompanionExecutable()
         {
+            string registryLocation = GetCreatorCompanionRegistryLocation();
+            string registryExecutable = FindCreatorCompanionExecutableAt(registryLocation);
+            if (!string.IsNullOrEmpty(registryExecutable))
+            {
+                return registryExecutable;
+            }
+
             string programs = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Programs");
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86 = Environment.GetFolderPath(
+                Environment.SpecialFolder.ProgramFilesX86);
             string[] candidates =
             {
                 Path.Combine(programs, "VRChat Creator Companion", "CreatorCompanion.exe"),
+                Path.Combine(programs, "VRChat Creator Companion", "CreatorCompanionBeta.exe"),
                 Path.Combine(programs, "CreatorCompanion", "CreatorCompanion.exe"),
-                Path.Combine(programs, "VRChat Creator Companion", "VCC.exe")
+                Path.Combine(programs, "VRChat Creator Companion", "VCC.exe"),
+                Path.Combine(programFiles, "VRChat Creator Companion", "CreatorCompanion.exe"),
+                Path.Combine(programFilesX86, "VRChat Creator Companion", "CreatorCompanion.exe")
             };
             foreach (string candidate in candidates)
             {
@@ -305,12 +332,70 @@ namespace Glasspage.UnitySync
 
             try
             {
-                string[] matches = Directory.GetFiles(
-                    programs, "CreatorCompanion.exe", SearchOption.AllDirectories);
-                return matches.Length > 0 ? matches[0] : string.Empty;
+                string[] executableNames =
+                {
+                    "CreatorCompanion.exe",
+                    "CreatorCompanionBeta.exe"
+                };
+                foreach (string executableName in executableNames)
+                {
+                    string[] matches = Directory.GetFiles(
+                        programs, executableName, SearchOption.AllDirectories);
+                    if (matches.Length > 0)
+                    {
+                        return matches[0];
+                    }
+                }
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+            return string.Empty;
+        }
+
+        private static string GetCreatorCompanionRegistryLocation()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey("Software\\VCC"))
+                {
+                    return key != null
+                        ? key.GetValue("InstallPath", string.Empty) as string
+                        : string.Empty;
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+            return string.Empty;
+        }
+
+        private static string FindCreatorCompanionExecutableAt(string location)
+        {
+            if (string.IsNullOrWhiteSpace(location))
+            {
+                return string.Empty;
+            }
+
+            string path = Environment.ExpandEnvironmentVariables(location.Trim().Trim('"'));
+            if (File.Exists(path) &&
+                path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return path;
+            }
+
+            string[] executableNames =
+            {
+                "CreatorCompanion.exe",
+                "CreatorCompanionBeta.exe",
+                "VCC.exe"
+            };
+            foreach (string executableName in executableNames)
+            {
+                string candidate = Path.Combine(path, executableName);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
             return string.Empty;
         }
 

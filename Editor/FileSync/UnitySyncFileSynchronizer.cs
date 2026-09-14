@@ -58,6 +58,7 @@ namespace Glasspage.UnitySync
             internal string Text;
             internal string PackageName;
             internal PackageChecklistAction Action;
+            internal bool ShowAdditionalWebSearch;
         }
 
         private static readonly List<PackageChecklistItem> PackageChanges =
@@ -1824,8 +1825,10 @@ namespace Glasspage.UnitySync
                             ? "Upgrade"
                             : "Downgrade";
                     bool vccManaged = IsVccManagedPackage(requirement.name, requirement.vccManaged);
-                    string manager = vccManaged
-                        ? "Use Creator Companion → Manage Project and select the host version."
+                    string manager = requirement.name.StartsWith("com.unity.", StringComparison.Ordinal)
+                        ? "Open Package Manager, set Packages to Unity Registry and enable the package."
+                        : vccManaged
+                            ? "Use Creator Companion → Manage Project and select the host version."
                         : requirement.source == "BuiltIn"
                             ? "Use the same Unity Editor version and enable this module in Package Manager."
                             : requirement.source == "Embedded" || requirement.source == "Local" || requirement.source == "Git"
@@ -1843,7 +1846,10 @@ namespace Glasspage.UnitySync
                             Text = title + " (" + requirement.name + ")" + Environment.NewLine +
                                 versionInstruction + Environment.NewLine + manager,
                             PackageName = requirement.name,
-                            Action = GetPackageChecklistAction(requirement.name, vccManaged)
+                            Action = GetPackageChecklistAction(requirement.name, vccManaged),
+                            ShowAdditionalWebSearch = vccManaged &&
+                                !IsIncludedCreatorCompanionPackage(
+                                    requirement.name, requirement.displayName)
                         },
                         vccManaged);
                 }
@@ -1864,7 +1870,9 @@ namespace Glasspage.UnitySync
                             "Remove version " + extra.version + Environment.NewLine +
                             "Remove it using its package manager; dependencies may disappear when their parent package is removed.",
                         PackageName = extra.name,
-                        Action = GetPackageChecklistAction(extra.name, vccManaged)
+                        Action = GetPackageChecklistAction(extra.name, vccManaged),
+                        ShowAdditionalWebSearch = vccManaged &&
+                            !IsIncludedCreatorCompanionPackage(extra.name, extra.displayName)
                     },
                     vccManaged);
             }
@@ -1936,6 +1944,34 @@ namespace Glasspage.UnitySync
             }
             return !packageName.StartsWith("com.unity.", StringComparison.Ordinal) &&
                 listedInVpmManifest;
+        }
+
+        private static bool IsIncludedCreatorCompanionPackage(
+            string packageName, string displayName)
+        {
+            if (packageName.StartsWith("com.vrchat.", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return string.Equals(
+                       packageName, "vrchat.jordo.easyquestswitch",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       packageName, "dev.onevr.vrworldtoolkit",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       packageName, "com.llealloo.audiolink",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       displayName, "EasyQuestSwitch",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       displayName, "VRWorld Toolkit",
+                       StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       displayName, "AudioLink",
+                       StringComparison.OrdinalIgnoreCase);
         }
 
         private static HashSet<string> GetVccManagedPackageNames()
