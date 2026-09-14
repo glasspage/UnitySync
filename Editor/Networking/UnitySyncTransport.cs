@@ -123,6 +123,7 @@ namespace Glasspage.UnitySync
         private readonly object _outboundLock = new object();
         private readonly AutoResetEvent _outboundSignal = new AutoResetEvent(false);
         private readonly Queue<OutboundMessage> _pendingMessages = new Queue<OutboundMessage>();
+        private long _pendingMessageBytes;
 
         private volatile bool _running;
         private volatile bool _clientReady;
@@ -141,6 +142,16 @@ namespace Glasspage.UnitySync
 
         internal bool IsRunning => _running;
         internal bool IsClientReady => _clientReady;
+        internal long PendingOutboundBytes
+        {
+            get
+            {
+                lock (_outboundLock)
+                {
+                    return _pendingMessageBytes;
+                }
+            }
+        }
 
         internal void StartHost(int port)
         {
@@ -399,9 +410,24 @@ namespace Glasspage.UnitySync
                     Payload = payload,
                     TargetPlayerId = targetPlayerId
                 });
+                _pendingMessageBytes += payload != null ? payload.LongLength : 0L;
             }
 
             _outboundSignal.Set();
+        }
+
+        private void ReleasePendingMessageBytes(byte[] payload)
+        {
+            long length = payload != null ? payload.LongLength : 0L;
+            if (length <= 0)
+            {
+                return;
+            }
+
+            lock (_outboundLock)
+            {
+                _pendingMessageBytes = Math.Max(0L, _pendingMessageBytes - length);
+            }
         }
 
         internal void LogLocal(string message)
@@ -558,13 +584,20 @@ namespace Glasspage.UnitySync
 
                     foreach (OutboundMessage message in messages)
                     {
-                        if (message.TargetPlayerId == Guid.Empty)
+                        try
                         {
-                            Broadcast(message.Payload, null);
+                            if (message.TargetPlayerId == Guid.Empty)
+                            {
+                                Broadcast(message.Payload, null);
+                            }
+                            else
+                            {
+                                SendToPlayer(message.TargetPlayerId, message.Payload);
+                            }
                         }
-                        else
+                        finally
                         {
-                            SendToPlayer(message.TargetPlayerId, message.Payload);
+                            ReleasePendingMessageBytes(message.Payload);
                         }
                     }
                     continue;
@@ -585,7 +618,14 @@ namespace Glasspage.UnitySync
 
                     foreach (OutboundMessage message in messages)
                     {
-                        TrySend(server, message.Payload);
+                        try
+                        {
+                            TrySend(server, message.Payload);
+                        }
+                        finally
+                        {
+                            ReleasePendingMessageBytes(message.Payload);
+                        }
                     }
                 }
                 else if (messages.Length > 0)
