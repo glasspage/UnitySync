@@ -16,15 +16,18 @@ namespace Glasspage.UnitySync
         internal readonly Guid PlayerId;
         internal readonly UnitySyncFileSyncScope Scope;
         internal readonly float Progress01;
+        internal readonly double StartedAtSeconds;
 
         internal UnitySyncHostDownloadProgress(
             Guid playerId,
             UnitySyncFileSyncScope scope,
-            float progress01)
+            float progress01,
+            double startedAtSeconds)
         {
             PlayerId = playerId;
             Scope = scope;
             Progress01 = progress01;
+            StartedAtSeconds = startedAtSeconds;
         }
     }
 
@@ -159,6 +162,7 @@ namespace Glasspage.UnitySync
             internal UnitySyncFileSyncScope Scope;
             internal long ReceivedBytes;
             internal long TotalBytes;
+            internal double StartedAtSeconds;
             internal double CompletedAtSeconds;
         }
 
@@ -316,7 +320,8 @@ namespace Glasspage.UnitySync
                 progress.Add(new UnitySyncHostDownloadProgress(
                     state.PlayerId,
                     state.Scope,
-                    Mathf.Clamp01((float)((double)state.ReceivedBytes / state.TotalBytes))));
+                    Mathf.Clamp01((float)((double)state.ReceivedBytes / state.TotalBytes)),
+                    state.StartedAtSeconds));
             }
 
             progress.Sort((left, right) => left.PlayerId.CompareTo(right.PlayerId));
@@ -847,6 +852,16 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            double startedAtSeconds = EditorApplication.timeSinceStartup;
+            if (HostDownloadProgress.TryGetValue(
+                    playerId,
+                    out HostDownloadProgressState existingState) &&
+                existingState.SyncId == message.SyncId &&
+                existingState.StartedAtSeconds > 0d)
+            {
+                startedAtSeconds = existingState.StartedAtSeconds;
+            }
+
             HostDownloadProgressState state = new HostDownloadProgressState
             {
                 PlayerId = playerId,
@@ -854,6 +869,7 @@ namespace Glasspage.UnitySync
                 Scope = message.Scope,
                 ReceivedBytes = message.Offset,
                 TotalBytes = message.TotalBytes,
+                StartedAtSeconds = startedAtSeconds,
                 CompletedAtSeconds = message.Offset >= message.TotalBytes
                     ? EditorApplication.timeSinceStartup
                     : 0d
