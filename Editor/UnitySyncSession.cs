@@ -900,10 +900,19 @@ namespace Glasspage.UnitySync
             UnitySyncViewportState viewport,
             double receivedAtSeconds)
         {
+            bool isNewParticipant =
+                !UnitySyncPresenceRoot.TryGetViewport(viewport.PlayerId, out _);
             UnitySyncPresenceRoot.Apply(
                 viewport,
                 LocalPlayerId,
                 receivedAtSeconds);
+            if (isNewParticipant)
+            {
+                // A newly visible collaborator is also a join signal for existing peers.
+                // Re-advertise our current viewport so the newcomer immediately receives
+                // the full collaborator list instead of waiting for somebody to move.
+                ForceViewportSend();
+            }
             if (_spectatingPlayerId == viewport.PlayerId &&
                 viewport.SpectatingPlayerId == LocalPlayerId)
             {
