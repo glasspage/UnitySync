@@ -827,7 +827,7 @@ namespace Glasspage.UnitySync
                     marker.DisplayName + " is receiving " + noun + " (" + percent + "%)...",
                     marker.Color,
                     UnitySyncSceneStatusPriority.Ongoing,
-                    double.MinValue,
+                    item.StartedAtSeconds,
                     0));
             }
 
