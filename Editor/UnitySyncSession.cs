@@ -29,17 +29,8 @@ namespace Glasspage.UnitySync
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
 
-        private sealed class PendingGuestViewport
-        {
-            internal UnitySyncViewportState Viewport;
-            internal double ReceivedAtSeconds;
-        }
-
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
-        private static readonly Dictionary<Guid, PendingGuestViewport> PendingGuestViewports =
-            new Dictionary<Guid, PendingGuestViewport>();
-
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
         private static string _displayName = "Collaborator";
@@ -119,7 +110,6 @@ namespace Glasspage.UnitySync
                 _joinCode = code;
                 _guestJoinCode = string.Empty;
                 _guestSyncApproved = true;
-                PendingGuestViewports.Clear();
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
@@ -172,7 +162,6 @@ namespace Glasspage.UnitySync
                 _transport.StartClient(data.Address, data.Port);
                 _guestJoinCode = joinCode;
                 _guestSyncApproved = false;
-                PendingGuestViewports.Clear();
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _hasLastViewportState = false;
@@ -221,7 +210,6 @@ namespace Glasspage.UnitySync
             }
 
             _guestSyncApproved = true;
-            ApplyPendingGuestPresence();
 
             AddLog(
                 "Continuing host file download: " +
@@ -319,14 +307,14 @@ namespace Glasspage.UnitySync
 
         internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
         {
-            return IsGuestSyncDeferred
-                ? new UnitySyncRemoteParticipant[0]
-                : UnitySyncPresenceRoot.GetParticipants();
+            return UnitySyncPresenceRoot.GetParticipants();
         }
 
         internal static bool CanSpectate(Guid playerId)
         {
-            if (_transport == null ||
+            if (IsGuestSyncDeferred ||
+                UnitySyncFileSynchronizer.IsGuestSyncing ||
+                _transport == null ||
                 playerId == Guid.Empty ||
                 playerId == LocalPlayerId ||
                 !UnitySyncPresenceRoot.TryGetViewport(playerId, out UnitySyncViewportState viewport))
@@ -479,17 +467,6 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.Viewport:
-                        if (IsGuestSyncDeferred)
-                        {
-                            PendingGuestViewports[transportEvent.Viewport.PlayerId] =
-                                new PendingGuestViewport
-                                {
-                                    Viewport = transportEvent.Viewport,
-                                    ReceivedAtSeconds = transportEvent.ReceivedAtSeconds
-                                };
-                            break;
-                        }
-
                         ApplyRemoteViewport(
                             transportEvent.Viewport,
                             transportEvent.ReceivedAtSeconds);
@@ -506,13 +483,6 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
-                        if (IsGuestSyncDeferred)
-                        {
-                            PendingGuestViewports.Remove(transportEvent.PlayerId);
-                            UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
-                            break;
-                        }
-
                         if (_spectatingPlayerId == transportEvent.PlayerId)
                         {
                             StopSpectatingInternal(true, false);
@@ -692,7 +662,6 @@ namespace Glasspage.UnitySync
                 if (!_guestSyncApproved)
                 {
                     _guestSyncApproved = true;
-                    ApplyPendingGuestPresence();
                 }
 
                 UnitySyncSceneSynchronizer.BeginSession();
@@ -712,8 +681,7 @@ namespace Glasspage.UnitySync
                 UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
             }
 
-            if (guestFileSyncing ||
-                EditorApplication.timeSinceStartup < _nextSendTime ||
+            if (EditorApplication.timeSinceStartup < _nextSendTime ||
                 EditorApplication.isPlayingOrWillChangePlaymode ||
                 (_state != UnitySyncSessionState.Hosting && _state != UnitySyncSessionState.Connected))
             {
@@ -928,21 +896,6 @@ namespace Glasspage.UnitySync
         private static bool IsGuestSyncDeferred =>
             !string.IsNullOrEmpty(_guestJoinCode) && !_guestSyncApproved;
 
-        private static void ApplyPendingGuestPresence()
-        {
-            if (PendingGuestViewports.Count == 0)
-            {
-                return;
-            }
-
-            foreach (PendingGuestViewport pending in PendingGuestViewports.Values)
-            {
-                ApplyRemoteViewport(pending.Viewport, pending.ReceivedAtSeconds);
-            }
-
-            PendingGuestViewports.Clear();
-        }
-
         private static void ApplyRemoteViewport(
             UnitySyncViewportState viewport,
             double receivedAtSeconds)
@@ -982,7 +935,6 @@ namespace Glasspage.UnitySync
             _guestJoinCode = string.Empty;
             _guestSyncApproved = false;
             _fileSyncResumeConnectionPending = false;
-            PendingGuestViewports.Clear();
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
