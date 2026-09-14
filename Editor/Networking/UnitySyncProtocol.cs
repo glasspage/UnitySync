@@ -147,7 +147,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 15;
+        internal const int Version = 16;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -159,7 +159,7 @@ namespace Glasspage.UnitySync
         private const int MaximumSelectionObjects = 4096;
         private const int MaximumFileManifestEntries = 250000;
         private const int MaximumFilePathBytes = 4096;
-        internal const int MaximumFileChunkBytes = 512 * 1024;
+        internal const int MaximumFileChunkBytes = 4 * 1024 * 1024;
 
         internal static byte[] CreateHello(Guid playerId, string displayName)
         {
