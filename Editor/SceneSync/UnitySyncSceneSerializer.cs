@@ -1962,7 +1962,11 @@ namespace Glasspage.UnitySync
             while (iterator.Next(enterChildren))
             {
                 bool ignored = IsIgnoredPropertyPath(iterator.propertyPath);
-                enterChildren = !ignored;
+                // References are atomic identities. Never transmit their native pointer
+                // children: those integers belong to this Editor process only.
+                enterChildren = !ignored &&
+                                iterator.propertyType != SerializedPropertyType.ObjectReference &&
+                                iterator.propertyType != SerializedPropertyType.ExposedReference;
                 if (ignored || !iterator.editable)
                 {
                     continue;
@@ -2025,7 +2029,12 @@ namespace Glasspage.UnitySync
 
                 case SerializedPropertyType.ObjectReference:
                     state.Kind = UnitySyncSerializedValueKind.ObjectReference;
-                    Object objectReference = property.objectReferenceValue;
+                    int instanceId = property.objectReferenceInstanceIDValue;
+                    Object objectReference = instanceId == 0 ? null : EditorUtility.InstanceIDToObject(instanceId);
+                    if (instanceId != 0 && objectReference == null)
+                    {
+                        return false;
+                    }
                     if (!IsSerializedReferenceTypeCompatible(property.type, objectReference) ||
                         !TryCaptureObjectReference(objectReference, out state.ObjectReference))
                     {
@@ -2558,7 +2567,8 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + propertyState.Path +
                             " could not be matched safely for local field type " +
-                            property.type + " on " + component.GetType().Name + ".";
+                            property.type + " on " + component.GetType().Name + ". " +
+                            DescribeObjectReference(propertyState.ObjectReference);
                     return false;
                 }
 
@@ -2712,7 +2722,8 @@ namespace Glasspage.UnitySync
             bool enterChildren = true;
             while (iterator.Next(enterChildren))
             {
-                enterChildren = true;
+                enterChildren = iterator.propertyType != SerializedPropertyType.ObjectReference &&
+                                iterator.propertyType != SerializedPropertyType.ExposedReference;
                 if (iterator.propertyType != SerializedPropertyType.ObjectReference)
                 {
                     continue;
@@ -2772,7 +2783,8 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + propertyState.Path +
                             " could not be matched safely for local field type " +
-                            property.type + " on " + layoutComponent.GetType().Name + ".";
+                            property.type + " on " + layoutComponent.GetType().Name + ". " +
+                            DescribeObjectReference(propertyState.ObjectReference);
                     return false;
                 }
 
@@ -2852,6 +2864,18 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static string DescribeObjectReference(UnitySyncObjectReferenceState reference)
+        {
+            if (reference == null)
+            {
+                return "No reference identity was supplied.";
+            }
+
+            return "Incoming " + reference.Kind + " '" + reference.AssetName +
+                   "', type '" + reference.ObjectTypeName + "', path '" + reference.AssetPath +
+                   "', GUID '" + reference.AssetGuid + "', file ID " + reference.LocalFileId + ".";
+        }
+
         private static bool IsObjectReferenceKind(UnitySyncSerializedValueKind kind)
         {
             return kind == UnitySyncSerializedValueKind.ObjectReference ||
@@ -2892,10 +2916,38 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool IsObjectReferenceChild(SerializedProperty property)
+        {
+            string path = property.propertyPath;
+            int separator = path.LastIndexOf('.');
+            while (separator >= 0)
+            {
+                path = path.Substring(0, separator);
+                SerializedProperty ancestor = property.serializedObject.FindProperty(path);
+                if (ancestor != null &&
+                    (ancestor.propertyType == SerializedPropertyType.ObjectReference ||
+                     ancestor.propertyType == SerializedPropertyType.ExposedReference))
+                {
+                    return true;
+                }
+
+                separator = path.LastIndexOf('.');
+            }
+
+            return false;
+        }
+
         private static bool ApplyProperty(
             SerializedProperty property,
             UnitySyncSerializedPropertyState state)
         {
+            // Also reject pointer children sent by older hosts. Check the local layout,
+            // not field-name suffixes, so unrelated user fields remain synchronizable.
+            if (IsObjectReferenceChild(property))
+            {
+                return false;
+            }
+
             try
             {
                 switch (state.Kind)
@@ -3447,6 +3499,38 @@ namespace Glasspage.UnitySync
             {
                 value = material;
                 return true;
+            }
+
+            if (assetType == typeof(Sprite))
+            {
+                // The default uGUI sprites are built-in resources, not project assets.
+                // Use an explicit resource map; never substitute an arbitrary loaded sprite.
+                string resourcePath;
+                switch (reference.AssetName)
+                {
+                    case "UISprite":
+                    case "Background":
+                    case "InputFieldBackground":
+                    case "Knob":
+                    case "Checkmark":
+                    case "DropdownArrow":
+                    case "UIMask":
+                        resourcePath = "UI/Skin/" + reference.AssetName + ".psd";
+                        break;
+                    default:
+                        resourcePath = string.Empty;
+                        break;
+                }
+
+                if (!string.IsNullOrEmpty(resourcePath))
+                {
+                    Sprite sprite = AssetDatabase.GetBuiltinExtraResource<Sprite>(resourcePath);
+                    if (BuiltinAssetCandidateMatches(sprite, reference))
+                    {
+                        value = sprite;
+                        return true;
+                    }
+                }
             }
 
             if (assetType == typeof(Shader))
