@@ -133,6 +133,7 @@ namespace Glasspage.UnitySync
             internal string TempPath;
             internal FileStream Stream;
             internal long Received;
+            internal readonly HashSet<long> ReceivedOffsets = new HashSet<long>();
         }
 
         private sealed class HostManifestBuild
@@ -243,6 +244,8 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, GuestTransfer> GuestTransfers =
             new Dictionary<string, GuestTransfer>(StringComparer.Ordinal);
+        private static readonly HashSet<string> GuestCompletedPaths =
+            new HashSet<string>(StringComparer.Ordinal);
         private static int _guestCompareIndex;
         private static int _guestRequestIndex;
         private static int _guestCompletedFiles;
@@ -1340,6 +1343,7 @@ namespace Glasspage.UnitySync
         {
             GuestActiveMismatches.Clear();
             GuestActiveMismatches.AddRange(entries);
+            GuestCompletedPaths.Clear();
             _guestDownloadKind = kind;
             _guestRequestIndex = 0;
             _guestCompletedFiles = 0;
@@ -1382,24 +1386,29 @@ namespace Glasspage.UnitySync
                 message.Hash == null ||
                 !HashesEqual(message.Hash, entry.Hash) ||
                 message.Data == null ||
-                message.Data.Length > UnitySyncProtocol.MaximumFileChunkBytes)
+                message.Data.Length > UnitySyncProtocol.MaximumFileChunkBytes ||
+                message.Offset < 0 ||
+                message.Offset > entry.Length ||
+                (entry.Length > 0 &&
+                 message.Offset % UnitySyncProtocol.MaximumFileChunkBytes != 0) ||
+                message.Data.Length != (int)Math.Min(
+                    UnitySyncProtocol.MaximumFileChunkBytes,
+                    entry.Length - message.Offset))
             {
                 error = "The host sent an invalid synchronized file chunk.";
                 FailGuestSync(error);
                 return false;
             }
 
+            if (GuestCompletedPaths.Contains(entry.Path))
+            {
+                return true;
+            }
+
             try
             {
                 if (!GuestTransfers.TryGetValue(entry.Path, out GuestTransfer transfer))
                 {
-                    if (message.Offset != 0)
-                    {
-                        error = "A synchronized file started at an invalid offset.";
-                        FailGuestSync(error);
-                        return false;
-                    }
-
                     string tempPath = Path.Combine(
                         _guestTempRoot,
                         Guid.NewGuid().ToString("N") + ".tmp");
@@ -1416,21 +1425,21 @@ namespace Glasspage.UnitySync
                     GuestTransfers.Add(entry.Path, transfer);
                 }
 
-                if (message.Offset != transfer.Received ||
-                    transfer.Received + message.Data.Length > entry.Length)
+                if (transfer.ReceivedOffsets.Contains(message.Offset))
                 {
-                    error = "A synchronized file chunk arrived out of order.";
-                    FailGuestSync(error);
-                    return false;
+                    return true;
                 }
 
                 if (message.Data.Length > 0)
                 {
+                    transfer.Stream.Position = message.Offset;
                     transfer.Stream.Write(message.Data, 0, message.Data.Length);
                     transfer.Received += message.Data.Length;
                     _guestDownloadBytesReceived += message.Data.Length;
                     _guestStageDownloadBytesReceived += message.Data.Length;
                 }
+
+                transfer.ReceivedOffsets.Add(message.Offset);
 
                 if (transfer.Received != entry.Length)
                 {
@@ -1480,6 +1489,7 @@ namespace Glasspage.UnitySync
                 File.Copy(transfer.TempPath, targetPath, true);
                 File.Delete(transfer.TempPath);
                 GuestTransfers.Remove(entry.Path);
+                GuestCompletedPaths.Add(entry.Path);
                 _guestCompletedFiles++;
 
                 if (_guestCompletedFiles == GuestActiveMismatches.Count)
