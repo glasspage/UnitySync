@@ -791,6 +791,21 @@ namespace Glasspage.UnitySync
                     }
                 }
             }
+            catch (EndOfStreamException)
+            {
+                if (_running && authenticated && !peer.Superseded)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        peer.DisplayName + " disconnected.");
+                }
+                else if (_running && !authenticated)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        "Collaborator connection closed during the handshake.");
+                }
+            }
             catch (Exception exception) when (
                 exception is IOException ||
                 exception is SocketException ||

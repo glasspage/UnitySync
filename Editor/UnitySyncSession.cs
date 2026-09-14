@@ -84,7 +84,7 @@ namespace Glasspage.UnitySync
             LocalPlayerId = LoadOrCreatePlayerId();
             EditorApplication.update += Update;
             EditorApplication.quitting += Shutdown;
-            AssemblyReloadEvents.beforeAssemblyReload += Shutdown;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.delayCall += ScheduleFileSyncResume;
         }
@@ -454,7 +454,7 @@ namespace Glasspage.UnitySync
                             _fileSyncResumeConnectionPending = false;
                             ClearFileSyncReloadReconnect();
                             EditorApplication.update -= TryResumeAfterFileSyncReload;
-                            AddLog("Resumed UnitySync after synchronized files reloaded.");
+                            AddLog("Resumed UnitySync after Unity reloaded scripts.");
                         }
 
                         AddLog("Checking package versions before Assets and scene synchronization.");
@@ -994,6 +994,15 @@ namespace Glasspage.UnitySync
             StopInternal(false);
         }
 
+        private static void BeforeAssemblyReload()
+        {
+            // Installing or changing a package reloads Unity's editor assemblies. Preserve
+            // guest connection details before the transport is disposed so the new domain
+            // can reconnect and run the package comparison again automatically.
+            PrepareFileSyncReloadReconnect();
+            StopInternal(false);
+        }
+
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
             if (state == PlayModeStateChange.ExitingEditMode)
@@ -1063,7 +1072,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after synchronized files reloaded.");
+                AddLog("Could not resume UnitySync after Unity reloaded scripts.");
                 Changed?.Invoke();
                 return;
             }
@@ -1100,7 +1109,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after synchronized files reloaded: " + error);
+                AddLog("Could not resume UnitySync after Unity reloaded scripts: " + error);
                 Changed?.Invoke();
                 return;
             }
