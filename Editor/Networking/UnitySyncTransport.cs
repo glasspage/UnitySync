@@ -7,12 +7,14 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using UnityEngine;
 
 namespace Glasspage.UnitySync
 {
     internal enum UnitySyncTransportEventKind
     {
         Connected,
+        PeerJoined,
         Disconnected,
         Viewport,
         Selection,
@@ -36,6 +38,8 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly Guid PlayerId;
+        internal readonly string DisplayName;
+        internal readonly Color Color;
         internal readonly string Message;
         internal readonly double ReceivedAtSeconds;
 
@@ -49,7 +53,9 @@ namespace Glasspage.UnitySync
             UnitySyncSelectionState selection = default,
             UnitySyncMessageType messageType = default(UnitySyncMessageType),
             UnitySyncFileSyncMessage fileSync = null,
-            double receivedAtSeconds = 0d)
+            double receivedAtSeconds = 0d,
+            string displayName = "",
+            Color color = default)
         {
             Kind = kind;
             Viewport = viewport;
@@ -59,6 +65,8 @@ namespace Glasspage.UnitySync
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
             PlayerId = playerId;
+            DisplayName = displayName;
+            Color = color;
             Message = message;
             ReceivedAtSeconds = receivedAtSeconds;
         }
@@ -79,6 +87,7 @@ namespace Glasspage.UnitySync
             internal NetworkStream Stream;
             internal Guid PlayerId;
             internal string DisplayName;
+            internal Color Color;
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
             internal bool Superseded;
@@ -114,6 +123,7 @@ namespace Glasspage.UnitySync
 
         private readonly Guid _localPlayerId;
         private readonly string _localDisplayName;
+        private readonly Color _localColor;
         private readonly UnitySyncCrypto _crypto;
         private readonly object _cryptoLock = new object();
         private readonly object _peersLock = new object();
@@ -133,10 +143,15 @@ namespace Glasspage.UnitySync
         private byte[] _pendingLocalViewport;
         private byte[] _pendingLocalSelection;
 
-        internal UnitySyncTransport(Guid localPlayerId, string localDisplayName, byte[] secret)
+        internal UnitySyncTransport(
+            Guid localPlayerId,
+            string localDisplayName,
+            Color localColor,
+            byte[] secret)
         {
             _localPlayerId = localPlayerId;
             _localDisplayName = NormalizeDisplayName(localDisplayName);
+            _localColor = localColor;
             _crypto = new UnitySyncCrypto(secret);
         }
 
@@ -651,7 +666,9 @@ namespace Glasspage.UnitySync
                 peer.Client.ReceiveTimeout = 10000;
 
                 UnitySyncMessage hello = ReadMessage(peer);
-                if (hello.Type != UnitySyncMessageType.Hello || hello.PlayerId == Guid.Empty)
+                if (hello.Type != UnitySyncMessageType.Hello ||
+                    hello.PlayerId == Guid.Empty ||
+                    !IsValidColor(hello.Color))
                 {
                     throw new InvalidDataException("The collaborator did not send a valid hello message.");
                 }
@@ -675,12 +692,46 @@ namespace Glasspage.UnitySync
 
                     peer.PlayerId = hello.PlayerId;
                     peer.DisplayName = NormalizeDisplayName(hello.DisplayName);
+                    peer.Color = hello.Color;
                 }
 
                 supersededPeer?.Close();
                 peer.Client.ReceiveTimeout = 0;
-                Send(peer, UnitySyncProtocol.CreateWelcome(_localPlayerId, _localDisplayName));
+                Send(
+                    peer,
+                    UnitySyncProtocol.CreateWelcome(
+                        _localPlayerId,
+                        _localDisplayName,
+                        _localColor));
+
+                Peer[] existingPeers;
+                lock (_peersLock)
+                {
+                    existingPeers = _peers.FindAll(
+                        other =>
+                            other != peer &&
+                            other.PlayerId != Guid.Empty &&
+                            !other.Superseded).ToArray();
+                }
+
+                foreach (Peer existingPeer in existingPeers)
+                {
+                    Send(
+                        peer,
+                        UnitySyncProtocol.CreatePeerJoined(
+                            existingPeer.PlayerId,
+                            existingPeer.DisplayName,
+                            existingPeer.Color));
+                }
+
+                Broadcast(
+                    UnitySyncProtocol.CreatePeerJoined(
+                        peer.PlayerId,
+                        peer.DisplayName,
+                        peer.Color),
+                    peer);
                 authenticated = true;
+                EnqueuePeerJoined(peer.PlayerId, peer.DisplayName, peer.Color);
                 Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " joined the session.");
 
                 while (_running)
@@ -700,9 +751,14 @@ namespace Glasspage.UnitySync
                                 throw new InvalidDataException("A collaborator sent an invalid viewport.");
                             }
 
+                            peer.Color = viewport.Color;
                             EnqueueViewport(viewport);
                             Broadcast(UnitySyncProtocol.CreateViewport(viewport), peer);
                             break;
+
+                        case UnitySyncMessageType.PeerJoined:
+                            throw new InvalidDataException(
+                                "A collaborator sent a host-only participant update.");
 
                         case UnitySyncMessageType.Selection:
                             if (!IsValid(message.Selection))
@@ -895,7 +951,12 @@ namespace Glasspage.UnitySync
 
                 client.Connect(address, port);
                 server.Stream = client.GetStream();
-                Send(server, UnitySyncProtocol.CreateHello(_localPlayerId, _localDisplayName));
+                Send(
+                    server,
+                    UnitySyncProtocol.CreateHello(
+                        _localPlayerId,
+                        _localDisplayName,
+                        _localColor));
 
                 UnitySyncMessage welcome;
                 try
@@ -910,15 +971,22 @@ namespace Glasspage.UnitySync
                         exception);
                 }
 
-                if (welcome.Type != UnitySyncMessageType.Welcome || welcome.PlayerId == Guid.Empty)
+                if (welcome.Type != UnitySyncMessageType.Welcome ||
+                    welcome.PlayerId == Guid.Empty ||
+                    !IsValidColor(welcome.Color))
                 {
                     throw new InvalidDataException("The host did not complete the UnitySync handshake.");
                 }
 
                 server.PlayerId = welcome.PlayerId;
                 server.DisplayName = NormalizeDisplayName(welcome.DisplayName);
+                server.Color = welcome.Color;
                 _clientReady = true;
-                Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName +
+                EnqueueConnected(
+                    server.PlayerId,
+                    server.DisplayName,
+                    server.Color,
+                    "Connected to " + server.DisplayName +
                     ". Local protocol " + UnitySyncProtocol.Version + " (packet diagnostics 2).");
 
                 while (_running)
@@ -984,6 +1052,21 @@ namespace Glasspage.UnitySync
                         case UnitySyncMessageType.FileRequest:
                             throw new InvalidDataException(
                                 "The host sent a guest-only file sync message.");
+
+                        case UnitySyncMessageType.PeerJoined:
+                            if (message.PlayerId == Guid.Empty ||
+                                message.PlayerId == _localPlayerId ||
+                                !IsValidColor(message.Color))
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid participant update.");
+                            }
+
+                            EnqueuePeerJoined(
+                                message.PlayerId,
+                                NormalizeDisplayName(message.DisplayName),
+                                message.Color);
+                            break;
 
                         case UnitySyncMessageType.PeerLeft:
                             EnqueuePeerLeft(message.PlayerId);
@@ -1300,6 +1383,14 @@ namespace Glasspage.UnitySync
             return IsFinite(value) && value >= 0f && value <= 1f;
         }
 
+        private static bool IsValidColor(Color color)
+        {
+            return IsValidColorComponent(color.r) &&
+                   IsValidColorComponent(color.g) &&
+                   IsValidColorComponent(color.b) &&
+                   IsValidColorComponent(color.a);
+        }
+
         private static double GetMonotonicSeconds()
         {
             return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
@@ -1310,6 +1401,40 @@ namespace Glasspage.UnitySync
             lock (_eventsLock)
             {
                 _events.Enqueue(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
+            }
+        }
+
+        private void EnqueueConnected(
+            Guid playerId,
+            string displayName,
+            Color color,
+            string message)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.Connected,
+                    default,
+                    null,
+                    playerId,
+                    message,
+                    displayName: displayName,
+                    color: color));
+            }
+        }
+
+        private void EnqueuePeerJoined(Guid playerId, string displayName, Color color)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.PeerJoined,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    displayName: displayName,
+                    color: color));
             }
         }
 
