@@ -335,9 +335,25 @@ namespace Glasspage.UnitySync
                         return false;
                     }
 
-                    openedActiveScene = EditorSceneManager.OpenScene(
+                    EditorSceneManager.OpenScene(
                         activeScene.ScenePath,
                         OpenSceneMode.Single);
+
+                    // OpenScene(Single) activates the scene as part of the open operation.
+                    // Scene-open callbacks (including SDK import/setup callbacks) may also
+                    // replace the Scene handle returned by OpenScene. Resolve the newly
+                    // imported scene again from its synchronized project path instead of
+                    // retaining a potentially stale handle.
+                    if (!TryResolveScene(
+                            activeScene.ScenePath,
+                            activeScene.SceneName,
+                            activeScene.SceneIndex,
+                            out openedActiveScene))
+                    {
+                        error = "Unity opened the host scene but could not resolve its loaded scene: " +
+                                activeScene.ScenePath + ".";
+                        return false;
+                    }
                 }
                 else if (!TryResolveScene(
                              activeScene.ScenePath,
@@ -382,12 +398,15 @@ namespace Glasspage.UnitySync
                         OpenSceneMode.Additive);
                 }
 
-                if (!openedActiveScene.IsValid() ||
-                    !openedActiveScene.isLoaded ||
-                    !SceneManager.SetActiveScene(openedActiveScene))
+                // Opening a scene in Single mode normally makes it active already. Unity can
+                // return false when asked to activate that same scene again, which must not be
+                // treated as an activation failure.
+                if (!IsEnvironmentSceneCandidate(openedActiveScene) ||
+                    (!IsSceneCurrentlyActive(openedActiveScene) &&
+                     !SceneManager.SetActiveScene(openedActiveScene)))
                 {
                     error = "Unity could not activate the host scene " +
-                            (activeScene.SceneName ?? activeScene.ScenePath) + ".";
+                            GetSceneDescriptorLabel(activeScene) + ".";
                     return false;
                 }
 
