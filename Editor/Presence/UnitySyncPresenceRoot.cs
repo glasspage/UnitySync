@@ -287,7 +287,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double now = GetMonotonicSeconds();
+            double now = EditorApplication.timeSinceStartup;
             TimedStatusEvents.Add(new TimedStatusEvent
             {
                 Text = text,
@@ -533,8 +533,8 @@ namespace Glasspage.UnitySync
 
         private static void UpdateInterpolatedTransforms()
         {
-            double now = GetMonotonicSeconds();
-            bool changed = PruneExpiredTimedStatuses(now);
+            double interpolationNow = GetMonotonicSeconds();
+            bool changed = PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
             bool needsContinuousUpdate = false;
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
@@ -551,8 +551,8 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                changed |= marker.Interpolate(now);
-                needsContinuousUpdate |= marker.HasPendingInterpolation(now);
+                changed |= marker.Interpolate(interpolationNow);
+                needsContinuousUpdate |= marker.HasPendingInterpolation(interpolationNow);
             }
 
             if (staleIds != null)
@@ -779,8 +779,7 @@ namespace Glasspage.UnitySync
             SceneView sceneView,
             float opacity)
         {
-            double now = GetMonotonicSeconds();
-            PruneExpiredTimedStatuses(now);
+            PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
 
             List<StatusDisplay> statuses = new List<StatusDisplay>(
                 TimedStatusEvents.Count + 4);
