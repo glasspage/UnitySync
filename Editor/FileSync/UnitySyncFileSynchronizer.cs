@@ -154,8 +154,8 @@ namespace Glasspage.UnitySync
         private const string ExcludedFolderName = "SerializedUdonPrograms";
         private const int CompareFilesPerUpdate = 12;
         private const int ManifestMessagesPerUpdate = 64;
-        private const int FileRequestsPerUpdate = 32;
-        private const int FileChunksPerUpdate = 4;
+        private const int FileRequestsPerUpdate = 512;
+        private const long MaximumQueuedFileTransferBytes = 64L * 1024L * 1024L;
         private const double ImportSettleSeconds = 1.0d;
 
         private static readonly Dictionary<Guid, HostManifest> HostManifests =
@@ -168,8 +168,6 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly List<HostManifestBuild> HostManifestBuilds =
             new List<HostManifestBuild>();
-        private static readonly SemaphoreSlim HostManifestDiskGate =
-            new SemaphoreSlim(1, 1);
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
@@ -814,8 +812,12 @@ namespace Glasspage.UnitySync
             UnitySyncTransport transport,
             Guid localPlayerId)
         {
-            int budget = FileChunksPerUpdate;
-            while (budget > 0 && HostTransfers.Count > 0)
+            // Initial asset transfer is throughput-oriented. Keep the transport's outbound
+            // worker fed from disk until a bounded network backlog is full, then let TCP
+            // backpressure decide the pace. This avoids artificial per-frame HDD-era limits
+            // while still preventing an entire project from being buffered in memory.
+            while (HostTransfers.Count > 0 &&
+                   transport.PendingOutboundBytes < MaximumQueuedFileTransferBytes)
             {
                 HostTransfer transfer = HostTransfers.Peek();
                 try
@@ -845,13 +847,14 @@ namespace Glasspage.UnitySync
                         }
 
                         // The manifest already contains a SHA-256 for this file. Avoid hashing it
-                        // a second time on Unity's main thread before transfer; the guest performs
-                        // a final SHA-256 check against the manifest before installing the file.
+                        // a second time before transfer; the guest verifies against the manifest.
                         transfer.Stream = new FileStream(
                             fullPath,
                             FileMode.Open,
                             FileAccess.Read,
-                            FileShare.ReadWrite | FileShare.Delete);
+                            FileShare.ReadWrite | FileShare.Delete,
+                            1024 * 1024,
+                            FileOptions.SequentialScan);
                     }
 
                     if (transfer.Entry.Length == 0 && !transfer.EmptyChunkSent)
@@ -870,7 +873,6 @@ namespace Glasspage.UnitySync
                             transfer.TargetPlayerId);
                         transfer.EmptyChunkSent = true;
                         CompleteHostTransfer();
-                        budget--;
                         continue;
                     }
 
@@ -913,8 +915,6 @@ namespace Glasspage.UnitySync
                     {
                         CompleteHostTransfer();
                     }
-
-                    budget--;
                 }
                 catch (Exception exception) when (
                     exception is IOException ||
@@ -2562,11 +2562,8 @@ namespace Glasspage.UnitySync
             string projectRoot,
             CancellationToken cancellationToken)
         {
-            bool gateHeld = false;
             try
             {
-                HostManifestDiskGate.Wait(cancellationToken);
-                gateHeld = true;
                 cancellationToken.ThrowIfCancellationRequested();
 
                 List<string> files = new List<string>();
@@ -2655,13 +2652,6 @@ namespace Glasspage.UnitySync
                 {
                     Error = exception.Message
                 };
-            }
-            finally
-            {
-                if (gateHeld)
-                {
-                    HostManifestDiskGate.Release();
-                }
             }
         }
 
