@@ -4,6 +4,7 @@
 
 - Show connected collaborators in the list during initial file reconciliation instead of waiting for Assets synchronization to finish.
 - Show host-side Scene view status for each guest actively receiving synchronized files, using the collaborator's color and guest-reported receive percentage.
+- Use a shared bottom-right Scene view status stack ordered by priority and then time; collaborator connect/disconnect events are high priority and remain visible for 8 seconds.
 - Bump the UnitySync wire protocol to version 17 for guest download progress reporting. Both editors must use this build.
 - Replace automatic package syncing with a registered-package version checklist showing missing packages, version differences, and guest-only packages.
 - Add manual install/change/remove guidance, Copy checklist, and Recheck packages before Assets and scene synchronization.
