@@ -30,7 +30,8 @@ namespace Glasspage.UnitySync
         PackageVersionEntry = 21,
         RestoreProjectRequest = 22,
         RestoreProjectAccepted = 23,
-        RestoreProjectDeclined = 24
+        RestoreProjectDeclined = 24,
+        FileDownloadProgress = 25
     }
 
     internal enum UnitySyncFileSyncScope : byte
@@ -147,7 +148,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 16;
+        internal const int Version = 17;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -358,6 +359,32 @@ namespace Glasspage.UnitySync
                 WriteGuid(writer, playerId);
                 WriteGuid(writer, syncId);
                 WriteFilePath(writer, path);
+            });
+        }
+
+        internal static byte[] CreateFileDownloadProgress(
+            Guid playerId,
+            UnitySyncFileSyncMessage state)
+        {
+            ValidateFileSyncState(state, false);
+            if ((state.Scope != UnitySyncFileSyncScope.Packages &&
+                 state.Scope != UnitySyncFileSyncScope.Assets &&
+                 state.Scope != UnitySyncFileSyncScope.Project) ||
+                state.Offset < 0 ||
+                state.TotalBytes <= 0 ||
+                state.Offset > state.TotalBytes)
+            {
+                throw new InvalidDataException("Invalid file download progress.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.FileDownloadProgress);
+                WriteGuid(writer, playerId);
+                WriteGuid(writer, state.SyncId);
+                writer.Write((byte)state.Scope);
+                writer.Write(state.Offset);
+                writer.Write(state.TotalBytes);
             });
         }
 
@@ -797,6 +824,38 @@ namespace Glasspage.UnitySync
                                 null,
                                 default,
                                 fileRequest);
+                            break;
+
+                        case UnitySyncMessageType.FileDownloadProgress:
+                            playerId = ReadGuid(reader);
+                            UnitySyncFileSyncMessage downloadProgress =
+                                new UnitySyncFileSyncMessage
+                                {
+                                    SyncId = ReadGuid(reader),
+                                    Scope = (UnitySyncFileSyncScope)reader.ReadByte(),
+                                    Offset = reader.ReadInt64(),
+                                    TotalBytes = reader.ReadInt64()
+                                };
+                            if (downloadProgress.SyncId == Guid.Empty ||
+                                (downloadProgress.Scope != UnitySyncFileSyncScope.Packages &&
+                                 downloadProgress.Scope != UnitySyncFileSyncScope.Assets &&
+                                 downloadProgress.Scope != UnitySyncFileSyncScope.Project) ||
+                                downloadProgress.Offset < 0 ||
+                                downloadProgress.TotalBytes <= 0 ||
+                                downloadProgress.Offset > downloadProgress.TotalBytes)
+                            {
+                                throw new InvalidDataException("Invalid file download progress.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                downloadProgress);
                             break;
 
                         case UnitySyncMessageType.FileChunk:
