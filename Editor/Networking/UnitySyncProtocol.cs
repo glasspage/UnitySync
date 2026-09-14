@@ -30,7 +30,8 @@ namespace Glasspage.UnitySync
         PackageVersionEntry = 21,
         RestoreProjectRequest = 22,
         RestoreProjectAccepted = 23,
-        RestoreProjectDeclined = 24
+        RestoreProjectDeclined = 24,
+        PeerJoined = 25
     }
 
     internal enum UnitySyncFileSyncScope : byte
@@ -118,6 +119,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncMessageType Type;
         internal readonly Guid PlayerId;
         internal readonly string DisplayName;
+        internal readonly Color Color;
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSceneObjectChange SceneChange;
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
@@ -132,11 +134,13 @@ namespace Glasspage.UnitySync
             UnitySyncSceneObjectChange sceneChange = null,
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
             UnitySyncSelectionState selection = default,
-            UnitySyncFileSyncMessage fileSync = null)
+            UnitySyncFileSyncMessage fileSync = null,
+            Color color = default)
         {
             Type = type;
             PlayerId = playerId;
             DisplayName = displayName;
+            Color = color;
             Viewport = viewport;
             SceneChange = sceneChange;
             SceneSnapshot = sceneSnapshot;
@@ -147,7 +151,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 16;
+        internal const int Version = 17;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -161,23 +165,36 @@ namespace Glasspage.UnitySync
         private const int MaximumFilePathBytes = 4096;
         internal const int MaximumFileChunkBytes = 4 * 1024 * 1024;
 
-        internal static byte[] CreateHello(Guid playerId, string displayName)
+        internal static byte[] CreateHello(Guid playerId, string displayName, Color color)
         {
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.Hello);
                 WriteGuid(writer, playerId);
                 WriteString(writer, displayName);
+                WriteColor(writer, color);
             });
         }
 
-        internal static byte[] CreateWelcome(Guid playerId, string displayName)
+        internal static byte[] CreateWelcome(Guid playerId, string displayName, Color color)
         {
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.Welcome);
                 WriteGuid(writer, playerId);
                 WriteString(writer, displayName);
+                WriteColor(writer, color);
+            });
+        }
+
+        internal static byte[] CreatePeerJoined(Guid playerId, string displayName, Color color)
+        {
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.PeerJoined);
+                WriteGuid(writer, playerId);
+                WriteString(writer, displayName);
+                WriteColor(writer, color);
             });
         }
 
@@ -588,9 +605,16 @@ namespace Glasspage.UnitySync
                     {
                         case UnitySyncMessageType.Hello:
                         case UnitySyncMessageType.Welcome:
+                        case UnitySyncMessageType.PeerJoined:
                             playerId = ReadGuid(reader);
                             displayName = ReadString(reader);
-                            message = new UnitySyncMessage(type, playerId, displayName, default);
+                            Color participantColor = ReadColor(reader);
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                displayName,
+                                default,
+                                color: participantColor);
                             break;
 
                         case UnitySyncMessageType.Viewport:
