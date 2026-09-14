@@ -155,7 +155,9 @@ namespace Glasspage.UnitySync
         private const int CompareFilesPerUpdate = 12;
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 32;
-        private const int FileChunksPerUpdate = 4;
+        private const int MaximumFileChunksPerUpdate = 64;
+        private const long FileTransferBytesPerUpdate = 2L * 1024L * 1024L;
+        private const double FileTransferTimeBudgetSeconds = 0.004d;
         private const double ImportSettleSeconds = 1.0d;
 
         private static readonly Dictionary<Guid, HostManifest> HostManifests =
@@ -814,9 +816,24 @@ namespace Glasspage.UnitySync
             UnitySyncTransport transport,
             Guid localPlayerId)
         {
-            int budget = FileChunksPerUpdate;
-            while (budget > 0 && HostTransfers.Count > 0)
+            int chunksSent = 0;
+            long bytesQueued = 0;
+            long transferStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (HostTransfers.Count > 0 &&
+                   chunksSent < MaximumFileChunksPerUpdate)
             {
+                if (chunksSent > 0)
+                {
+                    double elapsedSeconds =
+                        (System.Diagnostics.Stopwatch.GetTimestamp() - transferStart) /
+                        (double)System.Diagnostics.Stopwatch.Frequency;
+                    if (elapsedSeconds >= FileTransferTimeBudgetSeconds ||
+                        bytesQueued >= FileTransferBytesPerUpdate)
+                    {
+                        break;
+                    }
+                }
+
                 HostTransfer transfer = HostTransfers.Peek();
                 try
                 {
@@ -870,12 +887,16 @@ namespace Glasspage.UnitySync
                             transfer.TargetPlayerId);
                         transfer.EmptyChunkSent = true;
                         CompleteHostTransfer();
-                        budget--;
+                        chunksSent++;
                         continue;
                     }
 
+                    long remainingByteBudget =
+                        Math.Max(1L, FileTransferBytesPerUpdate - bytesQueued);
                     int readSize = (int)Math.Min(
-                        UnitySyncProtocol.MaximumFileChunkBytes,
+                        Math.Min(
+                            UnitySyncProtocol.MaximumFileChunkBytes,
+                            remainingByteBudget),
                         transfer.Entry.Length - transfer.Offset);
                     byte[] buffer = new byte[readSize];
                     int read = transfer.Stream.Read(buffer, 0, readSize);
@@ -914,7 +935,8 @@ namespace Glasspage.UnitySync
                         CompleteHostTransfer();
                     }
 
-                    budget--;
+                    chunksSent++;
+                    bytesQueued += read;
                 }
                 catch (Exception exception) when (
                     exception is IOException ||
