@@ -2681,7 +2681,6 @@ namespace Glasspage.UnitySync
         }
 
         private static int GetPackageManifestSortGroup(string path)
-        private static int GetPackageManifestSortGroup(string path)
         {
             if (string.Equals(path, "Packages/manifest.json", StringComparison.Ordinal))
             {
@@ -2791,7 +2790,6 @@ namespace Glasspage.UnitySync
         }
 
         private static bool IsAssetPath(string path)
-        private static bool IsAssetPath(string path)
         {
             return !string.IsNullOrEmpty(path) &&
                    path.Replace('\\', '/').StartsWith("Assets/", StringComparison.Ordinal);
@@ -2872,7 +2870,6 @@ namespace Glasspage.UnitySync
             return true;
         }
 
-        private static string GetProjectRoot()
         private static string GetProjectRoot()
         {
             DirectoryInfo parent = Directory.GetParent(Application.dataPath);
