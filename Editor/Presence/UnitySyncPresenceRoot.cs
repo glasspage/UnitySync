@@ -187,6 +187,9 @@ namespace Glasspage.UnitySync
         private const float SpectateStatusLeftMargin = 12f;
         private const float SpectateStatusBottomMargin = 12f;
         private const float SpectateStatusSpacing = 4f;
+        private const float TransferStatusRightMargin = 12f;
+        private const float TransferStatusBottomMargin = 12f;
+        private const float TransferStatusSpacing = 4f;
         private const int DiscSegmentCount = 48;
 
         private static readonly Guid DebugMarkerId = new Guid("f47f5129-96d0-40ac-a62c-6db83ea543fa");
@@ -609,6 +612,7 @@ namespace Glasspage.UnitySync
                 localPlayerId,
                 spectatingPlayerId,
                 opacity);
+            DrawFileTransferStatuses(sceneView, opacity);
         }
 
         private static void DrawDisplayName(
@@ -690,6 +694,80 @@ namespace Glasspage.UnitySync
             }
 
             Handles.EndGUI();
+        }
+
+        private static void DrawFileTransferStatuses(
+            SceneView sceneView,
+            float opacity)
+        {
+            UnitySyncHostDownloadProgress[] progress =
+                UnitySyncFileSynchronizer.GetHostDownloadProgresses();
+            if (progress.Length == 0)
+            {
+                return;
+            }
+
+            EnsureLabelStyles();
+            int statusIndex = 0;
+            Handles.BeginGUI();
+
+            foreach (UnitySyncHostDownloadProgress item in progress)
+            {
+                if (!Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
+                    marker.GameObject == null ||
+                    marker.IsDebug)
+                {
+                    continue;
+                }
+
+                string noun;
+                switch (item.Scope)
+                {
+                    case UnitySyncFileSyncScope.Packages:
+                        noun = "packages";
+                        break;
+                    case UnitySyncFileSyncScope.Project:
+                        noun = "project files";
+                        break;
+                    default:
+                        noun = "assets";
+                        break;
+                }
+
+                int percent = Mathf.Clamp(
+                    Mathf.RoundToInt(item.Progress01 * 100f),
+                    0,
+                    100);
+                DrawFileTransferStatus(
+                    sceneView,
+                    marker.DisplayName + " is receiving " + noun + " (" + percent + "%)...",
+                    marker.Color,
+                    opacity,
+                    statusIndex++);
+            }
+
+            Handles.EndGUI();
+        }
+
+        private static void DrawFileTransferStatus(
+            SceneView sceneView,
+            string text,
+            Color color,
+            float opacity,
+            int index)
+        {
+            GUIContent content = new GUIContent(text);
+            Vector2 labelSize = _labelStyle.CalcSize(content);
+            float y = sceneView.position.height -
+                      TransferStatusBottomMargin -
+                      labelSize.y -
+                      index * (labelSize.y + TransferStatusSpacing);
+            Rect labelRect = new Rect(
+                sceneView.position.width - TransferStatusRightMargin - labelSize.x,
+                y,
+                labelSize.x,
+                labelSize.y);
+            DrawOutlinedGuiLabel(labelRect, content, color, opacity);
         }
 
         private static void DrawSpectatingStatus(
