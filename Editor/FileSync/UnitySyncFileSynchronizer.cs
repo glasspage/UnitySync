@@ -280,6 +280,7 @@ namespace Glasspage.UnitySync
         private static long _guestDownloadBytesReceived;
         private static long _guestStageDownloadTotalBytes;
         private static long _guestStageDownloadBytesReceived;
+        private static int _guestLastReportedDownloadPercent = -1;
         private static GuestDownloadKind _guestDownloadKind;
         private static bool _guestAutoContinue;
         private static string _guestTempRoot = string.Empty;
@@ -1432,14 +1433,7 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
-            if (_guestStageDownloadTotalBytes > 0)
-            {
-                transport.SendFileDownloadProgress(
-                    _guestSyncId,
-                    _guestRequestedScope,
-                    0,
-                    _guestStageDownloadTotalBytes);
-            }
+            ReportGuestDownloadProgress(transport, true);
 
             UpdateGuestRequests(transport);
             UpdateGuestDownloadProgress();
@@ -1489,6 +1483,7 @@ namespace Glasspage.UnitySync
             _guestCompletedFiles = 0;
             _guestStageDownloadBytesReceived = 0;
             _guestStageDownloadTotalBytes = 0;
+            _guestLastReportedDownloadPercent = -1;
             foreach (FileEntry entry in GuestActiveMismatches)
             {
                 _guestStageDownloadTotalBytes += entry.Length;
@@ -1575,14 +1570,7 @@ namespace Glasspage.UnitySync
                     transfer.Received += message.Data.Length;
                     _guestDownloadBytesReceived += message.Data.Length;
                     _guestStageDownloadBytesReceived += message.Data.Length;
-                    if (_guestStageDownloadTotalBytes > 0)
-                    {
-                        transport.SendFileDownloadProgress(
-                            _guestSyncId,
-                            _guestRequestedScope,
-                            _guestStageDownloadBytesReceived,
-                            _guestStageDownloadTotalBytes);
-                    }
+                    ReportGuestDownloadProgress(transport, false);
                 }
 
                 if (transfer.Received != entry.Length)
@@ -1769,6 +1757,38 @@ namespace Glasspage.UnitySync
             _guestStageDownloadBytesReceived = 0;
 
             BeginGuestAssetImport();
+        }
+
+        private static void ReportGuestDownloadProgress(
+            UnitySyncTransport transport,
+            bool force)
+        {
+            if (transport == null || _guestStageDownloadTotalBytes <= 0)
+            {
+                return;
+            }
+
+            int percent = Mathf.Clamp(
+                Mathf.RoundToInt(
+                    100f * (float)((double)_guestStageDownloadBytesReceived /
+                                   _guestStageDownloadTotalBytes)),
+                0,
+                100);
+            bool completed =
+                _guestStageDownloadBytesReceived >= _guestStageDownloadTotalBytes;
+            if (!force &&
+                !completed &&
+                percent == _guestLastReportedDownloadPercent)
+            {
+                return;
+            }
+
+            transport.SendFileDownloadProgress(
+                _guestSyncId,
+                _guestRequestedScope,
+                _guestStageDownloadBytesReceived,
+                _guestStageDownloadTotalBytes);
+            _guestLastReportedDownloadPercent = percent;
         }
 
         private static void UpdateGuestDownloadProgress()
