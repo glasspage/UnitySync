@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEngine;
@@ -133,6 +135,21 @@ namespace Glasspage.UnitySync
             internal long Received;
         }
 
+        private sealed class HostManifestBuild
+        {
+            internal Guid TargetPlayerId;
+            internal Guid SyncId;
+            internal UnitySyncFileSyncScope Scope;
+            internal Task<HostManifestBuildResult> Task;
+        }
+
+        private sealed class HostManifestBuildResult
+        {
+            internal List<FileEntry> Entries;
+            internal long TotalBytes;
+            internal string Error = string.Empty;
+        }
+
         private const string ExcludedFolderName = "SerializedUdonPrograms";
         private const int CompareFilesPerUpdate = 12;
         private const int ManifestMessagesPerUpdate = 64;
@@ -148,6 +165,8 @@ namespace Glasspage.UnitySync
             new Queue<HostTransfer>();
         private static readonly HashSet<string> HostTransferKeys =
             new HashSet<string>(StringComparer.Ordinal);
+        private static readonly List<HostManifestBuild> HostManifestBuilds =
+            new List<HostManifestBuild>();
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
@@ -291,6 +310,7 @@ namespace Glasspage.UnitySync
             HostTransferKeys.Clear();
             HostManifestSends.Clear();
             HostManifests.Clear();
+            HostManifestBuilds.Clear();
 
             ResetGuestState();
             _guestReadyForSceneSnapshot = false;
@@ -317,6 +337,14 @@ namespace Glasspage.UnitySync
             foreach (Guid manifestId in manifestIds)
             {
                 HostManifests.Remove(manifestId);
+            }
+
+            for (int index = HostManifestBuilds.Count - 1; index >= 0; index--)
+            {
+                if (HostManifestBuilds[index].TargetPlayerId == playerId)
+                {
+                    HostManifestBuilds.RemoveAt(index);
+                }
             }
 
             if (manifestIds.Count == 0)
@@ -427,6 +455,7 @@ namespace Glasspage.UnitySync
 
         internal static void Update(UnitySyncTransport transport, Guid localPlayerId)
         {
+            UpdateHostManifestBuilds(transport, localPlayerId);
             UpdateHostManifestSends(transport, localPlayerId);
             UpdateHostTransfers(transport, localPlayerId);
 
@@ -495,44 +524,130 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            try
+            Guid syncId = Guid.NewGuid();
+            if (request.Scope == UnitySyncFileSyncScope.Packages)
             {
-                List<FileEntry> entries =
-                    BuildLocalManifest(request.Scope, out long totalBytes);
-                Guid syncId = Guid.NewGuid();
-                Dictionary<string, FileEntry> entriesByPath =
-                    new Dictionary<string, FileEntry>(StringComparer.Ordinal);
-                foreach (FileEntry entry in entries)
+                try
                 {
-                    entriesByPath[entry.Path] = entry;
+                    List<FileEntry> entries = BuildPackageManifest(out long totalBytes);
+                    RegisterHostManifest(
+                        targetPlayerId,
+                        syncId,
+                        request.Scope,
+                        entries,
+                        totalBytes);
+                }
+                catch (Exception exception) when (
+                    exception is IOException ||
+                    exception is UnauthorizedAccessException ||
+                    exception is CryptographicException)
+                {
+                    transport.SendFileSyncAbort(
+                        localPlayerId,
+                        syncId,
+                        "The host could not build its " + request.Scope +
+                        " manifest: " + exception.Message,
+                        targetPlayerId);
+                    error = "File sync could not build the host project manifest: " + exception.Message;
+                }
+                return;
+            }
+
+            string projectRoot = GetProjectRoot();
+            UnitySyncFileSyncScope scope = request.Scope;
+            HostManifestBuild build = new HostManifestBuild
+            {
+                TargetPlayerId = targetPlayerId,
+                SyncId = syncId,
+                Scope = scope
+            };
+            build.Task = System.Threading.Tasks.Task.Run(
+                () => BuildLocalFileManifest(scope, projectRoot));
+            HostManifestBuilds.Add(build);
+            transport.LogLocal(
+                "Building host " + scope + " manifest in the background...");
+        }
+
+        private static void UpdateHostManifestBuilds(
+            UnitySyncTransport transport,
+            Guid localPlayerId)
+        {
+            for (int index = HostManifestBuilds.Count - 1; index >= 0; index--)
+            {
+                HostManifestBuild build = HostManifestBuilds[index];
+                if (build.Task == null || !build.Task.IsCompleted)
+                {
+                    continue;
                 }
 
-                HostManifest manifest = new HostManifest
+                HostManifestBuilds.RemoveAt(index);
+                HostManifestBuildResult result;
+                try
                 {
-                    TargetPlayerId = targetPlayerId,
-                    SyncId = syncId,
-                    Scope = request.Scope,
-                    Entries = entries,
-                    EntriesByPath = entriesByPath,
-                    TotalBytes = totalBytes
-                };
-                HostManifests[syncId] = manifest;
-                HostManifestSends.Enqueue(manifest);
+                    result = build.Task.Result;
+                }
+                catch (AggregateException aggregate)
+                {
+                    Exception exception = aggregate.GetBaseException();
+                    result = new HostManifestBuildResult
+                    {
+                        Error = exception.Message
+                    };
+                }
+
+                if (result == null || !string.IsNullOrEmpty(result.Error))
+                {
+                    string message = result == null
+                        ? "The background manifest build returned no result."
+                        : result.Error;
+                    transport.SendFileSyncAbort(
+                        localPlayerId,
+                        build.SyncId,
+                        "The host could not build its " + build.Scope +
+                        " manifest: " + message,
+                        build.TargetPlayerId);
+                    transport.LogLocal(
+                        "File sync could not build the host project manifest: " + message);
+                    continue;
+                }
+
+                RegisterHostManifest(
+                    build.TargetPlayerId,
+                    build.SyncId,
+                    build.Scope,
+                    result.Entries,
+                    result.TotalBytes);
+                transport.LogLocal(
+                    "Finished host " + build.Scope + " manifest: " +
+                    result.Entries.Count + " files.");
             }
-            catch (Exception exception) when (
-                exception is IOException ||
-                exception is UnauthorizedAccessException ||
-                exception is CryptographicException)
+        }
+
+        private static void RegisterHostManifest(
+            Guid targetPlayerId,
+            Guid syncId,
+            UnitySyncFileSyncScope scope,
+            List<FileEntry> entries,
+            long totalBytes)
+        {
+            Dictionary<string, FileEntry> entriesByPath =
+                new Dictionary<string, FileEntry>(StringComparer.Ordinal);
+            foreach (FileEntry entry in entries)
             {
-                Guid syncId = Guid.NewGuid();
-                transport.SendFileSyncAbort(
-                    localPlayerId,
-                    syncId,
-                    "The host could not build its " + request.Scope +
-                    " manifest: " + exception.Message,
-                    targetPlayerId);
-                error = "File sync could not build the host project manifest: " + exception.Message;
+                entriesByPath[entry.Path] = entry;
             }
+
+            HostManifest manifest = new HostManifest
+            {
+                TargetPlayerId = targetPlayerId,
+                SyncId = syncId,
+                Scope = scope,
+                Entries = entries,
+                EntriesByPath = entriesByPath,
+                TotalBytes = totalBytes
+            };
+            HostManifests[syncId] = manifest;
+            HostManifestSends.Enqueue(manifest);
         }
 
         private static void UpdateHostManifestSends(
@@ -2382,111 +2497,190 @@ namespace Glasspage.UnitySync
             _guestAutoRefreshBlocked = blocked;
         }
 
-        private static List<FileEntry> BuildLocalManifest(
-            UnitySyncFileSyncScope scope,
-            out long totalBytes)
+        private static List<FileEntry> BuildPackageManifest(out long totalBytes)
         {
             totalBytes = 0;
-            List<string> files = new List<string>();
-            if (scope == UnitySyncFileSyncScope.Project)
+            List<FileEntry> catalog = new List<FileEntry>();
+            HashSet<string> vccPackages = GetVccManagedPackageNames();
+            foreach (UnityEditor.PackageManager.PackageInfo package in
+                     UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
             {
-                foreach (string root in RestoreRoots)
+                catalog.Add(new FileEntry
                 {
-                    string fullRoot = Path.Combine(GetProjectRoot(), root);
-                    if (Directory.Exists(fullRoot) &&
-                        (File.GetAttributes(fullRoot) & FileAttributes.ReparsePoint) != 0)
+                    Path = "Packages/" + package.name + "/package.json",
+                    PackageVersion = JsonUtility.ToJson(new PackageRequirement
                     {
-                        throw new IOException("Cannot restore linked project root: " + root);
-                    }
-                    EnumerateSyncRoot(fullRoot, root, false, files);
-                }
-            }
-            else if (scope == UnitySyncFileSyncScope.Packages)
-            {
-                List<FileEntry> catalog = new List<FileEntry>();
-                HashSet<string> vccPackages = GetVccManagedPackageNames();
-                foreach (UnityEditor.PackageManager.PackageInfo package in
-                         UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
-                {
-                    catalog.Add(new FileEntry
-                    {
-                        Path = "Packages/" + package.name + "/package.json",
-                        PackageVersion = JsonUtility.ToJson(new PackageRequirement
-                        {
-                            name = package.name,
-                            displayName = package.displayName,
-                            version = package.version,
-                            source = package.source.ToString(),
-                            vccManaged = IsVccManagedPackage(
-                                package.name, vccPackages.Contains(package.name))
-                        }),
-                        Length = 0,
-                        Hash = new byte[32]
-                    });
-                }
-                if (catalog.Count == 0)
-                {
-                    throw new IOException("The registered package list is not available yet.");
-                }
-                catalog.Sort((left, right) => StringComparer.Ordinal.Compare(left.Path, right.Path));
-                return catalog;
-            }
-            else if (scope == UnitySyncFileSyncScope.Assets)
-            {
-                EnumerateSyncRoot(
-                    Path.GetFullPath(Application.dataPath),
-                    "Assets",
-                    true,
-                    files);
-            }
-            else
-            {
-                throw new InvalidDataException("Invalid file sync scope.");
+                        name = package.name,
+                        displayName = package.displayName,
+                        version = package.version,
+                        source = package.source.ToString(),
+                        vccManaged = IsVccManagedPackage(
+                            package.name, vccPackages.Contains(package.name))
+                    }),
+                    Length = 0,
+                    Hash = new byte[32]
+                });
             }
 
-            files.Sort((left, right) =>
+            if (catalog.Count == 0)
             {
-                if (scope == UnitySyncFileSyncScope.Packages)
-                {
-                    int groupCompare =
-                        GetPackageManifestSortGroup(left).CompareTo(
-                            GetPackageManifestSortGroup(right));
-                    if (groupCompare != 0)
-                    {
-                        return groupCompare;
-                    }
-                }
-
-                return StringComparer.Ordinal.Compare(left, right);
-            });
-
-            List<FileEntry> entries = new List<FileEntry>(files.Count);
-            foreach (string projectPath in files)
-            {
-                if (!TryGetFullSyncPath(projectPath, out string fullPath))
-                {
-                    continue;
-                }
-
-                FileInfo info = new FileInfo(fullPath);
-                FileEntry entry = new FileEntry
-                {
-                    Path = projectPath,
-                    PackageVersion =
-                        scope == UnitySyncFileSyncScope.Packages &&
-                        IsEmbeddedPackageJsonPath(projectPath)
-                            ? ReadPackageVersion(fullPath)
-                            : string.Empty,
-                    Length = info.Length,
-                    Hash = ComputeHash(fullPath)
-                };
-                entries.Add(entry);
-                totalBytes += entry.Length;
+                throw new IOException("The registered package list is not available yet.");
             }
 
-            return entries;
+            catalog.Sort((left, right) =>
+                StringComparer.Ordinal.Compare(left.Path, right.Path));
+            return catalog;
         }
 
+        private static HostManifestBuildResult BuildLocalFileManifest(
+            UnitySyncFileSyncScope scope,
+            string projectRoot)
+        {
+            try
+            {
+                List<string> files = new List<string>();
+                if (scope == UnitySyncFileSyncScope.Project)
+                {
+                    foreach (string rootName in RestoreRoots)
+                    {
+                        string fullRoot = Path.Combine(projectRoot, rootName);
+                        if (Directory.Exists(fullRoot))
+                        {
+                            try
+                            {
+                                if ((File.GetAttributes(fullRoot) &
+                                     FileAttributes.ReparsePoint) != 0)
+                                {
+                                    throw new IOException(
+                                        "Cannot restore linked project root: " + rootName);
+                                }
+                            }
+                            catch (DirectoryNotFoundException)
+                            {
+                                continue;
+                            }
+                        }
+
+                        EnumerateSyncRoot(
+                            fullRoot,
+                            rootName,
+                            false,
+                            files);
+                    }
+                }
+                else if (scope == UnitySyncFileSyncScope.Assets)
+                {
+                    EnumerateSyncRoot(
+                        Path.Combine(projectRoot, "Assets"),
+                        "Assets",
+                        true,
+                        files);
+                }
+                else
+                {
+                    return new HostManifestBuildResult
+                    {
+                        Error = "Invalid file sync scope."
+                    };
+                }
+
+                files.Sort(StringComparer.Ordinal);
+                List<FileEntry> entries = new List<FileEntry>(files.Count);
+                long totalBytes = 0;
+                foreach (string projectPath in files)
+                {
+                    if (!TryGetFullSyncPath(
+                            projectPath,
+                            projectRoot,
+                            out string fullPath) ||
+                        !TryBuildFileEntry(projectPath, fullPath, out FileEntry entry))
+                    {
+                        continue;
+                    }
+
+                    entries.Add(entry);
+                    totalBytes += entry.Length;
+                }
+
+                return new HostManifestBuildResult
+                {
+                    Entries = entries,
+                    TotalBytes = totalBytes
+                };
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException ||
+                exception is CryptographicException)
+            {
+                return new HostManifestBuildResult
+                {
+                    Error = exception.Message
+                };
+            }
+        }
+
+        private static bool TryBuildFileEntry(
+            string projectPath,
+            string fullPath,
+            out FileEntry entry)
+        {
+            entry = null;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    using (FileStream stream = new FileStream(
+                               fullPath,
+                               FileMode.Open,
+                               FileAccess.Read,
+                               FileShare.ReadWrite | FileShare.Delete))
+                    using (SHA256 sha256 = SHA256.Create())
+                    {
+                        long length = stream.Length;
+                        byte[] hash = sha256.ComputeHash(stream);
+                        if (stream.Length != length)
+                        {
+                            if (attempt == 0)
+                            {
+                                Thread.Sleep(5);
+                                continue;
+                            }
+                            return false;
+                        }
+
+                        entry = new FileEntry
+                        {
+                            Path = projectPath,
+                            Length = length,
+                            Hash = hash
+                        };
+                        return true;
+                    }
+                }
+                catch (FileNotFoundException)
+                {
+                    return false;
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    return false;
+                }
+                catch (IOException)
+                {
+                    if (attempt == 0)
+                    {
+                        Thread.Sleep(5);
+                        continue;
+                    }
+                    throw;
+                }
+            }
+
+            return false;
+        }
+
+        private static int GetPackageManifestSortGroup(string path)
         private static int GetPackageManifestSortGroup(string path)
         {
             if (string.Equals(path, "Packages/manifest.json", StringComparison.Ordinal))
@@ -2518,31 +2712,67 @@ namespace Glasspage.UnitySync
             while (directories.Count > 0)
             {
                 string directory = directories.Pop();
-                foreach (string childDirectory in Directory.GetDirectories(directory))
+                string[] childDirectories;
+                string[] childFiles;
+                try
                 {
-                    DirectoryInfo info = new DirectoryInfo(childDirectory);
-                    if ((excludeGeneratedUdon &&
-                         string.Equals(
-                             info.Name,
-                             ExcludedFolderName,
-                             StringComparison.OrdinalIgnoreCase)) ||
-                        (info.Attributes & FileAttributes.ReparsePoint) != 0)
-                    {
-                        continue;
-                    }
-
-                    directories.Push(childDirectory);
+                    childDirectories = Directory.GetDirectories(directory);
+                    childFiles = Directory.GetFiles(directory);
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    // Unity can delete generated folders while a background scan is in progress.
+                    continue;
                 }
 
-                foreach (string file in Directory.GetFiles(directory))
+                foreach (string childDirectory in childDirectories)
                 {
-                    FileInfo info = new FileInfo(file);
-                    if ((info.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                        (excludeGeneratedUdon &&
-                         string.Equals(
-                             info.Name,
-                             ExcludedFolderName + ".meta",
-                             StringComparison.OrdinalIgnoreCase)))
+                    try
+                    {
+                        DirectoryInfo info = new DirectoryInfo(childDirectory);
+                        if ((excludeGeneratedUdon &&
+                             string.Equals(
+                                 info.Name,
+                                 ExcludedFolderName,
+                                 StringComparison.OrdinalIgnoreCase)) ||
+                            (info.Attributes & FileAttributes.ReparsePoint) != 0)
+                        {
+                            continue;
+                        }
+
+                        directories.Push(childDirectory);
+                    }
+                    catch (DirectoryNotFoundException)
+                    {
+                        // A transient/generated directory disappeared after enumeration.
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        // A transient/generated directory disappeared after enumeration.
+                    }
+                }
+
+                foreach (string file in childFiles)
+                {
+                    try
+                    {
+                        FileInfo info = new FileInfo(file);
+                        if ((info.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                            (excludeGeneratedUdon &&
+                             string.Equals(
+                                 info.Name,
+                                 ExcludedFolderName + ".meta",
+                                 StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        // Unity removed the file between enumeration and inspection.
+                        continue;
+                    }
+                    catch (DirectoryNotFoundException)
                     {
                         continue;
                     }
@@ -2560,6 +2790,7 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool IsAssetPath(string path)
         private static bool IsAssetPath(string path)
         {
             return !string.IsNullOrEmpty(path) &&
@@ -2605,23 +2836,31 @@ namespace Glasspage.UnitySync
 
         private static bool TryGetFullSyncPath(string projectPath, out string fullPath)
         {
+            return TryGetFullSyncPath(projectPath, GetProjectRoot(), out fullPath);
+        }
+
+        private static bool TryGetFullSyncPath(
+            string projectPath,
+            string projectRoot,
+            out string fullPath)
+        {
             fullPath = string.Empty;
-            if (!IsSafeSyncPath(projectPath) || IsPackagePath(projectPath))
+            if (!IsSafeSyncPath(projectPath) || IsPackagePath(projectPath) ||
+                string.IsNullOrEmpty(projectRoot))
             {
                 return false;
             }
 
-            string projectRoot = GetProjectRoot();
             string candidate = Path.GetFullPath(Path.Combine(
                 projectRoot,
                 projectPath.Replace('/', Path.DirectorySeparatorChar)));
-            string rootName = projectPath.Replace('\\', '/').Split('/')[0];
+            string rootName = projectPath.Replace('\', '/').Split('/')[0];
             string allowedRoot = Path.GetFullPath(Path.Combine(projectRoot, rootName));
             string allowedPrefix = allowedRoot.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
-            StringComparison comparison = Path.DirectorySeparatorChar == '\\'
+            StringComparison comparison = Path.DirectorySeparatorChar == '\'
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
             if (!candidate.StartsWith(allowedPrefix, comparison))
@@ -2633,6 +2872,7 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static string GetProjectRoot()
         private static string GetProjectRoot()
         {
             DirectoryInfo parent = Directory.GetParent(Application.dataPath);
