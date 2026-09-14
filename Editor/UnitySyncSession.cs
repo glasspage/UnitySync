@@ -28,7 +28,7 @@ namespace Glasspage.UnitySync
         private const string FileSyncResumeApprovedKey = "Glasspage.UnitySync.FileSyncResume.Approved";
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
-        private const double CollaboratorConnectionStatusDurationSeconds = 8d;
+        private const double StatusEventDurationSeconds = 8d;
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
@@ -119,6 +119,11 @@ namespace Glasspage.UnitySync
                 _lastSelectionSignature = string.Empty;
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
+                UnitySyncPresenceRoot.AddTimedStatus(
+                    "Session started",
+                    Color.white,
+                    UnitySyncSceneStatusPriority.Important,
+                    StatusEventDurationSeconds);
                 AddLog("Hosting on " + advertisedAddress + ":" + port + ".");
                 Changed?.Invoke();
                 return true;
@@ -191,7 +196,7 @@ namespace Glasspage.UnitySync
 
         internal static void Stop()
         {
-            StopInternal(true);
+            StopInternal(true, true);
         }
 
         internal static bool ContinueFileSync(out string error)
@@ -445,11 +450,21 @@ namespace Glasspage.UnitySync
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
+                        bool resumedAfterReload = _fileSyncResumeConnectionPending;
                         _state = UnitySyncSessionState.Connected;
                         UnitySyncFileSynchronizer.BeginGuestSync(
                             transport,
                             _guestSyncApproved);
                         AddLog(transportEvent.Message);
+                        if (!resumedAfterReload)
+                        {
+                            UnitySyncPresenceRoot.AddTimedStatus(
+                                "Session started",
+                                Color.white,
+                                UnitySyncSceneStatusPriority.Important,
+                                StatusEventDurationSeconds);
+                        }
+
                         if (_fileSyncResumeConnectionPending)
                         {
                             _fileSyncResumeConnectionPending = false;
@@ -472,7 +487,7 @@ namespace Glasspage.UnitySync
                                 disconnectedViewport.DisplayName + " disconnected",
                                 disconnectedViewport.Color,
                                 UnitySyncSceneStatusPriority.Important,
-                                CollaboratorConnectionStatusDurationSeconds);
+                                StatusEventDurationSeconds);
                         }
 
                         AddLog(transportEvent.Message);
@@ -504,7 +519,7 @@ namespace Glasspage.UnitySync
                                 departingViewport.DisplayName + " disconnected",
                                 departingViewport.Color,
                                 UnitySyncSceneStatusPriority.Important,
-                                CollaboratorConnectionStatusDurationSeconds);
+                                StatusEventDurationSeconds);
                         }
 
                         if (_spectatingPlayerId == transportEvent.PlayerId)
@@ -593,7 +608,7 @@ namespace Glasspage.UnitySync
                             AddLog("Scene sync could not start a snapshot: " + snapshotBeginError);
                             // No valid boundary exists for the queued body/end packets.
                             // Stop here instead of applying a partial snapshot or flooding the log.
-                            StopInternal(false);
+                            StopInternal(false, true);
                             return;
                         }
                         break;
@@ -657,7 +672,7 @@ namespace Glasspage.UnitySync
                 bool retryFileSyncResume =
                     _fileSyncResumeConnectionPending &&
                     SessionState.GetBool(FileSyncResumePendingKey, false);
-                StopInternal(false);
+                StopInternal(false, !retryFileSyncResume);
                 if (retryFileSyncResume)
                 {
                     _fileSyncResumeConnectionPending = false;
@@ -672,7 +687,7 @@ namespace Glasspage.UnitySync
             if (UnitySyncFileSynchronizer.ConsumeGuestFailure(out string fileSyncFailure))
             {
                 AddLog("File sync failed: " + fileSyncFailure);
-                StopInternal(false);
+                StopInternal(false, true);
                 return;
             }
 
@@ -936,7 +951,7 @@ namespace Glasspage.UnitySync
                     viewport.DisplayName + " connected",
                     viewport.Color,
                     UnitySyncSceneStatusPriority.Important,
-                    CollaboratorConnectionStatusDurationSeconds);
+                    StatusEventDurationSeconds);
 
                 // A newly visible collaborator is also a join signal for existing peers.
                 // Re-advertise our current viewport so the newcomer immediately receives
@@ -961,8 +976,11 @@ namespace Glasspage.UnitySync
                    Mathf.Approximately(left.a, right.a);
         }
 
-        private static void StopInternal(bool addLog)
+        private static void StopInternal(bool addLog, bool showEndedStatus)
         {
+            bool wasActiveSession =
+                _state == UnitySyncSessionState.Hosting ||
+                _state == UnitySyncSessionState.Connected;
             StopSpectatingInternal(false, false);
 
             UnitySyncTransport transport = _transport;
@@ -982,6 +1000,15 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = false;
             _hasLastSelectionState = false;
             _lastSelectionSignature = string.Empty;
+            if (showEndedStatus && wasActiveSession)
+            {
+                UnitySyncPresenceRoot.AddTimedStatus(
+                    "Session ended",
+                    Color.white,
+                    UnitySyncSceneStatusPriority.Important,
+                    StatusEventDurationSeconds);
+            }
+
             SceneView.RepaintAll();
 
             if (addLog && transport != null)
@@ -994,7 +1021,7 @@ namespace Glasspage.UnitySync
 
         private static void Shutdown()
         {
-            StopInternal(false);
+            StopInternal(false, false);
         }
 
         private static void BeforeAssemblyReload()
@@ -1003,14 +1030,14 @@ namespace Glasspage.UnitySync
             // guest connection details before the transport is disposed so the new domain
             // can reconnect and run the package comparison again automatically.
             PrepareFileSyncReloadReconnect();
-            StopInternal(false);
+            StopInternal(false, false);
         }
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
             if (state == PlayModeStateChange.ExitingEditMode)
             {
-                StopInternal(true);
+                StopInternal(true, true);
             }
         }
 
