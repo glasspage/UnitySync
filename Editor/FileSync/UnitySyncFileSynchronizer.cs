@@ -11,6 +11,23 @@ using UnityEngine;
 
 namespace Glasspage.UnitySync
 {
+    internal readonly struct UnitySyncHostDownloadProgress
+    {
+        internal readonly Guid PlayerId;
+        internal readonly UnitySyncFileSyncScope Scope;
+        internal readonly float Progress01;
+
+        internal UnitySyncHostDownloadProgress(
+            Guid playerId,
+            UnitySyncFileSyncScope scope,
+            float progress01)
+        {
+            PlayerId = playerId;
+            Scope = scope;
+            Progress01 = progress01;
+        }
+    }
+
     internal static class UnitySyncFileSynchronizer
     {
         private enum GuestPhase
@@ -135,6 +152,16 @@ namespace Glasspage.UnitySync
             internal long Received;
         }
 
+        private sealed class HostDownloadProgressState
+        {
+            internal Guid PlayerId;
+            internal Guid SyncId;
+            internal UnitySyncFileSyncScope Scope;
+            internal long ReceivedBytes;
+            internal long TotalBytes;
+            internal double CompletedAtSeconds;
+        }
+
         private sealed class HostManifestBuild
         {
             internal Guid TargetPlayerId;
@@ -156,6 +183,7 @@ namespace Glasspage.UnitySync
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 512;
         private const long MaximumQueuedFileTransferBytes = 128L * 1024L * 1024L;
+        private const double HostCompletedProgressHoldSeconds = 1.0d;
         private const double ImportSettleSeconds = 1.0d;
 
         private static readonly Dictionary<Guid, HostManifest> HostManifests =
@@ -168,6 +196,8 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly List<HostManifestBuild> HostManifestBuilds =
             new List<HostManifestBuild>();
+        private static readonly Dictionary<Guid, HostDownloadProgressState> HostDownloadProgress =
+            new Dictionary<Guid, HostDownloadProgressState>();
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
@@ -271,6 +301,27 @@ namespace Glasspage.UnitySync
         internal static long GuestPendingDownloadBytes =>
             IsGuestAwaitingDownloadConfirmation ? _guestDownloadTotalBytes : 0;
 
+        internal static UnitySyncHostDownloadProgress[] GetHostDownloadProgresses()
+        {
+            List<UnitySyncHostDownloadProgress> progress =
+                new List<UnitySyncHostDownloadProgress>(HostDownloadProgress.Count);
+            foreach (HostDownloadProgressState state in HostDownloadProgress.Values)
+            {
+                if (state.TotalBytes <= 0)
+                {
+                    continue;
+                }
+
+                progress.Add(new UnitySyncHostDownloadProgress(
+                    state.PlayerId,
+                    state.Scope,
+                    Mathf.Clamp01((float)((double)state.ReceivedBytes / state.TotalBytes))));
+            }
+
+            progress.Sort((left, right) => left.PlayerId.CompareTo(right.PlayerId));
+            return progress.ToArray();
+        }
+
         internal static void BeginGuestSync(
             UnitySyncTransport transport,
             bool autoContinue)
@@ -311,6 +362,7 @@ namespace Glasspage.UnitySync
             HostTransferKeys.Clear();
             HostManifestSends.Clear();
             HostManifests.Clear();
+            HostDownloadProgress.Clear();
             foreach (HostManifestBuild build in HostManifestBuilds)
             {
                 if (build.Cancellation != null)
@@ -328,6 +380,7 @@ namespace Glasspage.UnitySync
         internal static void RemoveHostPlayer(Guid playerId)
         {
             RestoreRequests.Remove(playerId);
+            HostDownloadProgress.Remove(playerId);
             if (playerId == Guid.Empty)
             {
                 return;
@@ -438,6 +491,9 @@ namespace Glasspage.UnitySync
                     QueueHostTransfer(transport, localPlayerId, playerId, message, out error);
                     return true;
 
+                case UnitySyncMessageType.FileDownloadProgress:
+                    return HandleHostDownloadProgress(playerId, message, out error);
+
                 case UnitySyncMessageType.FileManifestBegin:
                     return HandleGuestManifestBegin(playerId, message, out error);
 
@@ -451,7 +507,7 @@ namespace Glasspage.UnitySync
                     return HandleGuestManifestEnd(playerId, message, out error);
 
                 case UnitySyncMessageType.FileChunk:
-                    return HandleGuestFileChunk(message, out error);
+                    return HandleGuestFileChunk(transport, message, out error);
 
                 case UnitySyncMessageType.FileSyncAbort:
                     error = string.IsNullOrEmpty(message.Error)
@@ -471,6 +527,7 @@ namespace Glasspage.UnitySync
             UpdateHostManifestBuilds(transport, localPlayerId);
             UpdateHostManifestSends(transport, localPlayerId);
             UpdateHostTransfers(transport, localPlayerId);
+            UpdateHostDownloadProgresses();
 
             switch (_guestPhase)
             {
@@ -536,6 +593,9 @@ namespace Glasspage.UnitySync
                 error = "A collaborator requested an invalid file sync scope.";
                 return;
             }
+
+            HostDownloadProgress.Remove(targetPlayerId);
+            SceneView.RepaintAll();
 
             Guid syncId = Guid.NewGuid();
             if (request.Scope == UnitySyncFileSyncScope.Packages)
@@ -766,6 +826,79 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool HandleHostDownloadProgress(
+            Guid playerId,
+            UnitySyncFileSyncMessage message,
+            out string error)
+        {
+            error = string.Empty;
+            if (message == null ||
+                message.SyncId == Guid.Empty ||
+                !HostManifests.TryGetValue(message.SyncId, out HostManifest manifest) ||
+                manifest.TargetPlayerId != playerId ||
+                manifest.Scope != message.Scope ||
+                message.TotalBytes <= 0 ||
+                message.Offset < 0 ||
+                message.Offset > message.TotalBytes ||
+                message.TotalBytes > manifest.TotalBytes)
+            {
+                error = "A collaborator reported invalid file download progress.";
+                return false;
+            }
+
+            HostDownloadProgressState state = new HostDownloadProgressState
+            {
+                PlayerId = playerId,
+                SyncId = message.SyncId,
+                Scope = message.Scope,
+                ReceivedBytes = message.Offset,
+                TotalBytes = message.TotalBytes,
+                CompletedAtSeconds = message.Offset >= message.TotalBytes
+                    ? EditorApplication.timeSinceStartup
+                    : 0d
+            };
+            HostDownloadProgress[playerId] = state;
+            SceneView.RepaintAll();
+            return true;
+        }
+
+        private static void UpdateHostDownloadProgresses()
+        {
+            if (HostDownloadProgress.Count == 0)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            List<Guid> completed = null;
+            foreach (KeyValuePair<Guid, HostDownloadProgressState> pair in HostDownloadProgress)
+            {
+                HostDownloadProgressState state = pair.Value;
+                if (state.CompletedAtSeconds <= 0d ||
+                    now - state.CompletedAtSeconds < HostCompletedProgressHoldSeconds)
+                {
+                    continue;
+                }
+
+                if (completed == null)
+                {
+                    completed = new List<Guid>();
+                }
+                completed.Add(pair.Key);
+            }
+
+            if (completed == null)
+            {
+                return;
+            }
+
+            foreach (Guid playerId in completed)
+            {
+                HostDownloadProgress.Remove(playerId);
+            }
+            SceneView.RepaintAll();
+        }
+
         private static void QueueHostTransfer(
             UnitySyncTransport transport,
             Guid localPlayerId,
@@ -941,6 +1074,8 @@ namespace Glasspage.UnitySync
                 transfer.SyncId,
                 error,
                 transfer.TargetPlayerId);
+            HostDownloadProgress.Remove(transfer.TargetPlayerId);
+            SceneView.RepaintAll();
             RemoveHostManifestAndTransfers(transfer.SyncId);
         }
 
@@ -1367,6 +1502,7 @@ namespace Glasspage.UnitySync
         }
 
         private static bool HandleGuestFileChunk(
+            UnitySyncTransport transport,
             UnitySyncFileSyncMessage message,
             out string error)
         {
@@ -1430,6 +1566,14 @@ namespace Glasspage.UnitySync
                     transfer.Received += message.Data.Length;
                     _guestDownloadBytesReceived += message.Data.Length;
                     _guestStageDownloadBytesReceived += message.Data.Length;
+                    if (_guestStageDownloadTotalBytes > 0)
+                    {
+                        transport.SendFileDownloadProgress(
+                            _guestSyncId,
+                            _guestRequestedScope,
+                            _guestStageDownloadBytesReceived,
+                            _guestStageDownloadTotalBytes);
+                    }
                 }
 
                 if (transfer.Received != entry.Length)
