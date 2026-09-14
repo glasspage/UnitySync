@@ -75,6 +75,7 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
         private const int SnapshotObjectsPerUpdate = 8;
+        private const double CaptureBudgetSeconds = 0.008;
 
         private static readonly Dictionary<string, PendingChange> Pending =
             new Dictionary<string, PendingChange>();
@@ -298,7 +299,8 @@ namespace Glasspage.UnitySync
 
         internal static void Flush(UnitySyncTransport transport, Guid localPlayerId)
         {
-            if (!_active || transport == null || EditorApplication.isPlayingOrWillChangePlaymode)
+            if (!_active || transport == null || _remoteSnapshot != null ||
+                EditorApplication.isPlayingOrWillChangePlaymode)
             {
                 return;
             }
@@ -930,9 +932,12 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
-            int sent = 0;
-            while (batch.Index < batch.Objects.Count && sent < SnapshotObjectsPerUpdate)
+            int attempted = 0;
+            long captureStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (batch.Index < batch.Objects.Count && attempted < SnapshotObjectsPerUpdate &&
+                   (attempted == 0 || HasCaptureTimeRemaining(captureStart)))
             {
+                attempted++;
                 GameObject gameObject = batch.Objects[batch.Index++];
                 UnitySyncSceneObjectChange change;
                 bool captured = batch.Phase == HierarchyBatchPhase.Hierarchy
@@ -950,7 +955,6 @@ namespace Glasspage.UnitySync
                 }
 
                 transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
-                sent++;
             }
 
             if (batch.Index >= batch.Objects.Count)
@@ -1023,8 +1027,10 @@ namespace Glasspage.UnitySync
             }
 
             List<string> keys = new List<string>(Pending.Keys);
-            int sent = 0;
-            for (int index = 0; index < keys.Count && sent < MaximumChangesPerUpdate; index++)
+            int attempted = 0;
+            long captureStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            for (int index = 0; index < keys.Count && attempted < MaximumChangesPerUpdate &&
+                 HasCaptureTimeRemaining(captureStart); index++)
             {
                 string pendingKey = keys[index];
                 if (!Pending.TryGetValue(pendingKey, out PendingChange pending))
@@ -1042,6 +1048,9 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
+                // Count failed and unchanged captures too, not only transmitted updates.
+                attempted++;
+                NextAllowedSendTimes[pendingKey] = now + interval;
                 Pending.Remove(pendingKey);
                 GameObject gameObject = pending.Kind == PendingKind.Destroy
                     ? null
@@ -1068,9 +1077,13 @@ namespace Glasspage.UnitySync
                 }
 
                 transport.SendSceneObjectChange(localPlayerId, change);
-                NextAllowedSendTimes[pendingKey] = now + interval;
-                sent++;
             }
+        }
+
+        private static bool HasCaptureTimeRemaining(long startTimestamp)
+        {
+            return (System.Diagnostics.Stopwatch.GetTimestamp() - startTimestamp) /
+                   (double)System.Diagnostics.Stopwatch.Frequency < CaptureBudgetSeconds;
         }
 
         private static bool TryCapture(

@@ -18,6 +18,8 @@ namespace Glasspage.UnitySync
     internal static class UnitySyncSession
     {
         private const double SendIntervalSeconds = 0.1;
+        private const int MaximumIncomingEventsPerUpdate = 64;
+        private const double IncomingEventBudgetSeconds = 0.008;
         private const string PlayerIdSessionKey = "Glasspage.UnitySync.PlayerId";
         private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
         private const string FileSyncResumeJoinCodeKey = "Glasspage.UnitySync.FileSyncResume.JoinCode";
@@ -437,10 +439,20 @@ namespace Glasspage.UnitySync
             }
 
             bool disconnected = false;
-            while (!EditorApplication.isCompiling &&
+            int processedEvents = 0;
+            long incomingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Yield between packets without dropping or reordering snapshot boundaries.
+            // A single Unity API call can exceed this budget; the next packet waits.
+            while (!disconnected &&
+                   !EditorApplication.isCompiling &&
                    !EditorApplication.isUpdating &&
+                   processedEvents < MaximumIncomingEventsPerUpdate &&
+                   (processedEvents == 0 ||
+                    (System.Diagnostics.Stopwatch.GetTimestamp() - incomingStart) /
+                    (double)System.Diagnostics.Stopwatch.Frequency < IncomingEventBudgetSeconds) &&
                    transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
             {
+                processedEvents++;
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
