@@ -47,9 +47,7 @@ namespace Glasspage.UnitySync
         private static readonly List<string> PackageChanges = new List<string>();
         internal static string[] RequiredPackageChanges => PackageChanges.ToArray();
         internal const string PackageChecklistOrderHint =
-            "Install or change packages from top to bottom. com.unity.* packages are listed last " +
-            "because other packages may install them automatically. Recheck packages before " +
-            "installing any remaining Unity dependencies manually.";
+            "This project's packages are different from the host. Install these packages from top to bottom.";
 
         internal static bool IsWaitingForPackageChanges =>
             _guestPhase == GuestPhase.WaitingForPackageChanges;
@@ -1787,7 +1785,11 @@ namespace Glasspage.UnitySync
                 if (installed == null || !string.Equals(installed.version, requirement.version, StringComparison.Ordinal))
                 {
                     string title = string.IsNullOrEmpty(requirement.displayName) ? requirement.name : requirement.displayName;
-                    string action = installed == null ? "Install" : "Change";
+                    string action = installed == null
+                        ? "Install"
+                        : ComparePackageVersions(installed.version, requirement.version) < 0
+                            ? "Upgrade"
+                            : "Downgrade";
                     string manager = requirement.name.StartsWith("com.vrchat.", StringComparison.Ordinal)
                         ? "Use Creator Companion → Manage Project and select the host version."
                         : requirement.source == "BuiltIn"
@@ -1796,9 +1798,8 @@ namespace Glasspage.UnitySync
                                 ? "Use the package's manager or obtain the matching release/source from the host."
                                 : "Use Unity Package Manager to select the host version; dependencies may update with their parent package.";
                     (requirement.name.StartsWith("com.unity.", StringComparison.Ordinal)
-                        ? unityPackageChanges : PackageChanges).Add(action + " " + title + " (" + requirement.name + ")" + Environment.NewLine +
-                        "Your version: " + (installed != null ? installed.version : "Not installed") +
-                        "   •   Host version: " + requirement.version + Environment.NewLine + manager);
+                        ? unityPackageChanges : PackageChanges).Add(title + " (" + requirement.name + ")" + Environment.NewLine +
+                        action + " to version " + requirement.version + Environment.NewLine + manager);
                 }
                 local.Remove(requirement.name);
             }
@@ -1806,8 +1807,8 @@ namespace Glasspage.UnitySync
             foreach (UnityEditor.PackageManager.PackageInfo extra in local.Values)
             {
                 (extra.name.StartsWith("com.unity.", StringComparison.Ordinal)
-                    ? unityPackageChanges : PackageChanges).Add("Remove " + extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
-                    "Your version: " + extra.version + "   •   Not installed on the host." + Environment.NewLine +
+                    ? unityPackageChanges : PackageChanges).Add(extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
+                    "Remove version " + extra.version + Environment.NewLine +
                     "Remove it using its package manager; dependencies may disappear when their parent package is removed.");
             }
             PackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
@@ -1818,6 +1819,71 @@ namespace Glasspage.UnitySync
             EditorUtility.ClearProgressBar();
             UnitySyncSession.ReportPackageChecklist(PackageChanges.ToArray());
             return true;
+        }
+
+        private static int ComparePackageVersions(string installedVersion, string hostVersion)
+        {
+            string installed = (installedVersion ?? string.Empty).Split('+')[0];
+            string host = (hostVersion ?? string.Empty).Split('+')[0];
+            string[] installedSections = installed.Split(new[] { '-' }, 2);
+            string[] hostSections = host.Split(new[] { '-' }, 2);
+            string[] installedMain = installedSections[0].Split('.');
+            string[] hostMain = hostSections[0].Split('.');
+            int mainCount = Math.Max(installedMain.Length, hostMain.Length);
+            for (int index = 0; index < mainCount; index++)
+            {
+                int.TryParse(index < installedMain.Length ? installedMain[index] : "0",
+                    out int installedNumber);
+                int.TryParse(index < hostMain.Length ? hostMain[index] : "0",
+                    out int hostNumber);
+                int comparison = installedNumber.CompareTo(hostNumber);
+                if (comparison != 0)
+                {
+                    return comparison;
+                }
+            }
+
+            bool installedPrerelease = installedSections.Length > 1;
+            bool hostPrerelease = hostSections.Length > 1;
+            if (installedPrerelease != hostPrerelease)
+            {
+                return installedPrerelease ? -1 : 1;
+            }
+            if (!installedPrerelease)
+            {
+                return 0;
+            }
+
+            string[] installedIdentifiers = installedSections[1].Split('.');
+            string[] hostIdentifiers = hostSections[1].Split('.');
+            int identifierCount = Math.Max(installedIdentifiers.Length, hostIdentifiers.Length);
+            for (int index = 0; index < identifierCount; index++)
+            {
+                if (index >= installedIdentifiers.Length)
+                {
+                    return -1;
+                }
+                if (index >= hostIdentifiers.Length)
+                {
+                    return 1;
+                }
+
+                bool installedNumeric = int.TryParse(installedIdentifiers[index],
+                    out int installedNumber);
+                bool hostNumeric = int.TryParse(hostIdentifiers[index], out int hostNumber);
+                int comparison = installedNumeric && hostNumeric
+                    ? installedNumber.CompareTo(hostNumber)
+                    : installedNumeric != hostNumeric
+                        ? installedNumeric ? -1 : 1
+                        : StringComparer.OrdinalIgnoreCase.Compare(
+                            installedIdentifiers[index], hostIdentifiers[index]);
+                if (comparison != 0)
+                {
+                    return comparison;
+                }
+            }
+
+            return 0;
         }
 
         private static bool ApplyStagedFiles(out string error)

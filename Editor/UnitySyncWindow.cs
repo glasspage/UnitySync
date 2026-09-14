@@ -161,10 +161,7 @@ namespace Glasspage.UnitySync
             EditorGUILayout.Space(8f);
             EditorGUILayout.LabelField("Match the host's packages", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
-                UnitySyncFileSynchronizer.PackageChecklistOrderHint + " " +
-                "Make the changes below manually, then select Recheck packages. UnitySync does not " +
-                "change package files. Assets and scene synchronization will start once this list is clear. " +
-                "If you close Unity to change packages, reconnect afterward.",
+                UnitySyncFileSynchronizer.PackageChecklistOrderHint,
                 MessageType.Info);
             string[] changes = UnitySyncFileSynchronizer.RequiredPackageChanges;
             foreach (string change in changes)
