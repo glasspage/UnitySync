@@ -140,6 +140,7 @@ namespace Glasspage.UnitySync
             internal Guid TargetPlayerId;
             internal Guid SyncId;
             internal UnitySyncFileSyncScope Scope;
+            internal CancellationTokenSource Cancellation;
             internal Task<HostManifestBuildResult> Task;
         }
 
@@ -167,6 +168,8 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly List<HostManifestBuild> HostManifestBuilds =
             new List<HostManifestBuild>();
+        private static readonly SemaphoreSlim HostManifestDiskGate =
+            new SemaphoreSlim(1, 1);
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
@@ -310,6 +313,13 @@ namespace Glasspage.UnitySync
             HostTransferKeys.Clear();
             HostManifestSends.Clear();
             HostManifests.Clear();
+            foreach (HostManifestBuild build in HostManifestBuilds)
+            {
+                if (build.Cancellation != null)
+                {
+                    build.Cancellation.Cancel();
+                }
+            }
             HostManifestBuilds.Clear();
 
             ResetGuestState();
@@ -343,6 +353,11 @@ namespace Glasspage.UnitySync
             {
                 if (HostManifestBuilds[index].TargetPlayerId == playerId)
                 {
+                    HostManifestBuild build = HostManifestBuilds[index];
+                    if (build.Cancellation != null)
+                    {
+                        build.Cancellation.Cancel();
+                    }
                     HostManifestBuilds.RemoveAt(index);
                 }
             }
@@ -555,14 +570,17 @@ namespace Glasspage.UnitySync
 
             string projectRoot = GetProjectRoot();
             UnitySyncFileSyncScope scope = request.Scope;
+            CancellationTokenSource cancellation = new CancellationTokenSource();
             HostManifestBuild build = new HostManifestBuild
             {
                 TargetPlayerId = targetPlayerId,
                 SyncId = syncId,
-                Scope = scope
+                Scope = scope,
+                Cancellation = cancellation
             };
             build.Task = System.Threading.Tasks.Task.Run(
-                () => BuildLocalFileManifest(scope, projectRoot));
+                () => BuildLocalFileManifest(scope, projectRoot, cancellation.Token),
+                cancellation.Token);
             HostManifestBuilds.Add(build);
             transport.LogLocal(
                 "Building host " + scope + " manifest in the background...");
@@ -581,6 +599,11 @@ namespace Glasspage.UnitySync
                 }
 
                 HostManifestBuilds.RemoveAt(index);
+                if (build.Task.IsCanceled)
+                {
+                    continue;
+                }
+
                 HostManifestBuildResult result;
                 try
                 {
@@ -811,17 +834,19 @@ namespace Glasspage.UnitySync
                         }
 
                         FileInfo info = new FileInfo(fullPath);
-                        if (info.Length != transfer.Entry.Length ||
-                            !HashesEqual(ComputeHash(fullPath), transfer.Entry.Hash))
+                        if (info.Length != transfer.Entry.Length)
                         {
                             AbortHostTransfer(
                                 transport,
                                 localPlayerId,
                                 transfer,
-                                "A host file changed while it was being synchronized. Reconnect to retry.");
+                                "A host file changed size while it was being synchronized. Reconnect to retry.");
                             continue;
                         }
 
+                        // The manifest already contains a SHA-256 for this file. Avoid hashing it
+                        // a second time on Unity's main thread before transfer; the guest performs
+                        // a final SHA-256 check against the manifest before installing the file.
                         transfer.Stream = new FileStream(
                             fullPath,
                             FileMode.Open,
@@ -2534,10 +2559,16 @@ namespace Glasspage.UnitySync
 
         private static HostManifestBuildResult BuildLocalFileManifest(
             UnitySyncFileSyncScope scope,
-            string projectRoot)
+            string projectRoot,
+            CancellationToken cancellationToken)
         {
+            bool gateHeld = false;
             try
             {
+                HostManifestDiskGate.Wait(cancellationToken);
+                gateHeld = true;
+                cancellationToken.ThrowIfCancellationRequested();
+
                 List<string> files = new List<string>();
                 if (scope == UnitySyncFileSyncScope.Project)
                 {
@@ -2565,7 +2596,8 @@ namespace Glasspage.UnitySync
                             fullRoot,
                             rootName,
                             false,
-                            files);
+                            files,
+                            cancellationToken);
                     }
                 }
                 else if (scope == UnitySyncFileSyncScope.Assets)
@@ -2574,7 +2606,8 @@ namespace Glasspage.UnitySync
                         Path.Combine(projectRoot, "Assets"),
                         "Assets",
                         true,
-                        files);
+                        files,
+                        cancellationToken);
                 }
                 else
                 {
@@ -2589,11 +2622,16 @@ namespace Glasspage.UnitySync
                 long totalBytes = 0;
                 foreach (string projectPath in files)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (!TryGetFullSyncPath(
                             projectPath,
                             projectRoot,
                             out string fullPath) ||
-                        !TryBuildFileEntry(projectPath, fullPath, out FileEntry entry))
+                        !TryBuildFileEntry(
+                            projectPath,
+                            fullPath,
+                            cancellationToken,
+                            out FileEntry entry))
                     {
                         continue;
                     }
@@ -2618,16 +2656,25 @@ namespace Glasspage.UnitySync
                     Error = exception.Message
                 };
             }
+            finally
+            {
+                if (gateHeld)
+                {
+                    HostManifestDiskGate.Release();
+                }
+            }
         }
 
         private static bool TryBuildFileEntry(
             string projectPath,
             string fullPath,
+            CancellationToken cancellationToken,
             out FileEntry entry)
         {
             entry = null;
             for (int attempt = 0; attempt < 2; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     using (FileStream stream = new FileStream(
@@ -2699,7 +2746,8 @@ namespace Glasspage.UnitySync
             string root,
             string rootName,
             bool excludeGeneratedUdon,
-            List<string> result)
+            List<string> result,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
             if (!Directory.Exists(root))
             {
@@ -2710,6 +2758,7 @@ namespace Glasspage.UnitySync
             directories.Push(root);
             while (directories.Count > 0)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 string directory = directories.Pop();
                 string[] childDirectories;
                 string[] childFiles;
