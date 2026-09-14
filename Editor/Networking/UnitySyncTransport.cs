@@ -66,6 +66,9 @@ namespace Glasspage.UnitySync
 
     internal sealed class UnitySyncTransport : IDisposable
     {
+        private const int BulkFileStreamCount = 4;
+        private const string BulkStreamDisplayNamePrefix = "__UnitySyncBulkStream:";
+
         private sealed class OutboundMessage
         {
             internal byte[] Payload;
@@ -82,6 +85,12 @@ namespace Glasspage.UnitySync
             internal bool RequestedSceneSnapshot;
             internal bool RequestedFileSync;
             internal bool Superseded;
+            internal bool IsBulk;
+            internal int BulkStreamIndex = -1;
+            internal volatile bool BulkSenderRunning;
+            internal readonly object BulkOutboundLock = new object();
+            internal readonly AutoResetEvent BulkOutboundSignal = new AutoResetEvent(false);
+            internal readonly Queue<OutboundMessage> BulkOutbound = new Queue<OutboundMessage>();
 
             internal Peer(TcpClient client)
             {
@@ -92,6 +101,9 @@ namespace Glasspage.UnitySync
 
             internal void Close()
             {
+                BulkSenderRunning = false;
+                BulkOutboundSignal.Set();
+
                 try
                 {
                     Stream?.Close();
@@ -118,6 +130,9 @@ namespace Glasspage.UnitySync
         private readonly object _cryptoLock = new object();
         private readonly object _peersLock = new object();
         private readonly List<Peer> _peers = new List<Peer>();
+        private readonly object _bulkPeersLock = new object();
+        private readonly List<Peer> _bulkPeers = new List<Peer>();
+        private int _nextBulkPeerIndex;
         private readonly object _eventsLock = new object();
         private readonly Queue<UnitySyncTransportEvent> _events = new Queue<UnitySyncTransportEvent>();
         private readonly object _outboundLock = new object();
@@ -295,7 +310,7 @@ namespace Glasspage.UnitySync
             UnitySyncFileSyncMessage state,
             Guid targetPlayerId)
         {
-            QueueMessage(
+            QueueBulkMessage(
                 UnitySyncProtocol.CreateFileChunk(playerId, state),
                 targetPlayerId);
         }
@@ -416,6 +431,75 @@ namespace Glasspage.UnitySync
             _outboundSignal.Set();
         }
 
+        private void QueueBulkMessage(byte[] payload, Guid targetPlayerId)
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            Peer target = null;
+            lock (_bulkPeersLock)
+            {
+                List<Peer> candidates = new List<Peer>();
+                foreach (Peer peer in _bulkPeers)
+                {
+                    if (peer.IsBulk &&
+                        peer.BulkSenderRunning &&
+                        peer.PlayerId == targetPlayerId)
+                    {
+                        candidates.Add(peer);
+                    }
+                }
+
+                if (candidates.Count > 0)
+                {
+                    if (_nextBulkPeerIndex < 0 || _nextBulkPeerIndex == int.MaxValue)
+                    {
+                        _nextBulkPeerIndex = 0;
+                    }
+
+                    target = candidates[_nextBulkPeerIndex % candidates.Count];
+                    _nextBulkPeerIndex++;
+                }
+            }
+
+            if (target == null)
+            {
+                QueueMessage(payload, targetPlayerId);
+                return;
+            }
+
+            OutboundMessage message = new OutboundMessage
+            {
+                Payload = payload,
+                TargetPlayerId = targetPlayerId
+            };
+
+            bool queued = false;
+            lock (target.BulkOutboundLock)
+            {
+                if (target.BulkSenderRunning)
+                {
+                    lock (_outboundLock)
+                    {
+                        _pendingMessageBytes += payload != null ? payload.LongLength : 0L;
+                    }
+
+                    target.BulkOutbound.Enqueue(message);
+                    queued = true;
+                }
+            }
+
+            if (!queued)
+            {
+                QueueMessage(payload, targetPlayerId);
+                return;
+            }
+
+            target.BulkOutboundSignal.Set();
+        }
+
         private void ReleasePendingMessageBytes(byte[] payload)
         {
             long length = payload != null ? payload.LongLength : 0L;
@@ -489,6 +573,18 @@ namespace Glasspage.UnitySync
             {
                 peer.Close();
             }
+
+            Peer[] bulkPeers;
+            lock (_bulkPeersLock)
+            {
+                bulkPeers = _bulkPeers.ToArray();
+                _bulkPeers.Clear();
+            }
+
+            foreach (Peer peer in bulkPeers)
+            {
+                peer.Close();
+            }
         }
 
         private void HostAcceptLoop()
@@ -502,11 +598,6 @@ namespace Glasspage.UnitySync
                     TcpClient client = _listener.AcceptTcpClient();
                     ConfigureClient(client);
                     Peer peer = new Peer(client);
-
-                    lock (_peersLock)
-                    {
-                        _peers.Add(peer);
-                    }
 
                     Thread peerThread = new Thread(() => HostPeerLoop(peer))
                     {
@@ -544,6 +635,89 @@ namespace Glasspage.UnitySync
                 Name = "UnitySync Outbound"
             };
             outboundThread.Start();
+        }
+
+        private void StartBulkOutboundThread(Peer peer)
+        {
+            peer.BulkSenderRunning = true;
+            Thread outboundThread = new Thread(() => BulkOutboundLoop(peer))
+            {
+                IsBackground = true,
+                Name = "UnitySync Bulk " + (peer.BulkStreamIndex + 1)
+            };
+            outboundThread.Start();
+        }
+
+        private void BulkOutboundLoop(Peer peer)
+        {
+            while (_running && peer.BulkSenderRunning)
+            {
+                OutboundMessage message = null;
+                lock (peer.BulkOutboundLock)
+                {
+                    if (peer.BulkOutbound.Count > 0)
+                    {
+                        message = peer.BulkOutbound.Dequeue();
+                    }
+                }
+
+                if (message == null)
+                {
+                    peer.BulkOutboundSignal.WaitOne(250);
+                    continue;
+                }
+
+                bool sent = false;
+                try
+                {
+                    Send(peer, message.Payload);
+                    sent = true;
+                }
+                catch (Exception exception) when (
+                    exception is IOException ||
+                    exception is SocketException ||
+                    exception is ObjectDisposedException ||
+                    exception is InvalidDataException)
+                {
+                    // Requeue on the primary connection below. Closing the failed stream ensures
+                    // a partially written encrypted frame is discarded before the chunk is resent.
+                }
+                finally
+                {
+                    ReleasePendingMessageBytes(message.Payload);
+                }
+
+                if (sent)
+                {
+                    continue;
+                }
+
+                peer.BulkSenderRunning = false;
+                peer.Close();
+
+                if (_running)
+                {
+                    QueueMessage(message.Payload, message.TargetPlayerId);
+                }
+
+                OutboundMessage[] remaining;
+                lock (peer.BulkOutboundLock)
+                {
+                    remaining = peer.BulkOutbound.ToArray();
+                    peer.BulkOutbound.Clear();
+                }
+
+                foreach (OutboundMessage pending in remaining)
+                {
+                    ReleasePendingMessageBytes(pending.Payload);
+                    if (_running)
+                    {
+                        QueueMessage(pending.Payload, pending.TargetPlayerId);
+                    }
+                }
+
+                return;
+            }
         }
 
         private void OutboundLoop()
@@ -656,6 +830,14 @@ namespace Glasspage.UnitySync
                     throw new InvalidDataException("The collaborator did not send a valid hello message.");
                 }
 
+                if (TryParseBulkStreamDisplayName(hello.DisplayName, out int bulkStreamIndex))
+                {
+                    AuthenticateHostBulkPeer(peer, hello, bulkStreamIndex);
+                    authenticated = true;
+                    RunHostBulkPeerLoop(peer);
+                    return;
+                }
+
                 Peer supersededPeer = null;
                 lock (_peersLock)
                 {
@@ -675,6 +857,7 @@ namespace Glasspage.UnitySync
 
                     peer.PlayerId = hello.PlayerId;
                     peer.DisplayName = NormalizeDisplayName(hello.DisplayName);
+                    _peers.Add(peer);
                 }
 
                 supersededPeer?.Close();
@@ -869,15 +1052,31 @@ namespace Glasspage.UnitySync
             finally
             {
                 peer.Close();
-                lock (_peersLock)
-                {
-                    _peers.Remove(peer);
-                }
 
-                if (_running && authenticated && !peer.Superseded)
+                if (peer.IsBulk)
                 {
-                    EnqueuePeerLeft(peer.PlayerId);
-                    Broadcast(UnitySyncProtocol.CreatePeerLeft(peer.PlayerId), peer);
+                    lock (_bulkPeersLock)
+                    {
+                        _bulkPeers.Remove(peer);
+                    }
+                }
+                else
+                {
+                    lock (_peersLock)
+                    {
+                        _peers.Remove(peer);
+                    }
+
+                    if (authenticated && peer.PlayerId != Guid.Empty)
+                    {
+                        CloseBulkPeersForPlayer(peer.PlayerId);
+                    }
+
+                    if (_running && authenticated && !peer.Superseded)
+                    {
+                        EnqueuePeerLeft(peer.PlayerId);
+                        Broadcast(UnitySyncProtocol.CreatePeerLeft(peer.PlayerId), peer);
+                    }
                 }
             }
         }
@@ -918,6 +1117,7 @@ namespace Glasspage.UnitySync
                 server.PlayerId = welcome.PlayerId;
                 server.DisplayName = NormalizeDisplayName(welcome.DisplayName);
                 _clientReady = true;
+                StartBulkClientConnections(address, port, server.PlayerId);
                 Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName +
                     ". Local protocol " + UnitySyncProtocol.Version + " (packet diagnostics 2).");
 
@@ -1051,11 +1251,235 @@ namespace Glasspage.UnitySync
                 bool wasRunning = _running;
                 _running = false;
                 _serverPeer?.Close();
+                CloseAllBulkPeers();
                 if (wasRunning)
                 {
                     Enqueue(UnitySyncTransportEventKind.Disconnected, disconnectReason);
                 }
             }
+        }
+
+        private void AuthenticateHostBulkPeer(
+            Peer peer,
+            UnitySyncMessage hello,
+            int bulkStreamIndex)
+        {
+            if (bulkStreamIndex < 0 || bulkStreamIndex >= BulkFileStreamCount)
+            {
+                throw new InvalidDataException("The collaborator requested an invalid bulk file stream.");
+            }
+
+            lock (_peersLock)
+            {
+                if (!_peers.Exists(primary => primary.PlayerId == hello.PlayerId))
+                {
+                    throw new InvalidDataException(
+                        "A bulk file stream connected before its primary UnitySync connection.");
+                }
+            }
+
+            Peer superseded = null;
+            lock (_bulkPeersLock)
+            {
+                superseded = _bulkPeers.Find(
+                    other =>
+                        other.PlayerId == hello.PlayerId &&
+                        other.IsBulk &&
+                        other.BulkStreamIndex == bulkStreamIndex);
+                if (superseded != null)
+                {
+                    _bulkPeers.Remove(superseded);
+                }
+
+                peer.PlayerId = hello.PlayerId;
+                peer.DisplayName = "Bulk file stream " + (bulkStreamIndex + 1);
+                peer.IsBulk = true;
+                peer.BulkStreamIndex = bulkStreamIndex;
+                _bulkPeers.Add(peer);
+            }
+
+            superseded?.Close();
+            peer.Client.ReceiveTimeout = 0;
+            Send(peer, UnitySyncProtocol.CreateWelcome(_localPlayerId, _localDisplayName));
+            StartBulkOutboundThread(peer);
+        }
+
+        private void RunHostBulkPeerLoop(Peer peer)
+        {
+            while (_running)
+            {
+                UnitySyncMessage message = ReadMessage(peer);
+                throw new InvalidDataException(
+                    "A bulk file stream sent an unexpected " + message.Type + " message.");
+            }
+        }
+
+        private void StartBulkClientConnections(IPAddress address, int port, Guid hostPlayerId)
+        {
+            for (int index = 0; index < BulkFileStreamCount; index++)
+            {
+                int bulkStreamIndex = index;
+                Thread bulkThread = new Thread(
+                    () => BulkClientLoop(address, port, hostPlayerId, bulkStreamIndex))
+                {
+                    IsBackground = true,
+                    Name = "UnitySync Bulk Client " + (bulkStreamIndex + 1)
+                };
+                bulkThread.Start();
+            }
+        }
+
+        private void BulkClientLoop(
+            IPAddress address,
+            int port,
+            Guid hostPlayerId,
+            int bulkStreamIndex)
+        {
+            Peer server = null;
+            try
+            {
+                TcpClient client = new TcpClient(AddressFamily.InterNetwork);
+                ConfigureClient(client);
+                server = new Peer(client)
+                {
+                    IsBulk = true,
+                    BulkStreamIndex = bulkStreamIndex
+                };
+
+                client.Connect(address, port);
+                server.Stream = client.GetStream();
+                Send(
+                    server,
+                    UnitySyncProtocol.CreateHello(
+                        _localPlayerId,
+                        BulkStreamDisplayNamePrefix + bulkStreamIndex));
+
+                UnitySyncMessage welcome = ReadMessage(server);
+                if (welcome.Type != UnitySyncMessageType.Welcome ||
+                    welcome.PlayerId == Guid.Empty ||
+                    welcome.PlayerId != hostPlayerId)
+                {
+                    throw new InvalidDataException(
+                        "The host did not complete a bulk file stream handshake.");
+                }
+
+                server.PlayerId = welcome.PlayerId;
+                server.DisplayName = "Bulk file stream " + (bulkStreamIndex + 1);
+
+                int connectedBulkStreams;
+                lock (_bulkPeersLock)
+                {
+                    _bulkPeers.Add(server);
+                    connectedBulkStreams = 0;
+                    foreach (Peer peer in _bulkPeers)
+                    {
+                        if (peer.IsBulk && peer.PlayerId == hostPlayerId)
+                        {
+                            connectedBulkStreams++;
+                        }
+                    }
+                }
+
+                if (connectedBulkStreams == BulkFileStreamCount)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        BulkFileStreamCount + " parallel file transfer streams connected.");
+                }
+
+                while (_running)
+                {
+                    UnitySyncMessage message = ReadMessage(server);
+                    if (message.Type != UnitySyncMessageType.FileChunk ||
+                        message.PlayerId != hostPlayerId ||
+                        message.FileSync == null)
+                    {
+                        throw new InvalidDataException(
+                            "The host sent an unexpected message on a bulk file stream.");
+                    }
+
+                    EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is SocketException ||
+                exception is ObjectDisposedException ||
+                exception is CryptographicException ||
+                exception is InvalidDataException)
+            {
+                if (_running)
+                {
+                    Enqueue(
+                        UnitySyncTransportEventKind.Log,
+                        "Bulk file stream " + (bulkStreamIndex + 1) +
+                        " disconnected; file transfer will fall back as needed: " +
+                        exception.Message);
+                }
+            }
+            finally
+            {
+                if (server != null)
+                {
+                    server.Close();
+                    lock (_bulkPeersLock)
+                    {
+                        _bulkPeers.Remove(server);
+                    }
+                }
+            }
+        }
+
+        private void CloseBulkPeersForPlayer(Guid playerId)
+        {
+            Peer[] peers;
+            lock (_bulkPeersLock)
+            {
+                List<Peer> matches = new List<Peer>();
+                foreach (Peer peer in _bulkPeers)
+                {
+                    if (peer.PlayerId == playerId)
+                    {
+                        matches.Add(peer);
+                    }
+                }
+
+                peers = matches.ToArray();
+            }
+
+            foreach (Peer peer in peers)
+            {
+                peer.Close();
+            }
+        }
+
+        private void CloseAllBulkPeers()
+        {
+            Peer[] peers;
+            lock (_bulkPeersLock)
+            {
+                peers = _bulkPeers.ToArray();
+            }
+
+            foreach (Peer peer in peers)
+            {
+                peer.Close();
+            }
+        }
+
+        private static bool TryParseBulkStreamDisplayName(
+            string displayName,
+            out int bulkStreamIndex)
+        {
+            bulkStreamIndex = -1;
+            if (string.IsNullOrEmpty(displayName) ||
+                !displayName.StartsWith(BulkStreamDisplayNamePrefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            string suffix = displayName.Substring(BulkStreamDisplayNamePrefix.Length);
+            return int.TryParse(suffix, out bulkStreamIndex);
         }
 
         private UnitySyncMessage ReadMessage(Peer peer)
