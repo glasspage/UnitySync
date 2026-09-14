@@ -1,6 +1,10 @@
 using System;
+using System.IO;
+using System.Runtime.InteropServices;
 using UnityEditor;
 using UnityEngine;
+using Process = System.Diagnostics.Process;
+using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 
 namespace Glasspage.UnitySync
 {
@@ -163,16 +167,22 @@ namespace Glasspage.UnitySync
             EditorGUILayout.HelpBox(
                 UnitySyncFileSynchronizer.PackageChecklistOrderHint,
                 MessageType.Info);
-            string[] changes = UnitySyncFileSynchronizer.RequiredPackageChanges;
-            foreach (string change in changes)
+            UnitySyncFileSynchronizer.PackageChecklistItem[] items =
+                UnitySyncFileSynchronizer.RequiredPackageChecklistItems;
+            foreach (UnitySyncFileSynchronizer.PackageChecklistItem item in items)
             {
-                EditorGUILayout.HelpBox(change, MessageType.Warning);
+                EditorGUILayout.HelpBox(item.Text, MessageType.Warning);
+                if (GUILayout.Button(GetPackageActionLabel(item.Action)))
+                {
+                    OpenPackageHelper(item);
+                }
             }
 
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("Copy checklist"))
                 {
+                    string[] changes = UnitySyncFileSynchronizer.RequiredPackageChanges;
                     GUIUtility.systemCopyBuffer =
                         UnitySyncFileSynchronizer.PackageChecklistOrderHint +
                         Environment.NewLine + Environment.NewLine +
@@ -187,6 +197,129 @@ namespace Glasspage.UnitySync
                 }
             }
         }
+
+        private static string GetPackageActionLabel(
+            UnitySyncFileSynchronizer.PackageChecklistAction action)
+        {
+            switch (action)
+            {
+                case UnitySyncFileSynchronizer.PackageChecklistAction.CreatorCompanion:
+                    return "Open Creator Companion";
+                case UnitySyncFileSynchronizer.PackageChecklistAction.UnityPackageManager:
+                    return "Open Package Manager";
+                default:
+                    return "Search Google";
+            }
+        }
+
+        private void OpenPackageHelper(UnitySyncFileSynchronizer.PackageChecklistItem item)
+        {
+            _error = string.Empty;
+            switch (item.Action)
+            {
+                case UnitySyncFileSynchronizer.PackageChecklistAction.CreatorCompanion:
+                    if (!OpenCreatorCompanion())
+                    {
+                        _error = "Creator Companion could not be found. Install it from the VRChat website, then try again.";
+                        Application.OpenURL("https://vrchat.com/home/download");
+                    }
+                    break;
+                case UnitySyncFileSynchronizer.PackageChecklistAction.UnityPackageManager:
+                    if (!EditorApplication.ExecuteMenuItem("Window/Package Manager"))
+                    {
+                        _error = "Unity Package Manager could not be opened.";
+                    }
+                    break;
+                default:
+                    Application.OpenURL(
+                        "https://www.google.com/search?q=" + Uri.EscapeDataString(item.PackageName));
+                    break;
+            }
+        }
+
+        private static bool OpenCreatorCompanion()
+        {
+#if UNITY_EDITOR_WIN
+            foreach (Process process in Process.GetProcesses())
+            {
+                try
+                {
+                    if ((process.ProcessName.IndexOf("CreatorCompanion", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         process.ProcessName.Equals("VCC", StringComparison.OrdinalIgnoreCase)) &&
+                        process.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindow(process.MainWindowHandle, 9);
+                        SetForegroundWindow(process.MainWindowHandle);
+                        return true;
+                    }
+                }
+                catch (InvalidOperationException) { }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+
+            string executable = FindCreatorCompanionExecutable();
+            if (string.IsNullOrEmpty(executable))
+            {
+                return false;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = executable,
+                    UseShellExecute = true
+                });
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception) { }
+            catch (InvalidOperationException) { }
+            return false;
+#else
+            return false;
+#endif
+        }
+
+#if UNITY_EDITOR_WIN
+        private static string FindCreatorCompanionExecutable()
+        {
+            string programs = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs");
+            string[] candidates =
+            {
+                Path.Combine(programs, "VRChat Creator Companion", "CreatorCompanion.exe"),
+                Path.Combine(programs, "CreatorCompanion", "CreatorCompanion.exe"),
+                Path.Combine(programs, "VRChat Creator Companion", "VCC.exe")
+            };
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            try
+            {
+                string[] matches = Directory.GetFiles(
+                    programs, "CreatorCompanion.exe", SearchOption.AllDirectories);
+                return matches.Length > 0 ? matches[0] : string.Empty;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return string.Empty;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr windowHandle, int command);
+#endif
 
         private void DrawIdentity()
         {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEngine;
@@ -42,10 +43,39 @@ namespace Glasspage.UnitySync
             public string displayName;
             public string version;
             public string source;
+            public bool vccManaged;
         }
 
-        private static readonly List<string> PackageChanges = new List<string>();
-        internal static string[] RequiredPackageChanges => PackageChanges.ToArray();
+        internal enum PackageChecklistAction
+        {
+            CreatorCompanion,
+            UnityPackageManager,
+            WebSearch
+        }
+
+        internal sealed class PackageChecklistItem
+        {
+            internal string Text;
+            internal string PackageName;
+            internal PackageChecklistAction Action;
+        }
+
+        private static readonly List<PackageChecklistItem> PackageChanges =
+            new List<PackageChecklistItem>();
+        internal static PackageChecklistItem[] RequiredPackageChecklistItems =>
+            PackageChanges.ToArray();
+        internal static string[] RequiredPackageChanges
+        {
+            get
+            {
+                string[] changes = new string[PackageChanges.Count];
+                for (int i = 0; i < PackageChanges.Count; i++)
+                {
+                    changes[i] = PackageChanges[i].Text;
+                }
+                return changes;
+            }
+        }
         internal const string PackageChecklistOrderHint =
             "This project's packages are different from the host. Install these packages from top to bottom.";
 
@@ -1743,7 +1773,9 @@ namespace Glasspage.UnitySync
         {
             error = string.Empty;
             PackageChanges.Clear();
-            List<string> unityPackageChanges = new List<string>();
+            List<PackageChecklistItem> vccPackageChanges = new List<PackageChecklistItem>();
+            List<PackageChecklistItem> otherPackageChanges = new List<PackageChecklistItem>();
+            List<PackageChecklistItem> unityPackageChanges = new List<PackageChecklistItem>();
             if (GuestHostPackageVersions.Count != _guestExpectedFileCount)
             {
                 error = "The host package checklist was incomplete: received " +
@@ -1760,6 +1792,7 @@ namespace Glasspage.UnitySync
             {
                 local[package.name] = package;
             }
+            HashSet<string> localVccPackages = GetVccManagedPackageNames();
 
             foreach (KeyValuePair<string, string> entry in GuestHostPackageVersions)
             {
@@ -1790,35 +1823,149 @@ namespace Glasspage.UnitySync
                         : ComparePackageVersions(installed.version, requirement.version) < 0
                             ? "Upgrade"
                             : "Downgrade";
-                    string manager = requirement.name.StartsWith("com.vrchat.", StringComparison.Ordinal)
+                    bool vccManaged = IsVccManagedPackage(requirement.name, requirement.vccManaged);
+                    string manager = vccManaged
                         ? "Use Creator Companion → Manage Project and select the host version."
                         : requirement.source == "BuiltIn"
                             ? "Use the same Unity Editor version and enable this module in Package Manager."
                             : requirement.source == "Embedded" || requirement.source == "Local" || requirement.source == "Git"
                                 ? "Use the package's manager or obtain the matching release/source from the host."
                                 : "Use Unity Package Manager to select the host version; dependencies may update with their parent package.";
-                    (requirement.name.StartsWith("com.unity.", StringComparison.Ordinal)
-                        ? unityPackageChanges : PackageChanges).Add(title + " (" + requirement.name + ")" + Environment.NewLine +
-                        action + " to version " + requirement.version + Environment.NewLine + manager);
+                    string versionInstruction = installed == null
+                        ? "Install version " + requirement.version
+                        : action + " to version " + requirement.version;
+                    AddPackageChecklistItem(
+                        vccPackageChanges,
+                        otherPackageChanges,
+                        unityPackageChanges,
+                        new PackageChecklistItem
+                        {
+                            Text = title + " (" + requirement.name + ")" + Environment.NewLine +
+                                versionInstruction + Environment.NewLine + manager,
+                            PackageName = requirement.name,
+                            Action = GetPackageChecklistAction(requirement.name, vccManaged)
+                        },
+                        vccManaged);
                 }
                 local.Remove(requirement.name);
             }
 
             foreach (UnityEditor.PackageManager.PackageInfo extra in local.Values)
             {
-                (extra.name.StartsWith("com.unity.", StringComparison.Ordinal)
-                    ? unityPackageChanges : PackageChanges).Add(extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
-                    "Remove version " + extra.version + Environment.NewLine +
-                    "Remove it using its package manager; dependencies may disappear when their parent package is removed.");
+                bool vccManaged = IsVccManagedPackage(
+                    extra.name, localVccPackages.Contains(extra.name));
+                AddPackageChecklistItem(
+                    vccPackageChanges,
+                    otherPackageChanges,
+                    unityPackageChanges,
+                    new PackageChecklistItem
+                    {
+                        Text = extra.displayName + " (" + extra.name + ")" + Environment.NewLine +
+                            "Remove version " + extra.version + Environment.NewLine +
+                            "Remove it using its package manager; dependencies may disappear when their parent package is removed.",
+                        PackageName = extra.name,
+                        Action = GetPackageChecklistAction(extra.name, vccManaged)
+                    },
+                    vccManaged);
             }
-            PackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
-            unityPackageChanges.Sort(StringComparer.OrdinalIgnoreCase);
+            vccPackageChanges.Sort(ComparePackageChecklistItems);
+            otherPackageChanges.Sort(ComparePackageChecklistItems);
+            unityPackageChanges.Sort(ComparePackageChecklistItems);
+            PackageChanges.AddRange(vccPackageChanges);
+            PackageChanges.AddRange(otherPackageChanges);
             PackageChanges.AddRange(unityPackageChanges);
             SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.WaitingForPackageChanges;
             EditorUtility.ClearProgressBar();
-            UnitySyncSession.ReportPackageChecklist(PackageChanges.ToArray());
+            UnitySyncSession.ReportPackageChecklist(RequiredPackageChanges);
             return true;
+        }
+
+        private static void AddPackageChecklistItem(
+            List<PackageChecklistItem> vccPackages,
+            List<PackageChecklistItem> otherPackages,
+            List<PackageChecklistItem> unityPackages,
+            PackageChecklistItem item,
+            bool vccManaged)
+        {
+            if (vccManaged)
+            {
+                vccPackages.Add(item);
+            }
+            else if (item.PackageName.StartsWith("com.unity.", StringComparison.Ordinal))
+            {
+                unityPackages.Add(item);
+            }
+            else
+            {
+                otherPackages.Add(item);
+            }
+        }
+
+        private static UnitySyncFileSynchronizer.PackageChecklistAction GetPackageChecklistAction(
+            string packageName, bool vccManaged)
+        {
+            if (vccManaged)
+            {
+                return PackageChecklistAction.CreatorCompanion;
+            }
+            return packageName.StartsWith("com.unity.", StringComparison.Ordinal)
+                ? PackageChecklistAction.UnityPackageManager
+                : PackageChecklistAction.WebSearch;
+        }
+
+        private static int ComparePackageChecklistItems(
+            PackageChecklistItem left, PackageChecklistItem right)
+        {
+            bool leftIsVrChat = left.PackageName.StartsWith(
+                "com.vrchat.", StringComparison.Ordinal);
+            bool rightIsVrChat = right.PackageName.StartsWith(
+                "com.vrchat.", StringComparison.Ordinal);
+            if (leftIsVrChat != rightIsVrChat)
+            {
+                return leftIsVrChat ? -1 : 1;
+            }
+            return StringComparer.OrdinalIgnoreCase.Compare(left.PackageName, right.PackageName);
+        }
+
+        private static bool IsVccManagedPackage(string packageName, bool listedInVpmManifest)
+        {
+            if (packageName.StartsWith("com.vrchat.", StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return !packageName.StartsWith("com.unity.", StringComparison.Ordinal) &&
+                listedInVpmManifest;
+        }
+
+        private static HashSet<string> GetVccManagedPackageNames()
+        {
+            HashSet<string> packageNames = new HashSet<string>(StringComparer.Ordinal);
+            string manifestPath = Path.Combine(GetProjectRoot(), "Packages", "vpm-manifest.json");
+            try
+            {
+                if (!File.Exists(manifestPath))
+                {
+                    return packageNames;
+                }
+
+                string json = File.ReadAllText(manifestPath);
+                MatchCollection matches = Regex.Matches(
+                    json,
+                    "\\\"(?<name>[^\\\"]+)\\\"\\s*:\\s*\\{");
+                foreach (Match match in matches)
+                {
+                    string packageName = match.Groups["name"].Value;
+                    if (packageName.IndexOf('.') >= 0)
+                    {
+                        packageNames.Add(packageName);
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            return packageNames;
         }
 
         private static int ComparePackageVersions(string installedVersion, string hostVersion)
@@ -2221,6 +2368,7 @@ namespace Glasspage.UnitySync
             else if (scope == UnitySyncFileSyncScope.Packages)
             {
                 List<FileEntry> catalog = new List<FileEntry>();
+                HashSet<string> vccPackages = GetVccManagedPackageNames();
                 foreach (UnityEditor.PackageManager.PackageInfo package in
                          UnityEditor.PackageManager.PackageInfo.GetAllRegisteredPackages())
                 {
@@ -2232,7 +2380,9 @@ namespace Glasspage.UnitySync
                             name = package.name,
                             displayName = package.displayName,
                             version = package.version,
-                            source = package.source.ToString()
+                            source = package.source.ToString(),
+                            vccManaged = IsVccManagedPackage(
+                                package.name, vccPackages.Contains(package.name))
                         }),
                         Length = 0,
                         Hash = new byte[32]
