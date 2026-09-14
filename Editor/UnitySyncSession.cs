@@ -122,7 +122,7 @@ namespace Glasspage.UnitySync
                 UnitySyncPresenceRoot.AddTimedStatus(
                     "Session started",
                     Color.white,
-                    UnitySyncSceneStatusPriority.Important,
+                    UnitySyncSceneStatusPriority.Normal,
                     StatusEventDurationSeconds);
                 AddLog("Hosting on " + advertisedAddress + ":" + port + ".");
                 Changed?.Invoke();
@@ -461,7 +461,7 @@ namespace Glasspage.UnitySync
                             UnitySyncPresenceRoot.AddTimedStatus(
                                 "Session started",
                                 Color.white,
-                                UnitySyncSceneStatusPriority.Important,
+                                UnitySyncSceneStatusPriority.Normal,
                                 StatusEventDurationSeconds);
                         }
 
@@ -1005,7 +1005,7 @@ namespace Glasspage.UnitySync
                 UnitySyncPresenceRoot.AddTimedStatus(
                     "Session ended",
                     Color.white,
-                    UnitySyncSceneStatusPriority.Important,
+                    UnitySyncSceneStatusPriority.Normal,
                     StatusEventDurationSeconds);
             }
 
