@@ -155,7 +155,7 @@ namespace Glasspage.UnitySync
         private const int CompareFilesPerUpdate = 12;
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 512;
-        private const long MaximumQueuedFileTransferBytes = 64L * 1024L * 1024L;
+        private const long MaximumQueuedFileTransferBytes = 128L * 1024L * 1024L;
         private const double ImportSettleSeconds = 1.0d;
 
         private static readonly Dictionary<Guid, HostManifest> HostManifests =
