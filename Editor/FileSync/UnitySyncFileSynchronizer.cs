@@ -168,8 +168,6 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly List<HostManifestBuild> HostManifestBuilds =
             new List<HostManifestBuild>();
-        private static readonly SemaphoreSlim HostManifestDiskGate =
-            new SemaphoreSlim(1, 1);
 
         private static readonly HashSet<Guid> RestoreRequests = new HashSet<Guid>();
         private static bool _guestForceRestore;
@@ -2564,11 +2562,8 @@ namespace Glasspage.UnitySync
             string projectRoot,
             CancellationToken cancellationToken)
         {
-            bool gateHeld = false;
             try
             {
-                HostManifestDiskGate.Wait(cancellationToken);
-                gateHeld = true;
                 cancellationToken.ThrowIfCancellationRequested();
 
                 List<string> files = new List<string>();
@@ -2657,13 +2652,6 @@ namespace Glasspage.UnitySync
                 {
                     Error = exception.Message
                 };
-            }
-            finally
-            {
-                if (gateHeld)
-                {
-                    HostManifestDiskGate.Release();
-                }
             }
         }
 
