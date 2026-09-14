@@ -1194,7 +1194,7 @@ namespace Glasspage.UnitySync
         private static void ConfigureClient(TcpClient client)
         {
             client.NoDelay = true;
-            client.SendTimeout = 5000;
+            client.SendTimeout = 0;
             // Leave TCP send/receive buffer sizing to the OS. UnitySync file chunks can be
             // hundreds of kilobytes, and forcing a 16 KB socket buffer severely constrains
             // throughput once latency is non-trivial (VPN/WAN connections in particular).
