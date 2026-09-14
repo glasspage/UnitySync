@@ -1071,10 +1071,12 @@ namespace Glasspage.UnitySync
                 _clientReady = false;
                 bool wasRunning = _running;
                 _running = false;
+                Guid disconnectedPlayerId =
+                    _serverPeer != null ? _serverPeer.PlayerId : Guid.Empty;
                 _serverPeer?.Close();
                 if (wasRunning)
                 {
-                    Enqueue(UnitySyncTransportEventKind.Disconnected, disconnectReason);
+                    EnqueueDisconnected(disconnectedPlayerId, disconnectReason);
                 }
             }
         }
@@ -1331,6 +1333,19 @@ namespace Glasspage.UnitySync
             lock (_eventsLock)
             {
                 _events.Enqueue(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
+            }
+        }
+
+        private void EnqueueDisconnected(Guid playerId, string message)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.Disconnected,
+                    default,
+                    null,
+                    playerId,
+                    message));
             }
         }
 
