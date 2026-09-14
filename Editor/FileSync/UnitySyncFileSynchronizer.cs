@@ -2901,13 +2901,13 @@ namespace Glasspage.UnitySync
             string candidate = Path.GetFullPath(Path.Combine(
                 projectRoot,
                 projectPath.Replace('/', Path.DirectorySeparatorChar)));
-            string rootName = projectPath.Replace('\', '/').Split('/')[0];
+            string rootName = projectPath.Replace('\\', '/').Split('/')[0];
             string allowedRoot = Path.GetFullPath(Path.Combine(projectRoot, rootName));
             string allowedPrefix = allowedRoot.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
 
-            StringComparison comparison = Path.DirectorySeparatorChar == '\'
+            StringComparison comparison = Path.DirectorySeparatorChar == '\\'
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
             if (!candidate.StartsWith(allowedPrefix, comparison))
