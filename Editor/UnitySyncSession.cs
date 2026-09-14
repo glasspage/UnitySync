@@ -39,6 +39,8 @@ namespace Glasspage.UnitySync
         private static readonly List<string> Logs = new List<string>();
         private static readonly Dictionary<Guid, PendingGuestViewport> PendingGuestViewports =
             new Dictionary<Guid, PendingGuestViewport>();
+        private static readonly Dictionary<Guid, UnitySyncRemoteParticipant> RemoteParticipants =
+            new Dictionary<Guid, UnitySyncRemoteParticipant>();
 
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
@@ -114,12 +116,13 @@ namespace Glasspage.UnitySync
             {
                 _displayName = NormalizeDisplayName(displayName);
                 _color = NormalizeColor(color);
-                _transport = new UnitySyncTransport(LocalPlayerId, _displayName, secret);
+                _transport = new UnitySyncTransport(LocalPlayerId, _displayName, _color, secret);
                 _transport.StartHost(port);
                 _joinCode = code;
                 _guestJoinCode = string.Empty;
                 _guestSyncApproved = true;
                 PendingGuestViewports.Clear();
+                RemoteParticipants.Clear();
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
@@ -168,11 +171,12 @@ namespace Glasspage.UnitySync
             {
                 _displayName = NormalizeDisplayName(displayName);
                 _color = NormalizeColor(color);
-                _transport = new UnitySyncTransport(LocalPlayerId, _displayName, data.Secret);
+                _transport = new UnitySyncTransport(LocalPlayerId, _displayName, _color, data.Secret);
                 _transport.StartClient(data.Address, data.Port);
                 _guestJoinCode = joinCode;
                 _guestSyncApproved = false;
                 PendingGuestViewports.Clear();
+                RemoteParticipants.Clear();
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _hasLastViewportState = false;
@@ -319,9 +323,12 @@ namespace Glasspage.UnitySync
 
         internal static UnitySyncRemoteParticipant[] GetRemoteParticipants()
         {
-            return IsGuestSyncDeferred
-                ? new UnitySyncRemoteParticipant[0]
-                : UnitySyncPresenceRoot.GetParticipants();
+            List<UnitySyncRemoteParticipant> participants =
+                new List<UnitySyncRemoteParticipant>(RemoteParticipants.Values);
+            participants.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(
+                left.DisplayName,
+                right.DisplayName));
+            return participants.ToArray();
         }
 
         internal static bool CanSpectate(Guid playerId)
@@ -457,6 +464,11 @@ namespace Glasspage.UnitySync
                 {
                     case UnitySyncTransportEventKind.Connected:
                         _state = UnitySyncSessionState.Connected;
+                        SetRemoteParticipant(
+                            transportEvent.PlayerId,
+                            transportEvent.DisplayName,
+                            transportEvent.Color,
+                            Guid.Empty);
                         UnitySyncFileSynchronizer.BeginGuestSync(
                             transport,
                             _guestSyncApproved);
@@ -473,12 +485,26 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
 
+                    case UnitySyncTransportEventKind.PeerJoined:
+                        SetRemoteParticipant(
+                            transportEvent.PlayerId,
+                            transportEvent.DisplayName,
+                            transportEvent.Color,
+                            Guid.Empty);
+                        Changed?.Invoke();
+                        break;
+
                     case UnitySyncTransportEventKind.Disconnected:
                         AddLog(transportEvent.Message);
                         disconnected = true;
                         break;
 
                     case UnitySyncTransportEventKind.Viewport:
+                        SetRemoteParticipant(
+                            transportEvent.Viewport.PlayerId,
+                            transportEvent.Viewport.DisplayName,
+                            transportEvent.Viewport.Color,
+                            transportEvent.Viewport.SpectatingPlayerId);
                         if (IsGuestSyncDeferred)
                         {
                             PendingGuestViewports[transportEvent.Viewport.PlayerId] =
@@ -506,10 +532,12 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        RemoteParticipants.Remove(transportEvent.PlayerId);
                         if (IsGuestSyncDeferred)
                         {
                             PendingGuestViewports.Remove(transportEvent.PlayerId);
                             UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
+                            Changed?.Invoke();
                             break;
                         }
 
@@ -961,6 +989,26 @@ namespace Glasspage.UnitySync
             Changed?.Invoke();
         }
 
+        private static void SetRemoteParticipant(
+            Guid playerId,
+            string displayName,
+            Color color,
+            Guid spectatingPlayerId)
+        {
+            if (playerId == Guid.Empty || playerId == LocalPlayerId)
+            {
+                return;
+            }
+
+            string normalizedName = NormalizeDisplayName(displayName);
+            Color normalizedColor = NormalizeColor(color);
+            RemoteParticipants[playerId] = new UnitySyncRemoteParticipant(
+                playerId,
+                normalizedName,
+                normalizedColor,
+                spectatingPlayerId);
+        }
+
         private static bool ColorsEqual(Color left, Color right)
         {
             return Mathf.Approximately(left.r, right.r) &&
@@ -983,6 +1031,7 @@ namespace Glasspage.UnitySync
             _guestSyncApproved = false;
             _fileSyncResumeConnectionPending = false;
             PendingGuestViewports.Clear();
+            RemoteParticipants.Clear();
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
