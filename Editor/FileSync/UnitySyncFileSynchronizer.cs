@@ -154,10 +154,8 @@ namespace Glasspage.UnitySync
         private const string ExcludedFolderName = "SerializedUdonPrograms";
         private const int CompareFilesPerUpdate = 12;
         private const int ManifestMessagesPerUpdate = 64;
-        private const int FileRequestsPerUpdate = 32;
-        private const int MaximumFileChunksPerUpdate = 64;
-        private const long FileTransferBytesPerUpdate = 2L * 1024L * 1024L;
-        private const double FileTransferTimeBudgetSeconds = 0.004d;
+        private const int FileRequestsPerUpdate = 512;
+        private const long MaximumQueuedFileTransferBytes = 64L * 1024L * 1024L;
         private const double ImportSettleSeconds = 1.0d;
 
         private static readonly Dictionary<Guid, HostManifest> HostManifests =
@@ -816,24 +814,13 @@ namespace Glasspage.UnitySync
             UnitySyncTransport transport,
             Guid localPlayerId)
         {
-            int chunksSent = 0;
-            long bytesQueued = 0;
-            long transferStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Initial asset transfer is throughput-oriented. Keep the transport's outbound
+            // worker fed from disk until a bounded network backlog is full, then let TCP
+            // backpressure decide the pace. This avoids artificial per-frame HDD-era limits
+            // while still preventing an entire project from being buffered in memory.
             while (HostTransfers.Count > 0 &&
-                   chunksSent < MaximumFileChunksPerUpdate)
+                   transport.PendingOutboundBytes < MaximumQueuedFileTransferBytes)
             {
-                if (chunksSent > 0)
-                {
-                    double elapsedSeconds =
-                        (System.Diagnostics.Stopwatch.GetTimestamp() - transferStart) /
-                        (double)System.Diagnostics.Stopwatch.Frequency;
-                    if (elapsedSeconds >= FileTransferTimeBudgetSeconds ||
-                        bytesQueued >= FileTransferBytesPerUpdate)
-                    {
-                        break;
-                    }
-                }
-
                 HostTransfer transfer = HostTransfers.Peek();
                 try
                 {
@@ -862,13 +849,14 @@ namespace Glasspage.UnitySync
                         }
 
                         // The manifest already contains a SHA-256 for this file. Avoid hashing it
-                        // a second time on Unity's main thread before transfer; the guest performs
-                        // a final SHA-256 check against the manifest before installing the file.
+                        // a second time before transfer; the guest verifies against the manifest.
                         transfer.Stream = new FileStream(
                             fullPath,
                             FileMode.Open,
                             FileAccess.Read,
-                            FileShare.ReadWrite | FileShare.Delete);
+                            FileShare.ReadWrite | FileShare.Delete,
+                            1024 * 1024,
+                            FileOptions.SequentialScan);
                     }
 
                     if (transfer.Entry.Length == 0 && !transfer.EmptyChunkSent)
@@ -887,16 +875,11 @@ namespace Glasspage.UnitySync
                             transfer.TargetPlayerId);
                         transfer.EmptyChunkSent = true;
                         CompleteHostTransfer();
-                        chunksSent++;
                         continue;
                     }
 
-                    long remainingByteBudget =
-                        Math.Max(1L, FileTransferBytesPerUpdate - bytesQueued);
                     int readSize = (int)Math.Min(
-                        Math.Min(
-                            UnitySyncProtocol.MaximumFileChunkBytes,
-                            remainingByteBudget),
+                        UnitySyncProtocol.MaximumFileChunkBytes,
                         transfer.Entry.Length - transfer.Offset);
                     byte[] buffer = new byte[readSize];
                     int read = transfer.Stream.Read(buffer, 0, readSize);
@@ -934,9 +917,6 @@ namespace Glasspage.UnitySync
                     {
                         CompleteHostTransfer();
                     }
-
-                    chunksSent++;
-                    bytesQueued += read;
                 }
                 catch (Exception exception) when (
                     exception is IOException ||
