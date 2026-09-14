@@ -1826,10 +1826,15 @@ namespace Glasspage.UnitySync
             string stageName = _guestDownloadKind == GuestDownloadKind.Packages
                 ? "Packages"
                 : "Assets";
+            int percent = Mathf.Clamp(
+                Mathf.RoundToInt(byteProgress * 100f),
+                0,
+                100);
             EditorUtility.DisplayProgressBar(
                 "UnitySync — Syncing Files",
                 "Receiving host " + stageName + "... " +
-                _guestCompletedFiles + "/" + GuestActiveMismatches.Count,
+                percent + "% (" +
+                _guestCompletedFiles + "/" + GuestActiveMismatches.Count + ")",
                 Mathf.Lerp(0.45f, 0.82f, byteProgress));
         }
 
