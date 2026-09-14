@@ -1195,9 +1195,14 @@ namespace Glasspage.UnitySync
         {
             client.NoDelay = true;
             client.SendTimeout = 0;
-            // Leave TCP send/receive buffer sizing to the OS. UnitySync file chunks can be
-            // hundreds of kilobytes, and forcing a 16 KB socket buffer severely constrains
-            // throughput once latency is non-trivial (VPN/WAN connections in particular).
+
+            // Keep enough socket-buffer headroom for high-latency WAN/VPN transfers. File sync
+            // can queue large chunks, so small/default socket buffers can otherwise become the
+            // effective throughput ceiling even when disk and local processing are much faster.
+            const int socketBufferBytes = 4 * 1024 * 1024;
+            client.SendBufferSize = socketBufferBytes;
+            client.ReceiveBufferSize = socketBufferBytes;
+
             client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
         }
 
