@@ -28,6 +28,7 @@ namespace Glasspage.UnitySync
         private const string FileSyncResumeApprovedKey = "Glasspage.UnitySync.FileSyncResume.Approved";
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
+        private const double CollaboratorConnectionStatusDurationSeconds = 8d;
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
@@ -462,6 +463,18 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.Disconnected:
+                        if (transportEvent.PlayerId != Guid.Empty &&
+                            UnitySyncPresenceRoot.TryGetViewport(
+                                transportEvent.PlayerId,
+                                out UnitySyncViewportState disconnectedViewport))
+                        {
+                            UnitySyncPresenceRoot.AddTimedStatus(
+                                disconnectedViewport.DisplayName + " disconnected",
+                                disconnectedViewport.Color,
+                                UnitySyncSceneStatusPriority.Important,
+                                CollaboratorConnectionStatusDurationSeconds);
+                        }
+
                         AddLog(transportEvent.Message);
                         disconnected = true;
                         break;
@@ -483,6 +496,17 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        if (UnitySyncPresenceRoot.TryGetViewport(
+                                transportEvent.PlayerId,
+                                out UnitySyncViewportState departingViewport))
+                        {
+                            UnitySyncPresenceRoot.AddTimedStatus(
+                                departingViewport.DisplayName + " disconnected",
+                                departingViewport.Color,
+                                UnitySyncSceneStatusPriority.Important,
+                                CollaboratorConnectionStatusDurationSeconds);
+                        }
+
                         if (_spectatingPlayerId == transportEvent.PlayerId)
                         {
                             StopSpectatingInternal(true, false);
@@ -908,6 +932,12 @@ namespace Glasspage.UnitySync
                 receivedAtSeconds);
             if (isNewParticipant)
             {
+                UnitySyncPresenceRoot.AddTimedStatus(
+                    viewport.DisplayName + " connected",
+                    viewport.Color,
+                    UnitySyncSceneStatusPriority.Important,
+                    CollaboratorConnectionStatusDurationSeconds);
+
                 // A newly visible collaborator is also a join signal for existing peers.
                 // Re-advertise our current viewport so the newcomer immediately receives
                 // the full collaborator list instead of waiting for somebody to move.
