@@ -4,6 +4,7 @@
 
 - Show connected collaborators in the list during initial file reconciliation instead of waiting for Assets synchronization to finish.
 - Show host-side Scene view status for each guest actively receiving synchronized files, using the collaborator's color and guest-reported receive percentage.
+- Show the same byte-based receive percentage in the guest's own Unity loading bar while downloading synchronized Assets.
 - Use a shared bottom-right Scene view status stack ordered by priority and then time; collaborator connect/disconnect events are high priority and remain visible for 8 seconds.
 - Show white `Session started` and `Session ended` statuses for 8 seconds without treating package/script-reload reconnections as new sessions.
 - Bump the UnitySync wire protocol to version 17 for guest download progress reporting. Both editors must use this build.
