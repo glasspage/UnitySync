@@ -522,9 +522,14 @@ namespace Glasspage.UnitySync
                     _remoteSnapshot.RepresentedObjectIds.Add(change.Address.ObjectId);
                 }
 
-                // Remember the final remote state before rewinding a live Transform for
-                // interpolation so echo suppression compares against the real target state.
-                RememberAppliedState(change);
+                // Snapshot application already suppresses Unity object-change notifications
+                // through the end-of-snapshot delay call, so re-capturing and hashing every
+                // snapshot object here is redundant and can be very expensive in large scenes.
+                // Live edits still need the applied-state hash for delayed echo suppression.
+                if (change.SnapshotId == Guid.Empty)
+                {
+                    RememberAppliedState(change);
+                }
 
                 if (interpolateTransform && transform != null)
                 {
