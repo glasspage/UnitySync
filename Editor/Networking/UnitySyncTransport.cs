@@ -17,6 +17,7 @@ namespace Glasspage.UnitySync
         Viewport,
         Selection,
         AssetImportState,
+        BuildTarget,
         FileSync,
         PeerLeft,
         SceneObjectChange,
@@ -34,6 +35,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSelectionState Selection;
         internal readonly bool IsImportingAssets;
+        internal readonly string BuildTargetName;
         internal readonly UnitySyncMessageType MessageType;
         internal readonly UnitySyncFileSyncMessage FileSync;
         internal readonly UnitySyncSceneObjectChange SceneChange;
@@ -53,12 +55,14 @@ namespace Glasspage.UnitySync
             UnitySyncMessageType messageType = default(UnitySyncMessageType),
             UnitySyncFileSyncMessage fileSync = null,
             double receivedAtSeconds = 0d,
-            bool isImportingAssets = false)
+            bool isImportingAssets = false,
+            string buildTargetName = "")
         {
             Kind = kind;
             Viewport = viewport;
             Selection = selection;
             IsImportingAssets = isImportingAssets;
+            BuildTargetName = buildTargetName ?? string.Empty;
             MessageType = messageType;
             FileSync = fileSync;
             SceneChange = sceneChange;
@@ -137,6 +141,7 @@ namespace Glasspage.UnitySync
         private Peer _serverPeer;
         private byte[] _pendingLocalViewport;
         private byte[] _pendingLocalSelection;
+        private string _localBuildTargetName = string.Empty;
 
         internal UnitySyncTransport(Guid localPlayerId, string localDisplayName, byte[] secret)
         {
@@ -237,6 +242,41 @@ namespace Glasspage.UnitySync
                     _localPlayerId,
                     isImportingAssets),
                 Guid.Empty);
+        }
+
+        internal void SetLocalBuildTarget(string buildTargetName)
+        {
+            _localBuildTargetName = buildTargetName ?? string.Empty;
+        }
+
+        internal void SendBuildTarget(string buildTargetName)
+        {
+            if (!_running || string.IsNullOrEmpty(buildTargetName))
+            {
+                return;
+            }
+
+            _localBuildTargetName = buildTargetName;
+            byte[] payload =
+                UnitySyncProtocol.CreateBuildTarget(_localPlayerId, buildTargetName);
+
+            // A platform change can reload editor assemblies immediately after the
+            // active-target callback returns. Send this tiny control packet directly so
+            // it cannot be stranded in the normal asynchronous outbound queue.
+            if (_isHost)
+            {
+                Broadcast(payload, null);
+                return;
+            }
+
+            Peer server = _serverPeer;
+            if (_clientReady && server != null)
+            {
+                TrySend(server, payload);
+                return;
+            }
+
+            QueueMessage(payload, Guid.Empty);
         }
 
         internal void SendRestoreProjectControl(UnitySyncMessageType type, Guid targetPlayerId)
@@ -717,7 +757,12 @@ namespace Glasspage.UnitySync
 
                 supersededPeer?.Close();
                 peer.Client.ReceiveTimeout = 0;
-                Send(peer, UnitySyncProtocol.CreateWelcome(_localPlayerId, _localDisplayName));
+                Send(
+                    peer,
+                    UnitySyncProtocol.CreateWelcome(
+                        _localPlayerId,
+                        _localDisplayName,
+                        _localBuildTargetName));
                 authenticated = true;
                 Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " joined the session.");
 
@@ -767,6 +812,22 @@ namespace Glasspage.UnitySync
                                     message.PlayerId,
                                     message.IsImportingAssets),
                                 peer);
+                            break;
+
+                        case UnitySyncMessageType.BuildTarget:
+                            if (message.PlayerId != peer.PlayerId ||
+                                string.IsNullOrEmpty(message.BuildTargetName))
+                            {
+                                throw new InvalidDataException(
+                                    "A collaborator sent an invalid build target update.");
+                            }
+
+                            // Guest build-target changes are applied by the host first. The
+                            // session layer re-broadcasts the host-authored target only after
+                            // Unity successfully switches, keeping one authoritative platform.
+                            EnqueueBuildTarget(
+                                message.PlayerId,
+                                message.BuildTargetName);
                             break;
 
                         case UnitySyncMessageType.RestoreProjectRequest:
@@ -973,6 +1034,12 @@ namespace Glasspage.UnitySync
 
                 server.PlayerId = welcome.PlayerId;
                 server.DisplayName = NormalizeDisplayName(welcome.DisplayName);
+
+                // Apply the host platform before the Connected event starts package/file sync.
+                // If switching platforms triggers a script reload, Connected remains queued
+                // until UnitySync resumes in the new editor domain.
+                EnqueueBuildTarget(server.PlayerId, welcome.BuildTargetName);
+
                 _clientReady = true;
                 Enqueue(UnitySyncTransportEventKind.Connected, "Connected to " + server.DisplayName +
                     ". Local protocol " + UnitySyncProtocol.Version + " (packet diagnostics 2).");
@@ -1010,6 +1077,19 @@ namespace Glasspage.UnitySync
                             EnqueueAssetImportState(
                                 message.PlayerId,
                                 message.IsImportingAssets);
+                            break;
+
+                        case UnitySyncMessageType.BuildTarget:
+                            if (message.PlayerId != server.PlayerId ||
+                                string.IsNullOrEmpty(message.BuildTargetName))
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid build target update.");
+                            }
+
+                            EnqueueBuildTarget(
+                                message.PlayerId,
+                                message.BuildTargetName);
                             break;
 
                         case UnitySyncMessageType.RestoreProjectAccepted:
@@ -1437,6 +1517,20 @@ namespace Glasspage.UnitySync
                     playerId,
                     string.Empty,
                     isImportingAssets: isImportingAssets));
+            }
+        }
+
+        private void EnqueueBuildTarget(Guid playerId, string buildTargetName)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.BuildTarget,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    buildTargetName: buildTargetName));
             }
         }
 
