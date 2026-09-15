@@ -127,6 +127,9 @@ namespace Glasspage.UnitySync
             SnapshotComponentStates =
                 new Dictionary<int, CachedSnapshotComponentState>();
 
+        private static readonly List<Component> SnapshotComponentBuffer =
+            new List<Component>(16);
+
         private static bool _active;
         private static bool _applyingRemoteChange;
         private static bool _suppressPublishedSnapshotChanges;
@@ -730,15 +733,18 @@ namespace Glasspage.UnitySync
             }
 
             int componentIndex = change.Components[0].ComponentIndex;
-            Component[] components = gameObject.GetComponents<Component>();
+            SnapshotComponentBuffer.Clear();
+            gameObject.GetComponents(SnapshotComponentBuffer);
             if (componentIndex < 0 ||
-                componentIndex >= components.Length ||
-                components[componentIndex] == null)
+                componentIndex >= SnapshotComponentBuffer.Count ||
+                SnapshotComponentBuffer[componentIndex] == null)
             {
+                SnapshotComponentBuffer.Clear();
                 return false;
             }
 
-            component = components[componentIndex];
+            component = SnapshotComponentBuffer[componentIndex];
+            SnapshotComponentBuffer.Clear();
             return true;
         }
 
