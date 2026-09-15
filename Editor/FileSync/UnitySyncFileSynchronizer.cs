@@ -120,7 +120,7 @@ namespace Glasspage.UnitySync
             internal string Path;
             internal string PackageVersion = string.Empty;
             internal long Length;
-            internal byte[] Hash;
+            internal ulong Hash;
         }
 
         private sealed class HostManifest
@@ -1189,8 +1189,6 @@ namespace Glasspage.UnitySync
                 playerId != _guestHostPlayerId ||
                 message == null ||
                 message.SyncId != _guestSyncId ||
-                message.Hash == null ||
-                message.Hash.Length != 32 ||
                 message.Length < 0 ||
                 GuestManifest.Count >= _guestExpectedFileCount ||
                 !IsSafeSyncPath(message.Path) ||
@@ -1206,7 +1204,7 @@ namespace Glasspage.UnitySync
             {
                 Path = message.Path,
                 Length = message.Length,
-                Hash = CopyHash(message.Hash)
+                Hash = message.Hash
             };
             GuestManifest.Add(entry);
             GuestManifestByPath.Add(entry.Path, entry);
@@ -1307,9 +1305,10 @@ namespace Glasspage.UnitySync
                         TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
-                        FileInfo info = new FileInfo(fullPath);
-                        matches = info.Length == entry.Length &&
-                                  HashesEqual(ComputeHash(fullPath), entry.Hash);
+                        matches = UnitySyncXxHash64.MatchesFile(
+                            fullPath,
+                            entry.Length,
+                            entry.Hash);
                     }
 
                     if (!matches &&
@@ -1534,8 +1533,7 @@ namespace Glasspage.UnitySync
                     ? !PathMatchesScope(entry.Path, UnitySyncFileSyncScope.Project)
                     : !IsAssetPath(entry.Path)) ||
                 message.Length != entry.Length ||
-                message.Hash == null ||
-                !HashesEqual(message.Hash, entry.Hash) ||
+                message.Hash != entry.Hash ||
                 message.Data == null ||
                 message.Data.Length > UnitySyncProtocol.MaximumFileChunkBytes)
             {
@@ -1595,7 +1593,10 @@ namespace Glasspage.UnitySync
 
                 transfer.Stream.Dispose();
                 transfer.Stream = null;
-                if (!HashesEqual(ComputeHash(transfer.TempPath), entry.Hash))
+                if (!UnitySyncXxHash64.MatchesFile(
+                    transfer.TempPath,
+                    entry.Length,
+                    entry.Hash))
                 {
                     error = "A synchronized file failed its final hash check: " + entry.Path;
                     FailGuestSync(error);
@@ -2429,15 +2430,16 @@ namespace Glasspage.UnitySync
                     }
 
                     string staged = GetGuestStagedFilePath(entry.Path);
-                    if (!File.Exists(staged) || !HashesEqual(ComputeHash(staged), entry.Hash))
+                    if (!File.Exists(staged) ||
+                        !UnitySyncXxHash64.MatchesFile(staged, entry.Length, entry.Hash))
                     {
                         throw new IOException("The staged file failed verification: " + entry.Path);
                     }
 
                     // Native plugins may be mapped into the Editor even when the surrounding
                     // package metadata changes. An identical file needs no write or deletion.
-                    if (File.Exists(target) && new FileInfo(target).Length == entry.Length &&
-                        HashesEqual(ComputeHash(target), entry.Hash))
+                    if (File.Exists(target) &&
+                        UnitySyncXxHash64.MatchesFile(target, entry.Length, entry.Hash))
                     {
                         continue;
                     }
@@ -2740,7 +2742,7 @@ namespace Glasspage.UnitySync
                             package.name, vccPackages.Contains(package.name))
                     }),
                     Length = 0,
-                    Hash = new byte[32]
+                    Hash = 0UL
                 });
             }
 
@@ -2864,33 +2866,18 @@ namespace Glasspage.UnitySync
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    using (FileStream stream = new FileStream(
-                               fullPath,
-                               FileMode.Open,
-                               FileAccess.Read,
-                               FileShare.ReadWrite | FileShare.Delete))
-                    using (SHA256 sha256 = SHA256.Create())
-                    {
-                        long length = stream.Length;
-                        byte[] hash = sha256.ComputeHash(stream);
-                        if (stream.Length != length)
-                        {
-                            if (attempt == 0)
-                            {
-                                Thread.Sleep(5);
-                                continue;
-                            }
-                            return false;
-                        }
+                    ulong hash = UnitySyncXxHash64.ComputeFile(
+                        fullPath,
+                        cancellationToken,
+                        out long length);
 
-                        entry = new FileEntry
-                        {
-                            Path = projectPath,
-                            Length = length,
-                            Hash = hash
-                        };
-                        return true;
-                    }
+                    entry = new FileEntry
+                    {
+                        Path = projectPath,
+                        Length = length,
+                        Hash = hash
+                    };
+                    return true;
                 }
                 catch (FileNotFoundException)
                 {
@@ -3137,40 +3124,222 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static byte[] ComputeHash(string fullPath)
+    }
+
+    internal static class UnitySyncXxHash64
+    {
+        private const ulong Prime1 = 11400714785074694791UL;
+        private const ulong Prime2 = 14029467366897019727UL;
+        private const ulong Prime3 = 1609587929392839161UL;
+        private const ulong Prime4 = 9650029242287828579UL;
+        private const ulong Prime5 = 2870177450012600261UL;
+        private const int HashBufferSize = 1024 * 1024;
+
+        [ThreadStatic]
+        private static byte[] _hashBuffer;
+
+        internal static ulong ComputeFile(
+            string fullPath,
+            CancellationToken cancellationToken,
+            out long length)
         {
-            using (SHA256 sha256 = SHA256.Create())
-            using (FileStream stream = new FileStream(
-                       fullPath,
-                       FileMode.Open,
-                       FileAccess.Read,
-                       FileShare.ReadWrite | FileShare.Delete))
+            using (FileStream stream = OpenSequentialRead(fullPath))
             {
-                return sha256.ComputeHash(stream);
+                length = stream.Length;
+                ulong hash = Compute(stream, cancellationToken);
+                if (stream.Length != length)
+                {
+                    throw new IOException("File changed while it was being hashed.");
+                }
+
+                return hash;
             }
         }
 
-        private static byte[] CopyHash(byte[] hash)
+        internal static ulong ComputeFile(string fullPath, out long length)
         {
-            byte[] copy = new byte[hash.Length];
-            Buffer.BlockCopy(hash, 0, copy, 0, hash.Length);
-            return copy;
+            return ComputeFile(fullPath, CancellationToken.None, out length);
         }
 
-        private static bool HashesEqual(byte[] left, byte[] right)
+        internal static bool MatchesFile(
+            string fullPath,
+            long expectedLength,
+            ulong expectedHash)
         {
-            if (left == null || right == null || left.Length != right.Length)
+            using (FileStream stream = OpenSequentialRead(fullPath))
             {
-                return false;
+                if (stream.Length != expectedLength)
+                {
+                    return false;
+                }
+
+                return Compute(stream, CancellationToken.None) == expectedHash;
+            }
+        }
+
+        internal static ulong Compute(Stream stream, CancellationToken cancellationToken)
+        {
+            if (stream == null)
+            {
+                throw new ArgumentNullException(nameof(stream));
             }
 
-            int difference = 0;
-            for (int index = 0; index < left.Length; index++)
+            byte[] buffer = _hashBuffer;
+            if (buffer == null)
             {
-                difference |= left[index] ^ right[index];
+                buffer = new byte[HashBufferSize];
+                _hashBuffer = buffer;
             }
 
-            return difference == 0;
+            ulong v1 = unchecked(Prime1 + Prime2);
+            ulong v2 = Prime2;
+            ulong v3 = 0UL;
+            ulong v4 = unchecked(0UL - Prime1);
+            ulong totalLength = 0UL;
+            int buffered = 0;
+            bool processedStripe = false;
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int read = stream.Read(buffer, buffered, buffer.Length - buffered);
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                totalLength += (ulong)read;
+                int available = buffered + read;
+                int offset = 0;
+                int lastStripeStart = available - 32;
+                while (offset <= lastStripeStart)
+                {
+                    processedStripe = true;
+                    v1 = Round(v1, ReadUInt64(buffer, offset));
+                    v2 = Round(v2, ReadUInt64(buffer, offset + 8));
+                    v3 = Round(v3, ReadUInt64(buffer, offset + 16));
+                    v4 = Round(v4, ReadUInt64(buffer, offset + 24));
+                    offset += 32;
+                }
+
+                buffered = available - offset;
+                if (buffered > 0 && offset > 0)
+                {
+                    Buffer.BlockCopy(buffer, offset, buffer, 0, buffered);
+                }
+            }
+
+            unchecked
+            {
+                ulong hash;
+                if (processedStripe)
+                {
+                    hash =
+                        RotateLeft(v1, 1) +
+                        RotateLeft(v2, 7) +
+                        RotateLeft(v3, 12) +
+                        RotateLeft(v4, 18);
+                    hash = MergeRound(hash, v1);
+                    hash = MergeRound(hash, v2);
+                    hash = MergeRound(hash, v3);
+                    hash = MergeRound(hash, v4);
+                }
+                else
+                {
+                    hash = Prime5;
+                }
+
+                hash += totalLength;
+
+                int index = 0;
+                while (index + 8 <= buffered)
+                {
+                    ulong lane = Round(0UL, ReadUInt64(buffer, index));
+                    hash ^= lane;
+                    hash = RotateLeft(hash, 27) * Prime1 + Prime4;
+                    index += 8;
+                }
+
+                if (index + 4 <= buffered)
+                {
+                    hash ^= (ulong)ReadUInt32(buffer, index) * Prime1;
+                    hash = RotateLeft(hash, 23) * Prime2 + Prime3;
+                    index += 4;
+                }
+
+                while (index < buffered)
+                {
+                    hash ^= (ulong)buffer[index] * Prime5;
+                    hash = RotateLeft(hash, 11) * Prime1;
+                    index++;
+                }
+
+                hash ^= hash >> 33;
+                hash *= Prime2;
+                hash ^= hash >> 29;
+                hash *= Prime3;
+                hash ^= hash >> 32;
+                return hash;
+            }
+        }
+
+        private static FileStream OpenSequentialRead(string fullPath)
+        {
+            return new FileStream(
+                fullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                HashBufferSize,
+                FileOptions.SequentialScan);
+        }
+
+        private static ulong Round(ulong accumulator, ulong input)
+        {
+            unchecked
+            {
+                accumulator += input * Prime2;
+                accumulator = RotateLeft(accumulator, 31);
+                accumulator *= Prime1;
+                return accumulator;
+            }
+        }
+
+        private static ulong MergeRound(ulong accumulator, ulong value)
+        {
+            unchecked
+            {
+                accumulator ^= Round(0UL, value);
+                accumulator = accumulator * Prime1 + Prime4;
+                return accumulator;
+            }
+        }
+
+        private static ulong RotateLeft(ulong value, int count)
+        {
+            return (value << count) | (value >> (64 - count));
+        }
+
+        private static ulong ReadUInt64(byte[] buffer, int offset)
+        {
+            return
+                (ulong)buffer[offset] |
+                ((ulong)buffer[offset + 1] << 8) |
+                ((ulong)buffer[offset + 2] << 16) |
+                ((ulong)buffer[offset + 3] << 24) |
+                ((ulong)buffer[offset + 4] << 32) |
+                ((ulong)buffer[offset + 5] << 40) |
+                ((ulong)buffer[offset + 6] << 48) |
+                ((ulong)buffer[offset + 7] << 56);
+        }
+
+        private static uint ReadUInt32(byte[] buffer, int offset)
+        {
+            return
+                (uint)buffer[offset] |
+                ((uint)buffer[offset + 1] << 8) |
+                ((uint)buffer[offset + 2] << 16) |
+                ((uint)buffer[offset + 3] << 24);
         }
     }
 }
