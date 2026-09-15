@@ -1160,6 +1160,194 @@ namespace Glasspage.UnitySync
         private static bool IsGuestSyncDeferred =>
             !string.IsNullOrEmpty(_guestJoinCode) && !_guestSyncApproved;
 
+        private static string ActiveBuildTargetName =>
+            EditorUserBuildSettings.activeBuildTarget.ToString();
+
+        internal static void OnActiveBuildTargetChanged(
+            BuildTarget previousTarget,
+            BuildTarget newTarget)
+        {
+            if (_suppressBuildTargetChanged && newTarget == _suppressedBuildTarget)
+            {
+                _suppressBuildTargetChanged = false;
+                _suppressedBuildTarget = BuildTarget.NoTarget;
+                return;
+            }
+
+            _suppressBuildTargetChanged = false;
+            _suppressedBuildTarget = BuildTarget.NoTarget;
+
+            UnitySyncTransport transport = _transport;
+            if (!_buildTargetLiveSyncEnabled ||
+                transport == null ||
+                (_state != UnitySyncSessionState.Hosting &&
+                 _state != UnitySyncSessionState.Connected))
+            {
+                return;
+            }
+
+            string buildTargetName = newTarget.ToString();
+            if (_state == UnitySyncSessionState.Hosting)
+            {
+                _hostBuildTargetName = buildTargetName;
+            }
+
+            transport.SendBuildTarget(buildTargetName);
+            AddLog(
+                "Active build target changed from " +
+                previousTarget +
+                " to " +
+                newTarget +
+                "; synchronizing it with collaborators.");
+            Changed?.Invoke();
+        }
+
+        private static bool HandleRemoteBuildTarget(
+            UnitySyncTransport transport,
+            Guid playerId,
+            string buildTargetName,
+            out bool switched)
+        {
+            switched = false;
+            bool isHost = _state == UnitySyncSessionState.Hosting;
+
+            if (!isHost)
+            {
+                _hostBuildTargetName = buildTargetName ?? string.Empty;
+            }
+
+            if (!TryApplyBuildTarget(buildTargetName, out switched, out string error))
+            {
+                AddFailure("Build target sync failed: " + error);
+
+                if (isHost)
+                {
+                    // The host remains authoritative. If a guest requests a target that
+                    // this editor cannot use, re-assert the host's actual target so the
+                    // requesting guest and every other collaborator converge again.
+                    _hostBuildTargetName = ActiveBuildTargetName;
+                    transport.SetLocalBuildTarget(_hostBuildTargetName);
+                    transport.SendBuildTarget(_hostBuildTargetName);
+                }
+
+                return false;
+            }
+
+            if (isHost)
+            {
+                // Guest requests become authoritative only after the host successfully
+                // switches. Re-emit the update with the host player ID so every guest
+                // sees the same single source of truth.
+                _hostBuildTargetName = ActiveBuildTargetName;
+                transport.SetLocalBuildTarget(_hostBuildTargetName);
+                transport.SendBuildTarget(_hostBuildTargetName);
+            }
+
+            if (switched)
+            {
+                AddLog(
+                    "Switching active build target to " +
+                    buildTargetName +
+                    " to match the UnitySync session.");
+                Changed?.Invoke();
+            }
+
+            return true;
+        }
+
+        private static bool EnsureHostBuildTargetBeforeSceneLoad(out bool switched)
+        {
+            switched = false;
+            if (_state != UnitySyncSessionState.Connected)
+            {
+                return true;
+            }
+
+            if (string.IsNullOrEmpty(_hostBuildTargetName))
+            {
+                AddFailure("Scene sync cannot start because the host build target is unknown.");
+                return false;
+            }
+
+            if (TryApplyBuildTarget(_hostBuildTargetName, out switched, out string error))
+            {
+                return true;
+            }
+
+            AddFailure(
+                "Scene sync cannot start until this editor can use the host build target: " +
+                error);
+            return false;
+        }
+
+        private static bool TryApplyBuildTarget(
+            string buildTargetName,
+            out bool switched,
+            out string error)
+        {
+            switched = false;
+            error = string.Empty;
+
+            if (string.IsNullOrEmpty(buildTargetName) ||
+                !Enum.TryParse(buildTargetName, false, out BuildTarget target) ||
+                !Enum.IsDefined(typeof(BuildTarget), target) ||
+                !string.Equals(target.ToString(), buildTargetName, StringComparison.Ordinal))
+            {
+                error = "Received an unknown Unity build target '" +
+                        (buildTargetName ?? string.Empty) + "'.";
+                return false;
+            }
+
+            if (EditorUserBuildSettings.activeBuildTarget == target)
+            {
+                return true;
+            }
+
+            BuildTargetGroup targetGroup = BuildPipeline.GetBuildTargetGroup(target);
+            if (targetGroup == BuildTargetGroup.Unknown ||
+                !BuildPipeline.IsBuildTargetSupported(targetGroup, target))
+            {
+                error =
+                    "Build target '" +
+                    buildTargetName +
+                    "' is not installed or supported by this Unity editor.";
+                return false;
+            }
+
+            // Switching platforms recompiles scripts and can reload the editor domain.
+            // Persist the current UnitySync session first so both hosts and guests can
+            // resume automatically with the same join code after the switch.
+            PrepareFileSyncReloadReconnect();
+
+            _suppressBuildTargetChanged = true;
+            _suppressedBuildTarget = target;
+
+            try
+            {
+                if (!EditorUserBuildSettings.SwitchActiveBuildTarget(targetGroup, target))
+                {
+                    _suppressBuildTargetChanged = false;
+                    _suppressedBuildTarget = BuildTarget.NoTarget;
+                    error = "Unity declined the switch to '" + buildTargetName + "'.";
+                    return false;
+                }
+            }
+            catch (Exception exception)
+            {
+                _suppressBuildTargetChanged = false;
+                _suppressedBuildTarget = BuildTarget.NoTarget;
+                error =
+                    "Unity could not switch to '" +
+                    buildTargetName +
+                    "': " +
+                    exception.Message;
+                return false;
+            }
+
+            switched = true;
+            return true;
+        }
+
         private static void ApplyRemoteViewport(
             UnitySyncViewportState viewport,
             double receivedAtSeconds)
@@ -1258,9 +1446,9 @@ namespace Glasspage.UnitySync
 
         private static void BeforeAssemblyReload()
         {
-            // Installing or changing a package reloads Unity's editor assemblies. Preserve
-            // guest connection details before the transport is disposed so the new domain
-            // can reconnect and run the package comparison again automatically.
+            // Package changes and active-build-target switches can both reload Unity's
+            // editor assemblies. Preserve either side of the session before disposing the
+            // transport so hosts can reopen the same listener/join code and guests reconnect.
             PrepareFileSyncReloadReconnect();
             StopInternal(false, false);
         }
@@ -1275,14 +1463,24 @@ namespace Glasspage.UnitySync
 
         internal static void PrepareFileSyncReloadReconnect()
         {
-            if (_state != UnitySyncSessionState.Connected ||
-                string.IsNullOrWhiteSpace(_guestJoinCode))
+            bool resumeAsHost =
+                _state == UnitySyncSessionState.Hosting &&
+                !string.IsNullOrWhiteSpace(_joinCode);
+            bool resumeAsGuest =
+                (_state == UnitySyncSessionState.Connected ||
+                 _state == UnitySyncSessionState.Connecting) &&
+                !string.IsNullOrWhiteSpace(_guestJoinCode);
+
+            if (!resumeAsHost && !resumeAsGuest)
             {
                 return;
             }
 
             SessionState.SetBool(FileSyncResumePendingKey, true);
-            SessionState.SetString(FileSyncResumeJoinCodeKey, _guestJoinCode);
+            SessionState.SetBool(FileSyncResumeHostKey, resumeAsHost);
+            SessionState.SetString(
+                FileSyncResumeJoinCodeKey,
+                resumeAsHost ? _joinCode : _guestJoinCode);
             SessionState.SetString(FileSyncResumeDisplayNameKey, _displayName);
             SessionState.SetString(
                 FileSyncResumeColorKey,
@@ -1297,6 +1495,7 @@ namespace Glasspage.UnitySync
             SessionState.SetString(FileSyncResumeDisplayNameKey, string.Empty);
             SessionState.SetString(FileSyncResumeColorKey, string.Empty);
             SessionState.SetBool(FileSyncResumeApprovedKey, false);
+            SessionState.SetBool(FileSyncResumeHostKey, false);
         }
 
         private static void ScheduleFileSyncResume()
@@ -1351,6 +1550,9 @@ namespace Glasspage.UnitySync
             bool resumeApproved = SessionState.GetBool(
                 FileSyncResumeApprovedKey,
                 false);
+            bool resumeAsHost = SessionState.GetBool(
+                FileSyncResumeHostKey,
+                false);
 
             if (string.IsNullOrWhiteSpace(joinCode))
             {
@@ -1360,7 +1562,19 @@ namespace Glasspage.UnitySync
             }
 
             _fileSyncResumeAttempts++;
-            if (Connect(joinCode, displayName, color, out string error))
+            string error;
+            if (resumeAsHost)
+            {
+                if (ResumeHostAfterReload(joinCode, displayName, color, out error))
+                {
+                    ClearFileSyncReloadReconnect();
+                    EditorApplication.update -= TryResumeAfterFileSyncReload;
+                    AddLog("Resumed hosting UnitySync after Unity reloaded scripts.");
+                    Changed?.Invoke();
+                    return;
+                }
+            }
+            else if (Connect(joinCode, displayName, color, out error))
             {
                 _guestSyncApproved = resumeApproved;
                 _fileSyncResumeConnectionPending = true;
@@ -1378,6 +1592,73 @@ namespace Glasspage.UnitySync
 
             _nextFileSyncResumeAttemptTime =
                 EditorApplication.timeSinceStartup + FileSyncResumeRetrySeconds;
+        }
+
+        private static bool ResumeHostAfterReload(
+            string joinCode,
+            string displayName,
+            Color color,
+            out string error)
+        {
+            error = string.Empty;
+            if (_transport != null)
+            {
+                error = "Stop the current UnitySync session first.";
+                return false;
+            }
+
+            if (!UnitySyncJoinCode.TryParse(
+                    joinCode,
+                    out UnitySyncJoinCodeData data,
+                    out error))
+            {
+                return false;
+            }
+
+            try
+            {
+                _displayName = NormalizeDisplayName(displayName);
+                _color = NormalizeColor(color);
+                _transport = new UnitySyncTransport(
+                    LocalPlayerId,
+                    _displayName,
+                    data.Secret);
+                _hostBuildTargetName = ActiveBuildTargetName;
+                _transport.SetLocalBuildTarget(_hostBuildTargetName);
+                _transport.StartHost(data.Port);
+                _joinCode = joinCode;
+                _guestJoinCode = string.Empty;
+                _guestSyncApproved = true;
+                _buildTargetLiveSyncEnabled = true;
+                _guestSceneSnapshotPending = false;
+                _state = UnitySyncSessionState.Hosting;
+                _nextSendTime = 0d;
+                _hasLastViewportState = false;
+                _hasLastSelectionState = false;
+                _lastSelectionSignature = string.Empty;
+                ResetLocalAssetImportStatusTracking();
+                UnitySyncSceneSynchronizer.BeginSession();
+                UnitySyncProjectSynchronizer.BeginSession();
+                return true;
+            }
+            catch (Exception exception) when (
+                exception is SocketException ||
+                exception is ArgumentException)
+            {
+                _transport?.Dispose();
+                _transport = null;
+                _joinCode = string.Empty;
+                _state = UnitySyncSessionState.Idle;
+                error = "Could not resume the host: " + exception.Message;
+                return false;
+            }
+            finally
+            {
+                if (data.Secret != null)
+                {
+                    Array.Clear(data.Secret, 0, data.Secret.Length);
+                }
+            }
         }
 
         private static Guid LoadOrCreatePlayerId()
@@ -1449,6 +1730,18 @@ namespace Glasspage.UnitySync
             {
                 Logs.RemoveAt(0);
             }
+        }
+    }
+
+    internal sealed class UnitySyncBuildTargetChangedCallback : IActiveBuildTargetChanged
+    {
+        public int callbackOrder => 0;
+
+        public void OnActiveBuildTargetChanged(
+            BuildTarget previousTarget,
+            BuildTarget newTarget)
+        {
+            UnitySyncSession.OnActiveBuildTargetChanged(previousTarget, newTarget);
         }
     }
 }
