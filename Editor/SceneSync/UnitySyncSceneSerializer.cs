@@ -1961,7 +1961,7 @@ namespace Glasspage.UnitySync
             bool enterChildren = true;
             while (iterator.Next(enterChildren))
             {
-                bool ignored = IsIgnoredPropertyPath(iterator.propertyPath);
+                bool ignored = IsIgnoredPropertyPath(iterator.propertyPath, component.GetType());
                 // References are atomic identities. Never transmit their native pointer
                 // children: those integers belong to this Editor process only.
                 enterChildren = !ignored &&
@@ -2033,7 +2033,13 @@ namespace Glasspage.UnitySync
                     state.Kind = UnitySyncSerializedValueKind.ObjectReference;
                     int instanceId = property.objectReferenceInstanceIDValue;
                     Object objectReference = instanceId == 0 ? null : EditorUtility.InstanceIDToObject(instanceId);
-                    if (instanceId != 0 && objectReference == null)
+                    // A missing mesh/material has a nonzero serialized instance ID but
+                    // resolves to null. Send an explicit null (including array slots),
+                    // without modifying the host's serialized reference. Keep rejecting
+                    // unresolved references of other types and live incompatible objects.
+                    if (instanceId != 0 && objectReference == null &&
+                        property.type != "PPtr<Mesh>" && property.type != "PPtr<$Mesh>" &&
+                        property.type != "PPtr<Material>" && property.type != "PPtr<$Material>")
                     {
                         return false;
                     }
@@ -2504,7 +2510,7 @@ namespace Glasspage.UnitySync
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
                 {
                     continue;
                 }
@@ -2525,7 +2531,7 @@ namespace Glasspage.UnitySync
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
                 {
                     continue;
                 }
@@ -2548,7 +2554,7 @@ namespace Glasspage.UnitySync
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
                 if (propertyState == null ||
-                    IsIgnoredPropertyPath(propertyState.Path) ||
+                    IsIgnoredPropertyPath(propertyState.Path, component.GetType()) ||
                     !IsObjectReferenceKind(propertyState.Kind))
                 {
                     continue;
@@ -2637,7 +2643,7 @@ namespace Glasspage.UnitySync
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
                 {
                     continue;
                 }
@@ -2661,7 +2667,7 @@ namespace Glasspage.UnitySync
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path))
+                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
                 {
                     continue;
                 }
@@ -2789,7 +2795,7 @@ namespace Glasspage.UnitySync
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
                 if (propertyState == null ||
-                    IsIgnoredPropertyPath(propertyState.Path) ||
+                    IsIgnoredPropertyPath(propertyState.Path, layoutComponent.GetType()) ||
                     !IsObjectReferenceKind(propertyState.Kind))
                 {
                     continue;
@@ -4278,9 +4284,21 @@ namespace Glasspage.UnitySync
             return state.IntegerValues != null && state.IntegerValues.Length == count;
         }
 
-        private static bool IsIgnoredPropertyPath(string propertyPath)
+        private static bool IsIgnoredPropertyPath(string propertyPath, Type componentType)
         {
             if (string.IsNullOrEmpty(propertyPath))
+            {
+                return true;
+            }
+
+            // SDK3 retains this legacy field in its serialized layout even though its
+            // custom Inspector does not show it. VRChat documents Dynamic Materials as
+            // unused in SDK3; stale/generated materials here must not block the whole
+            // descriptor. Exclude the size and elements too, on capture and application.
+            // Do not filter identically named fields on unrelated components or SDK2.
+            if ((propertyPath == "DynamicMaterials" ||
+                 propertyPath.StartsWith("DynamicMaterials.", StringComparison.Ordinal)) &&
+                IsSdk3SceneDescriptor(componentType))
             {
                 return true;
             }
@@ -4289,6 +4307,19 @@ namespace Glasspage.UnitySync
             {
                 if (propertyPath == ignoredPath ||
                     propertyPath.StartsWith(ignoredPath + ".", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsSdk3SceneDescriptor(Type componentType)
+        {
+            for (Type type = componentType; type != null; type = type.BaseType)
+            {
+                if (type.FullName == "VRC.SDK3.Components.VRCSceneDescriptor")
                 {
                     return true;
                 }

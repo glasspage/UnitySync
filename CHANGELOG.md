@@ -2,6 +2,8 @@
 
 ## 0.6.0 (in progress)
 
+- Silently synchronize missing mesh and material references as None, including material array slots, without changing the host reference.
+- Exclude the unused SDK3 scene descriptor DynamicMaterials field from scene synchronization so stale/generated material entries cannot block Spawns, Network IDs, and other descriptor updates.
 - Show `User is importing assets...`-style collaborator status while Unity imports assets, including local Editor imports and synchronized asset imports.
 - Keep UnitySync-triggered import status active through dependency reimports, material reinitialization, compilation, and settle time until file synchronization is actually ready for scene editing.
 - Bump the UnitySync wire protocol to version 18 for collaborator asset-import presence. All connected editors must use this build.
