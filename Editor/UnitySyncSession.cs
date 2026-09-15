@@ -528,7 +528,7 @@ namespace Glasspage.UnitySync
                         }
 
                         UnitySyncSelectionPresence.Apply(transportEvent.Selection, LocalPlayerId);
-                        SceneView.RepaintAll();
+                        UnitySyncPresenceRoot.RequestSceneRepaint();
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
@@ -551,7 +551,7 @@ namespace Glasspage.UnitySync
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
                         UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
                         UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
-                        SceneView.RepaintAll();
+                        UnitySyncPresenceRoot.RequestSceneRepaint();
                         Changed?.Invoke();
                         break;
 
@@ -915,7 +915,7 @@ namespace Glasspage.UnitySync
                 size,
                 viewport.Orthographic,
                 true);
-            sceneView.Repaint();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
         }
 
         private static void StopSpectatingInternal(
@@ -1033,7 +1033,7 @@ namespace Glasspage.UnitySync
                 StopSpectatingInternal(true, false);
             }
 
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
             Changed?.Invoke();
         }
 
@@ -1079,7 +1079,7 @@ namespace Glasspage.UnitySync
                     StatusEventDurationSeconds);
             }
 
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
 
             if (addLog && transport != null)
             {

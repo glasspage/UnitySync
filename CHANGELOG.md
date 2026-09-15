@@ -2,6 +2,7 @@
 
 ## 0.6.0 (in progress)
 
+- Stop forcing editor player-loop ticks for collaborator and transform interpolation. Coalesce synchronization-driven Scene view repaints and limit them to four per second when Unity is unfocused or the pointer is outside Scene view; idle connections request no periodic repaint.
 - Reduce idle material-sync overhead by caching material discovery, skipping unchanged dirty materials, and spreading scans and automatic saves across editor updates. Add UnitySync profiler markers for discovery, scanning, and saving.
 - Silently synchronize missing mesh and material references as None, including material array slots, without changing the host reference.
 - Exclude the unused SDK3 scene descriptor DynamicMaterials field from scene synchronization so stale/generated material entries cannot block Spawns, Network IDs, and other descriptor updates.

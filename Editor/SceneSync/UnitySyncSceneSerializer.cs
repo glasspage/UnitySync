@@ -664,7 +664,7 @@ namespace Glasspage.UnitySync
                     DynamicGI.UpdateEnvironment();
                     EditorSceneManager.MarkSceneDirty(scene);
                     EditorApplication.QueuePlayerLoopUpdate();
-                    SceneView.RepaintAll();
+                    UnitySyncPresenceRoot.RequestSceneRepaint();
                     appliedSceneCount++;
                 }
 

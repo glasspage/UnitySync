@@ -573,7 +573,6 @@ namespace Glasspage.UnitySync
             transform.localPosition = fromPosition;
             transform.localRotation = fromRotation;
             transform.localScale = fromScale;
-            EditorApplication.QueuePlayerLoopUpdate();
         }
 
         private static void UpdateRemoteTransformInterpolations()
@@ -648,8 +647,7 @@ namespace Glasspage.UnitySync
 
             if (changed)
             {
-                EditorApplication.QueuePlayerLoopUpdate();
-                SceneView.RepaintAll();
+                UnitySyncPresenceRoot.RequestSceneRepaint();
             }
         }
 
