@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEditorInternal;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
@@ -14,6 +15,50 @@ namespace Glasspage.UnitySync
 {
     internal static class UnitySyncSceneSerializer
     {
+        private static readonly ProfilerMarker ApplyResolveMarker =
+            new ProfilerMarker("US.Apply.Resolve");
+        private static readonly ProfilerMarker ApplyHierarchyMarker =
+            new ProfilerMarker("US.Apply.Hierarchy");
+        private static readonly ProfilerMarker ApplyReconcileMarker =
+            new ProfilerMarker("US.Apply.Reconcile");
+        private static readonly ProfilerMarker ApplyComponentsMarker =
+            new ProfilerMarker("US.Apply.Components");
+        private static readonly ProfilerMarker ApplyGameObjectMarker =
+            new ProfilerMarker("US.Apply.GameObject");
+        private static readonly ProfilerMarker ApplyDirtyMarker =
+            new ProfilerMarker("US.Apply.MarkDirty");
+        private static readonly ProfilerMarker ComponentStageCreateMarker =
+            new ProfilerMarker("US.Comp.StageCreate");
+        private static readonly ProfilerMarker ComponentValidateRefsMarker =
+            new ProfilerMarker("US.Comp.ValidateRefs");
+        private static readonly ProfilerMarker ComponentApplyPropertiesMarker =
+            new ProfilerMarker("US.Comp.Properties");
+        private static readonly ProfilerMarker PropertyStructureMarker =
+            new ProfilerMarker("US.Prop.Structure");
+        private static readonly ProfilerMarker PropertyValuesMarker =
+            new ProfilerMarker("US.Prop.Values");
+        private static readonly ProfilerMarker PropertyCommitMarker =
+            new ProfilerMarker("US.Prop.Commit");
+        private static readonly ProfilerMarker PropertyAtomicMarker =
+            new ProfilerMarker("US.Prop.Atomic");
+        private static readonly ProfilerMarker AtomicStructureMarker =
+            new ProfilerMarker("US.Atomic.Structure");
+        private static readonly ProfilerMarker AtomicValuesMarker =
+            new ProfilerMarker("US.Atomic.Values");
+        private static readonly ProfilerMarker AtomicReferencesMarker =
+            new ProfilerMarker("US.Atomic.References");
+        private static readonly ProfilerMarker AtomicCommitMarker =
+            new ProfilerMarker("US.Atomic.Commit");
+        private static readonly ProfilerMarker AtomicVerifyMarker =
+            new ProfilerMarker("US.Atomic.Verify");
+        private static readonly Dictionary<Type, ProfilerMarker> ComponentPropertyTypeMarkers =
+            new Dictionary<Type, ProfilerMarker>();
+        private static readonly ProfilerMarker ComponentResolveRefsMarker =
+            new ProfilerMarker("US.Comp.ResolveRefs");
+        private static readonly ProfilerMarker ComponentCopyMarker =
+            new ProfilerMarker("US.Comp.Copy");
+        private static readonly ProfilerMarker ComponentApplyRefsMarker =
+            new ProfilerMarker("US.Comp.ApplyRefs");
         private sealed class ResolvedObjectReferenceAssignment
         {
             internal string Path = string.Empty;
@@ -664,7 +709,7 @@ namespace Glasspage.UnitySync
                     DynamicGI.UpdateEnvironment();
                     EditorSceneManager.MarkSceneDirty(scene);
                     EditorApplication.QueuePlayerLoopUpdate();
-                    SceneView.RepaintAll();
+                    UnitySyncPresenceRoot.RequestSceneRepaint();
                     appliedSceneCount++;
                 }
 
@@ -1507,55 +1552,105 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            Type expectedTransformType = GetExpectedTransformType(change);
-            bool allowSnapshotAdoption = change.SnapshotId != Guid.Empty && change.HierarchyOnly;
-            if (!TryCreateOrUpdateHierarchy(
-                    change.Address,
-                    expectedTransformType,
-                    change.GameObject != null ? change.GameObject.Name : string.Empty,
-                    allowSnapshotAdoption,
-                    out GameObject gameObject,
-                    out error))
+            GameObject gameObject;
+            if (change.HierarchyOnly)
             {
-                return false;
+                using (ApplyHierarchyMarker.Auto())
+                {
+                    Type expectedTransformType = GetExpectedTransformType(change);
+                    bool allowSnapshotAdoption = change.SnapshotId != Guid.Empty;
+                    if (!TryCreateOrUpdateHierarchy(
+                            change.Address,
+                            expectedTransformType,
+                            change.GameObject != null ? change.GameObject.Name : string.Empty,
+                            allowSnapshotAdoption,
+                            out gameObject,
+                            out error))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                // Component/property packets do not carry hierarchy changes. Resolve the
+                // already-registered object directly instead of scanning siblings and calling
+                // SetSiblingIndex for every live edit.
+                using (ApplyResolveMarker.Auto())
+                {
+                    gameObject = ResolveAddress(change.Address);
+                }
+
+                if (gameObject == null)
+                {
+                    error = "No matching scene object exists for " + Describe(change.Address) + ".";
+                    return false;
+                }
             }
 
             if (change.HierarchyOnly)
             {
-                if (change.ReconcileComponents &&
-                    !ReconcileComponents(gameObject, change.Components, out error))
+                if (change.ReconcileComponents)
                 {
-                    return false;
+                    using (ApplyReconcileMarker.Auto())
+                    {
+                        if (!ReconcileComponents(gameObject, change.Components, out error))
+                        {
+                            return false;
+                        }
+                    }
                 }
 
                 if (change.GameObject != null)
                 {
-                    ApplyGameObjectSettings(gameObject, change.GameObject);
+                    using (ApplyGameObjectMarker.Auto())
+                    {
+                        ApplyGameObjectSettings(gameObject, change.GameObject);
+                    }
                 }
 
-                EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                using (ApplyDirtyMarker.Auto())
+                {
+                    EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                }
                 return true;
             }
 
-            if (change.ReconcileComponents && !ReconcileComponents(gameObject, change.Components, out error))
+            if (change.ReconcileComponents)
             {
-                return false;
+                using (ApplyReconcileMarker.Auto())
+                {
+                    if (!ReconcileComponents(gameObject, change.Components, out error))
+                    {
+                        return false;
+                    }
+                }
             }
 
-            foreach (UnitySyncComponentState componentState in change.Components ?? new UnitySyncComponentState[0])
+            using (ApplyComponentsMarker.Auto())
             {
-                if (!ApplyComponent(gameObject, componentState, out error))
+                foreach (UnitySyncComponentState componentState in
+                         change.Components ?? new UnitySyncComponentState[0])
                 {
-                    return false;
+                    if (!ApplyComponent(gameObject, componentState, out error))
+                    {
+                        return false;
+                    }
                 }
             }
 
             if (change.GameObject != null)
             {
-                ApplyGameObjectSettings(gameObject, change.GameObject);
+                using (ApplyGameObjectMarker.Auto())
+                {
+                    ApplyGameObjectSettings(gameObject, change.GameObject);
+                }
             }
 
-            EditorSceneManager.MarkSceneDirty(gameObject.scene);
+            using (ApplyDirtyMarker.Auto())
+            {
+                EditorSceneManager.MarkSceneDirty(gameObject.scene);
+            }
             return true;
         }
 
@@ -2411,62 +2506,95 @@ namespace Glasspage.UnitySync
             GameObject stagingObject = null;
             try
             {
-                if (!TryCreateStagingComponent(component, out stagingObject, out Component stagingComponent))
+                Component stagingComponent;
+                using (ComponentStageCreateMarker.Auto())
                 {
-                    error = "Could not create a staging " + component.GetType().Name + ".";
-                    return false;
+                    if (!TryCreateStagingComponent(component, out stagingObject, out stagingComponent))
+                    {
+                        error = "Could not create a staging " + component.GetType().Name + ".";
+                        return false;
+                    }
                 }
 
                 // A valid target is the best source for hidden/non-editable defaults. A target
                 // containing a broken PPtr is deliberately not copied into the staging object;
                 // the complete incoming component state can repair it from clean defaults.
-                if (TryValidateObjectReferencesWithoutDereferencing(component, out _))
+                bool canCopyExisting;
+                using (ComponentValidateRefsMarker.Auto())
                 {
-                    EditorUtility.CopySerialized(component, stagingComponent);
+                    canCopyExisting =
+                        TryValidateObjectReferencesWithoutDereferencing(component, out _);
+                }
+
+                if (canCopyExisting)
+                {
+                    using (ComponentCopyMarker.Auto())
+                    {
+                        EditorUtility.CopySerialized(component, stagingComponent);
+                    }
                 }
 
                 List<ResolvedObjectReferenceAssignment> referenceAssignments;
                 if (RequiresAtomicSerializedApply(stagingComponent.GetType()))
                 {
-                    if (!ApplySerializedPropertiesAtomicallyWithReferences(
-                            stagingComponent,
-                            state,
-                            out referenceAssignments,
-                            out error))
+                    using (ComponentApplyPropertiesMarker.Auto())
+                    using (GetComponentPropertyProfilerMarker(stagingComponent.GetType()).Auto())
+                    using (PropertyAtomicMarker.Auto())
                     {
-                        return false;
+                        if (!ApplySerializedPropertiesAtomicallyWithReferences(
+                                stagingComponent,
+                                state,
+                                out referenceAssignments,
+                                out error))
+                        {
+                            return false;
+                        }
                     }
                 }
                 else
                 {
-                    if (!ApplySerializedProperties(stagingComponent, state, out error))
+                    using (ComponentApplyPropertiesMarker.Auto())
+                    using (GetComponentPropertyProfilerMarker(stagingComponent.GetType()).Auto())
                     {
-                        return false;
+                        if (!ApplySerializedProperties(stagingComponent, state, out error))
+                        {
+                            return false;
+                        }
                     }
 
-                    if (!TryResolveObjectReferenceAssignments(
-                            stagingComponent,
-                            state,
-                            out referenceAssignments,
-                            out error))
+                    using (ComponentResolveRefsMarker.Auto())
                     {
-                        return false;
+                        if (!TryResolveObjectReferenceAssignments(
+                                stagingComponent,
+                                state,
+                                out referenceAssignments,
+                                out error))
+                        {
+                            return false;
+                        }
                     }
                 }
 
                 Undo.RecordObject(component, "Apply UnitySync component settings");
-                if (component is Transform targetTransform && stagingComponent is Transform stagingTransform)
+                using (ComponentCopyMarker.Auto())
                 {
-                    CopyTransformSettings(stagingTransform, targetTransform);
-                }
-                else
-                {
-                    EditorUtility.CopySerialized(stagingComponent, component);
+                    if (component is Transform targetTransform &&
+                        stagingComponent is Transform stagingTransform)
+                    {
+                        CopyTransformSettings(stagingTransform, targetTransform);
+                    }
+                    else
+                    {
+                        EditorUtility.CopySerialized(stagingComponent, component);
+                    }
                 }
 
-                if (!ApplyResolvedObjectReferences(component, referenceAssignments, out error))
+                using (ComponentApplyRefsMarker.Auto())
                 {
-                    return false;
+                    if (!ApplyResolvedObjectReferences(component, referenceAssignments, out error))
+                    {
+                        return false;
+                    }
                 }
 
                 PrefabUtility.RecordPrefabInstancePropertyModifications(component);
@@ -2507,27 +2635,31 @@ namespace Glasspage.UnitySync
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
 
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            using (AtomicStructureMarker.Auto())
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                foreach (UnitySyncSerializedPropertyState propertyState in
+                         state.Properties ?? new UnitySyncSerializedPropertyState[0])
                 {
-                    continue;
-                }
+                    if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                    {
+                        continue;
+                    }
 
-                if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
-                    propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
-                {
-                    continue;
-                }
+                    if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                        propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
+                    {
+                        continue;
+                    }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null)
-                {
-                    ApplyProperty(property, propertyState);
+                    SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
+                    if (property != null)
+                    {
+                        ApplyProperty(property, propertyState);
+                    }
                 }
             }
 
+            using (AtomicValuesMarker.Auto())
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
@@ -2550,6 +2682,7 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            using (AtomicReferencesMarker.Auto())
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
@@ -2602,9 +2735,13 @@ namespace Glasspage.UnitySync
             // Commit the whole serialized state once. This is required for components such as
             // VRC.Udon.UdonBehaviour whose deserialization callback expects multiple serialized
             // fields to change as one coherent unit.
-            serializedObject.ApplyModifiedPropertiesWithoutUndo();
-            serializedObject.UpdateIfRequiredOrScript();
+            using (AtomicCommitMarker.Auto())
+            {
+                serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                serializedObject.UpdateIfRequiredOrScript();
+            }
 
+            using (AtomicVerifyMarker.Auto())
             foreach (ResolvedObjectReferenceAssignment assignment in assignments)
             {
                 SerializedProperty property = serializedObject.FindProperty(assignment.Path);
@@ -2639,55 +2776,156 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
+            UnitySyncSerializedPropertyState[] properties =
+                state.Properties ?? new UnitySyncSerializedPropertyState[0];
+            Type componentType = component.GetType();
 
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            // Array resizing and managed-reference changes can alter the serialized layout.
+            // The old implementation committed after every single structural property, which
+            // can invoke expensive Unity/SDK serialization callbacks hundreds of times for one
+            // component. Apply structural changes in path-depth batches instead: parent layouts
+            // are committed before nested children, while peers share one commit.
+            int maximumStructuralDepth = -1;
+            for (int index = 0; index < properties.Length; index++)
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                UnitySyncSerializedPropertyState propertyState = properties[index];
+                if (propertyState == null ||
+                    IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                    (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                     propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference))
                 {
                     continue;
                 }
 
-                if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
-                    propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
-                {
-                    continue;
-                }
+                maximumStructuralDepth = Math.Max(
+                    maximumStructuralDepth,
+                    GetSerializedPropertyPathDepth(propertyState.Path));
+            }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null && ApplyProperty(property, propertyState))
+            using (PropertyStructureMarker.Auto())
+            {
+                for (int depth = 0; depth <= maximumStructuralDepth; depth++)
                 {
-                    serializedObject.ApplyModifiedPropertiesWithoutUndo();
-                    serializedObject.UpdateIfRequiredOrScript();
+                    bool changedAtDepth = false;
+                    for (int index = 0; index < properties.Length; index++)
+                    {
+                        UnitySyncSerializedPropertyState propertyState = properties[index];
+                        if (propertyState == null ||
+                            IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                            (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                             propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference) ||
+                            GetSerializedPropertyPathDepth(propertyState.Path) != depth)
+                        {
+                            continue;
+                        }
+
+                        SerializedProperty property =
+                            serializedObject.FindProperty(propertyState.Path);
+                        if (property != null && ApplyProperty(property, propertyState))
+                        {
+                            changedAtDepth = true;
+                        }
+                    }
+
+                    if (changedAtDepth)
+                    {
+                        using (PropertyCommitMarker.Auto())
+                        {
+                            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                            serializedObject.UpdateIfRequiredOrScript();
+                        }
+                    }
                 }
             }
 
-            serializedObject.UpdateIfRequiredOrScript();
-
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            using (PropertyValuesMarker.Auto())
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
-                {
-                    continue;
-                }
+                Dictionary<string, SerializedProperty> propertyLookup =
+                    BuildSerializedPropertyLookup(serializedObject);
 
-                if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
-                    propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
-                    IsObjectReferenceKind(propertyState.Kind))
+                for (int index = 0; index < properties.Length; index++)
                 {
-                    continue;
-                }
+                    UnitySyncSerializedPropertyState propertyState = properties[index];
+                    if (propertyState == null ||
+                        IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                        propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
+                        propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
+                        IsObjectReferenceKind(propertyState.Kind))
+                    {
+                        continue;
+                    }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null)
-                {
-                    ApplyProperty(property, propertyState);
+                    if (propertyLookup.TryGetValue(
+                            propertyState.Path,
+                            out SerializedProperty property))
+                    {
+                        ApplyProperty(property, propertyState);
+                    }
                 }
             }
 
-            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            using (PropertyCommitMarker.Auto())
+            {
+                serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            }
             return true;
+        }
+
+        private static ProfilerMarker GetComponentPropertyProfilerMarker(Type componentType)
+        {
+            componentType = componentType ?? typeof(Component);
+            if (!ComponentPropertyTypeMarkers.TryGetValue(
+                    componentType,
+                    out ProfilerMarker marker))
+            {
+                string typeName = string.IsNullOrEmpty(componentType.Name)
+                    ? "Unknown"
+                    : componentType.Name;
+                marker = new ProfilerMarker("US.Prop.Type." + typeName);
+                ComponentPropertyTypeMarkers[componentType] = marker;
+            }
+
+            return marker;
+        }
+
+        private static Dictionary<string, SerializedProperty> BuildSerializedPropertyLookup(
+            SerializedObject serializedObject)
+        {
+            Dictionary<string, SerializedProperty> lookup =
+                new Dictionary<string, SerializedProperty>(StringComparer.Ordinal);
+            if (serializedObject == null)
+            {
+                return lookup;
+            }
+
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                lookup[iterator.propertyPath] = iterator.Copy();
+            }
+
+            return lookup;
+        }
+
+        private static int GetSerializedPropertyPathDepth(string propertyPath)
+        {
+            if (string.IsNullOrEmpty(propertyPath))
+            {
+                return 0;
+            }
+
+            int depth = 0;
+            for (int index = 0; index < propertyPath.Length; index++)
+            {
+                if (propertyPath[index] == '.')
+                {
+                    depth++;
+                }
+            }
+
+            return depth;
         }
 
         private static bool TryCreateStagingComponent(
