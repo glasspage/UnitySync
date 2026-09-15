@@ -18,7 +18,7 @@ namespace Glasspage.UnitySync
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
         // Keep this in sync with package.json when releasing a new UnitySync version.
-        private const string Version = "0.7.0";
+        private const string Version = "0.8.0";
         private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
 
@@ -485,7 +485,14 @@ namespace Glasspage.UnitySync
                 EditorGUI.indentLevel++;
 
                 EditorGUILayout.LabelField("Join code", EditorStyles.miniLabel);
-                _joinCodeInput = EditorGUILayout.TextArea(_joinCodeInput, GUILayout.MinHeight(54f));
+                GUIStyle joinCodeStyle = new GUIStyle(EditorStyles.textArea)
+                {
+                    wordWrap = true
+                };
+                _joinCodeInput = EditorGUILayout.TextArea(
+                    _joinCodeInput,
+                    joinCodeStyle,
+                    GUILayout.MinHeight(54f));
 
                 using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_joinCodeInput)))
                 {
@@ -547,9 +554,6 @@ namespace Glasspage.UnitySync
                     GUIUtility.systemCopyBuffer = UnitySyncSession.JoinCode;
                 }
 
-                EditorGUILayout.HelpBox(
-                    "UnitySync listens on all local interfaces, but collaborators will connect to the address encoded in this code.",
-                    MessageType.Info);
             }
 
             EditorGUILayout.Space(8f);
