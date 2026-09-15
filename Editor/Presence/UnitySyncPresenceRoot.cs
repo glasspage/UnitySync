@@ -248,8 +248,6 @@ namespace Glasspage.UnitySync
 
         private static long _nextStatusSequence;
         private static bool _sceneRepaintPending;
-        private static double _lastSceneRepaintTime = double.NegativeInfinity;
-        private static double _lastPresenceAnimationTime = double.NegativeInfinity;
         private static GameObject _collaboratorsRoot;
         private static GUIStyle _labelStyle;
         private static GUIStyle _labelOutlineStyle;
@@ -561,13 +559,7 @@ namespace Glasspage.UnitySync
         private static void UpdateInterpolatedTransforms()
         {
             double interpolationNow = GetMonotonicSeconds();
-            bool animate = IsSceneViewActive() ||
-                           interpolationNow - _lastPresenceAnimationTime >= 0.25d;
-            if (animate)
-            {
-                _lastPresenceAnimationTime = interpolationNow;
-            }
-
+            bool editorFocused = IsEditorFocused();
             bool changed = PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
@@ -584,8 +576,10 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                // Even hidden marker Transform writes can wake Unity's scene loop.
-                if (animate)
+                // Keep collaborator motion and Scene view redraws fully responsive while
+                // Unity is focused, regardless of which editor pane the pointer is over.
+                // Avoid hidden Transform writes while Unity is unfocused so the editor can idle.
+                if (editorFocused)
                 {
                     changed |= marker.Interpolate(interpolationNow);
                 }
@@ -606,7 +600,7 @@ namespace Glasspage.UnitySync
                 RequestSceneRepaint();
             }
 
-            FlushSceneRepaint();
+            FlushSceneRepaint(editorFocused);
         }
 
         // Presence animation already runs from EditorApplication.update. Forcing a
@@ -616,33 +610,24 @@ namespace Glasspage.UnitySync
             _sceneRepaintPending = true;
         }
 
-        private static void FlushSceneRepaint()
+        private static void FlushSceneRepaint(bool editorFocused)
         {
-            if (!_sceneRepaintPending)
-            {
-                return;
-            }
-
-            double interval = IsSceneViewActive() ? 0d : 0.25d;
-            double now = EditorApplication.timeSinceStartup;
-            if (now - _lastSceneRepaintTime < interval)
+            if (!_sceneRepaintPending || !editorFocused)
             {
                 return;
             }
 
             _sceneRepaintPending = false;
-            _lastSceneRepaintTime = now;
             SceneView.RepaintAll();
         }
 
-        private static bool IsSceneViewActive()
+        private static bool IsEditorFocused()
         {
 #if UNITY_2022_2_OR_NEWER
-            bool editorFocused = EditorApplication.isFocused;
+            return EditorApplication.isFocused;
 #else
-            bool editorFocused = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+            return UnityEditorInternal.InternalEditorUtility.isApplicationActive;
 #endif
-            return editorFocused && EditorWindow.mouseOverWindow is SceneView;
         }
 
         private static bool PruneExpiredTimedStatuses(double now)
