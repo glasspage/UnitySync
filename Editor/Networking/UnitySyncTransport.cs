@@ -300,6 +300,25 @@ namespace Glasspage.UnitySync
                 targetPlayerId);
         }
 
+        internal void SendFileDownloadProgress(
+            Guid syncId,
+            UnitySyncFileSyncScope scope,
+            long receivedBytes,
+            long totalBytes)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateFileDownloadProgress(
+                    _localPlayerId,
+                    new UnitySyncFileSyncMessage
+                    {
+                        SyncId = syncId,
+                        Scope = scope,
+                        Offset = receivedBytes,
+                        TotalBytes = totalBytes
+                    }),
+                Guid.Empty);
+        }
+
         internal void SendFileSyncAbort(
             Guid playerId,
             Guid syncId,
@@ -735,10 +754,11 @@ namespace Glasspage.UnitySync
                             break;
 
                         case UnitySyncMessageType.FileRequest:
+                        case UnitySyncMessageType.FileDownloadProgress:
                             if (!peer.RequestedFileSync)
                             {
                                 throw new InvalidDataException(
-                                    "A collaborator requested a file before starting file sync.");
+                                    "A collaborator sent file sync data before starting file sync.");
                             }
 
                             EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
@@ -982,6 +1002,7 @@ namespace Glasspage.UnitySync
 
                         case UnitySyncMessageType.FileSyncRequest:
                         case UnitySyncMessageType.FileRequest:
+                        case UnitySyncMessageType.FileDownloadProgress:
                             throw new InvalidDataException(
                                 "The host sent a guest-only file sync message.");
 
@@ -1050,10 +1071,12 @@ namespace Glasspage.UnitySync
                 _clientReady = false;
                 bool wasRunning = _running;
                 _running = false;
+                Guid disconnectedPlayerId =
+                    _serverPeer != null ? _serverPeer.PlayerId : Guid.Empty;
                 _serverPeer?.Close();
                 if (wasRunning)
                 {
-                    Enqueue(UnitySyncTransportEventKind.Disconnected, disconnectReason);
+                    EnqueueDisconnected(disconnectedPlayerId, disconnectReason);
                 }
             }
         }
@@ -1310,6 +1333,19 @@ namespace Glasspage.UnitySync
             lock (_eventsLock)
             {
                 _events.Enqueue(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
+            }
+        }
+
+        private void EnqueueDisconnected(Guid playerId, string message)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.Disconnected,
+                    default,
+                    null,
+                    playerId,
+                    message));
             }
         }
 

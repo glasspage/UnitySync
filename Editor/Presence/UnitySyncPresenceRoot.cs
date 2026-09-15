@@ -6,6 +6,13 @@ using UnityEngine;
 
 namespace Glasspage.UnitySync
 {
+    internal enum UnitySyncSceneStatusPriority
+    {
+        Ongoing = 0,
+        Normal = 100,
+        Important = 200
+    }
+
     internal readonly struct UnitySyncRemoteParticipant
     {
         internal readonly Guid PlayerId;
@@ -175,6 +182,39 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private sealed class TimedStatusEvent
+        {
+            internal string Text;
+            internal Color Color;
+            internal UnitySyncSceneStatusPriority Priority;
+            internal double CreatedAtSeconds;
+            internal double ExpiresAtSeconds;
+            internal long Sequence;
+        }
+
+        private readonly struct StatusDisplay
+        {
+            internal readonly string Text;
+            internal readonly Color Color;
+            internal readonly UnitySyncSceneStatusPriority Priority;
+            internal readonly double SortTime;
+            internal readonly long Sequence;
+
+            internal StatusDisplay(
+                string text,
+                Color color,
+                UnitySyncSceneStatusPriority priority,
+                double sortTime,
+                long sequence)
+            {
+                Text = text;
+                Color = color;
+                Priority = priority;
+                SortTime = sortTime;
+                Sequence = sequence;
+            }
+        }
+
         private const string CollaboratorsContainerName = "Collaborators";
         private const double TransformInterpolationBufferSeconds = 0.1d;
         private const int MaximumBufferedTransformSamples = 8;
@@ -187,6 +227,9 @@ namespace Glasspage.UnitySync
         private const float SpectateStatusLeftMargin = 12f;
         private const float SpectateStatusBottomMargin = 12f;
         private const float SpectateStatusSpacing = 4f;
+        private const float BottomRightStatusRightMargin = 12f;
+        private const float BottomRightStatusBottomMargin = 12f;
+        private const float BottomRightStatusSpacing = 4f;
         private const int DiscSegmentCount = 48;
 
         private static readonly Guid DebugMarkerId = new Guid("f47f5129-96d0-40ac-a62c-6db83ea543fa");
@@ -205,7 +248,10 @@ namespace Glasspage.UnitySync
 
         private static readonly Dictionary<Guid, ViewportMarker> Markers =
             new Dictionary<Guid, ViewportMarker>();
+        private static readonly List<TimedStatusEvent> TimedStatusEvents =
+            new List<TimedStatusEvent>();
 
+        private static long _nextStatusSequence;
         private static GameObject _collaboratorsRoot;
         private static GUIStyle _labelStyle;
         private static GUIStyle _labelOutlineStyle;
@@ -228,6 +274,30 @@ namespace Glasspage.UnitySync
             }
 
             ApplyMarker(viewport, false, receivedAtSeconds);
+        }
+
+        internal static void AddTimedStatus(
+            string text,
+            Color color,
+            UnitySyncSceneStatusPriority priority,
+            double durationSeconds)
+        {
+            if (string.IsNullOrEmpty(text) || durationSeconds <= 0d)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            TimedStatusEvents.Add(new TimedStatusEvent
+            {
+                Text = text,
+                Color = color,
+                Priority = priority,
+                CreatedAtSeconds = now,
+                ExpiresAtSeconds = now + durationSeconds,
+                Sequence = ++_nextStatusSequence
+            });
+            SceneView.RepaintAll();
         }
 
         internal static bool DebugMarkerVisible
@@ -463,13 +533,8 @@ namespace Glasspage.UnitySync
 
         private static void UpdateInterpolatedTransforms()
         {
-            if (Markers.Count == 0)
-            {
-                return;
-            }
-
-            double now = GetMonotonicSeconds();
-            bool changed = false;
+            double interpolationNow = GetMonotonicSeconds();
+            bool changed = PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
             bool needsContinuousUpdate = false;
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
@@ -486,8 +551,8 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                changed |= marker.Interpolate(now);
-                needsContinuousUpdate |= marker.HasPendingInterpolation(now);
+                changed |= marker.Interpolate(interpolationNow);
+                needsContinuousUpdate |= marker.HasPendingInterpolation(interpolationNow);
             }
 
             if (staleIds != null)
@@ -509,6 +574,23 @@ namespace Glasspage.UnitySync
             {
                 SceneView.RepaintAll();
             }
+        }
+
+        private static bool PruneExpiredTimedStatuses(double now)
+        {
+            bool changed = false;
+            for (int index = TimedStatusEvents.Count - 1; index >= 0; index--)
+            {
+                if (TimedStatusEvents[index].ExpiresAtSeconds > now)
+                {
+                    continue;
+                }
+
+                TimedStatusEvents.RemoveAt(index);
+                changed = true;
+            }
+
+            return changed;
         }
 
         private static double GetMonotonicSeconds()
@@ -609,6 +691,7 @@ namespace Glasspage.UnitySync
                 localPlayerId,
                 spectatingPlayerId,
                 opacity);
+            DrawBottomRightStatuses(sceneView, opacity);
         }
 
         private static void DrawDisplayName(
@@ -687,6 +770,114 @@ namespace Glasspage.UnitySync
                     marker.Color,
                     opacity,
                     statusIndex++);
+            }
+
+            Handles.EndGUI();
+        }
+
+        private static void DrawBottomRightStatuses(
+            SceneView sceneView,
+            float opacity)
+        {
+            PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
+
+            List<StatusDisplay> statuses = new List<StatusDisplay>(
+                TimedStatusEvents.Count + 4);
+            foreach (TimedStatusEvent statusEvent in TimedStatusEvents)
+            {
+                statuses.Add(new StatusDisplay(
+                    statusEvent.Text,
+                    statusEvent.Color,
+                    statusEvent.Priority,
+                    statusEvent.CreatedAtSeconds,
+                    statusEvent.Sequence));
+            }
+
+            UnitySyncHostDownloadProgress[] progress =
+                UnitySyncFileSynchronizer.GetHostDownloadProgresses();
+            foreach (UnitySyncHostDownloadProgress item in progress)
+            {
+                if (!Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
+                    marker.GameObject == null ||
+                    marker.IsDebug)
+                {
+                    continue;
+                }
+
+                string noun;
+                switch (item.Scope)
+                {
+                    case UnitySyncFileSyncScope.Packages:
+                        noun = "packages";
+                        break;
+                    case UnitySyncFileSyncScope.Project:
+                        noun = "project files";
+                        break;
+                    default:
+                        noun = "assets";
+                        break;
+                }
+
+                int percent = Mathf.Clamp(
+                    Mathf.RoundToInt(item.Progress01 * 100f),
+                    0,
+                    100);
+                statuses.Add(new StatusDisplay(
+                    marker.DisplayName + " is receiving " + noun + " (" + percent + "%)...",
+                    marker.Color,
+                    UnitySyncSceneStatusPriority.Ongoing,
+                    item.StartedAtSeconds,
+                    0));
+            }
+
+            if (statuses.Count == 0)
+            {
+                return;
+            }
+
+            statuses.Sort((left, right) =>
+            {
+                int priorityComparison = ((int)right.Priority).CompareTo((int)left.Priority);
+                if (priorityComparison != 0)
+                {
+                    return priorityComparison;
+                }
+
+                int timeComparison = right.SortTime.CompareTo(left.SortTime);
+                if (timeComparison != 0)
+                {
+                    return timeComparison;
+                }
+
+                int sequenceComparison = right.Sequence.CompareTo(left.Sequence);
+                if (sequenceComparison != 0)
+                {
+                    return sequenceComparison;
+                }
+
+                return StringComparer.OrdinalIgnoreCase.Compare(left.Text, right.Text);
+            });
+
+            EnsureLabelStyles();
+            float bottom = sceneView.position.height - BottomRightStatusBottomMargin;
+            Handles.BeginGUI();
+
+            foreach (StatusDisplay status in statuses)
+            {
+                GUIContent content = new GUIContent(status.Text);
+                Vector2 labelSize = _labelStyle.CalcSize(content);
+                float y = bottom - labelSize.y;
+                Rect labelRect = new Rect(
+                    sceneView.position.width - BottomRightStatusRightMargin - labelSize.x,
+                    y,
+                    labelSize.x,
+                    labelSize.y);
+                DrawOutlinedGuiLabel(
+                    labelRect,
+                    content,
+                    status.Color,
+                    opacity);
+                bottom = y - BottomRightStatusSpacing;
             }
 
             Handles.EndGUI();

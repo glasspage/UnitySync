@@ -2,6 +2,13 @@
 
 ## 0.6.0 (in progress)
 
+- Show connected collaborators in the list during initial file reconciliation instead of waiting for Assets synchronization to finish.
+- Show host-side Scene view status for each guest actively receiving synchronized files, using the collaborator's color and guest-reported receive percentage.
+- Show the same byte-based receive percentage in the guest's own Unity loading bar while downloading synchronized Assets.
+- Strengthen the guest file-sync confirmation warning and keep the Activity Log summary-only instead of listing every received or deleted file path.
+- Use a shared bottom-right Scene view status stack ordered by priority and then time; collaborator connect/disconnect events are high priority and remain visible for 8 seconds.
+- Show white `Session started` and `Session ended` statuses for 8 seconds in the same high-priority category as collaborator connect/disconnect events, without treating package/script-reload reconnections as new sessions.
+- Bump the UnitySync wire protocol to version 17 for guest download progress reporting. Both editors must use this build.
 - Replace automatic package syncing with a registered-package version checklist showing missing packages, version differences, and guest-only packages.
 - Add manual install/change/remove guidance, Copy checklist, and Recheck packages before Assets and scene synchronization.
 - Never transfer or mutate Packages, including during Debug restore; the restore now targets Assets and ProjectSettings.
