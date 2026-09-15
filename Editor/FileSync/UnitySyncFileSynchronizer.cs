@@ -1847,6 +1847,7 @@ namespace Glasspage.UnitySync
             UnitySyncSession.PrepareFileSyncReloadReconnect();
             SetGuestAutoRefreshBlocked(false);
             _guestPhase = GuestPhase.ImportingAssets;
+            UnitySyncSession.BeginSynchronizedAssetImport();
             _guestImportEarliestComplete =
                 EditorApplication.timeSinceStartup + ImportSettleSeconds;
 
@@ -1949,6 +1950,7 @@ namespace Glasspage.UnitySync
 
         private static void CompleteGuestSync()
         {
+            UnitySyncSession.EndSynchronizedAssetImport();
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             SetGuestAutoRefreshBlocked(false);
@@ -1959,6 +1961,7 @@ namespace Glasspage.UnitySync
 
         private static void FailGuestSync(string error)
         {
+            UnitySyncSession.EndSynchronizedAssetImport();
             CleanupGuestTransfers();
             DeleteGuestTempRoot();
             SetGuestAutoRefreshBlocked(false);
@@ -1972,6 +1975,7 @@ namespace Glasspage.UnitySync
 
         private static void ResetGuestState()
         {
+            UnitySyncSession.EndSynchronizedAssetImport();
             _guestForceRestore = false;
             PackageChanges.Clear();
             CleanupGuestTransfers();

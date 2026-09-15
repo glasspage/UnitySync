@@ -56,6 +56,9 @@ namespace Glasspage.UnitySync
         private static float _savedSceneViewSize;
         private static bool _savedSceneViewOrthographic;
         private static float _savedSceneViewFieldOfView;
+        private static int _synchronizedAssetImportDepth;
+        private static bool _hasLastAssetImportState;
+        private static bool _lastAssetImportState;
 
         internal static event Action Changed;
 
@@ -117,6 +120,7 @@ namespace Glasspage.UnitySync
                 _hasLastViewportState = false;
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
+                ResetLocalAssetImportStatusTracking();
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 UnitySyncPresenceRoot.AddTimedStatus(
@@ -174,6 +178,7 @@ namespace Glasspage.UnitySync
                 _hasLastViewportState = false;
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
+                ResetLocalAssetImportStatusTracking();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -390,10 +395,28 @@ namespace Glasspage.UnitySync
             StopSpectatingInternal(true, true);
         }
 
+        internal static void BeginSynchronizedAssetImport()
+        {
+            _synchronizedAssetImportDepth++;
+            UpdateLocalAssetImportStatus(_transport);
+        }
+
+        internal static void EndSynchronizedAssetImport()
+        {
+            if (_synchronizedAssetImportDepth > 0)
+            {
+                _synchronizedAssetImportDepth--;
+            }
+
+            UpdateLocalAssetImportStatus(_transport);
+        }
+
         private static bool _updatingSession;
 
         private static void Update()
         {
+            UpdateLocalAssetImportStatus(_transport);
+
             // Scene loading and asset import can pump editor callbacks before they return.
             // Keep later snapshot packets queued until the current packet has finished applying.
             if (_updatingSession)
@@ -530,6 +553,12 @@ namespace Glasspage.UnitySync
                         UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
                         SceneView.RepaintAll();
                         Changed?.Invoke();
+                        break;
+
+                    case UnitySyncTransportEventKind.AssetImportState:
+                        UnitySyncPresenceRoot.SetImportingAssets(
+                            transportEvent.PlayerId,
+                            transportEvent.IsImportingAssets);
                         break;
 
                     case UnitySyncTransportEventKind.FileSync:
@@ -935,6 +964,42 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = false;
         }
 
+        private static void ForceAssetImportStatusSend()
+        {
+            _hasLastAssetImportState = false;
+            UpdateLocalAssetImportStatus(_transport);
+        }
+
+        private static void UpdateLocalAssetImportStatus(UnitySyncTransport transport)
+        {
+            if (transport == null ||
+                (_state != UnitySyncSessionState.Hosting &&
+                 _state != UnitySyncSessionState.Connected))
+            {
+                return;
+            }
+
+            bool isImportingAssets =
+                _synchronizedAssetImportDepth > 0 ||
+                EditorApplication.isUpdating;
+            if (_hasLastAssetImportState &&
+                _lastAssetImportState == isImportingAssets)
+            {
+                return;
+            }
+
+            _hasLastAssetImportState = true;
+            _lastAssetImportState = isImportingAssets;
+            transport.SendAssetImportState(isImportingAssets);
+        }
+
+        private static void ResetLocalAssetImportStatusTracking()
+        {
+            _synchronizedAssetImportDepth = 0;
+            _hasLastAssetImportState = false;
+            _lastAssetImportState = false;
+        }
+
         private static bool IsGuestSyncDeferred =>
             !string.IsNullOrEmpty(_guestJoinCode) && !_guestSyncApproved;
 
@@ -960,6 +1025,7 @@ namespace Glasspage.UnitySync
                 // Re-advertise our current viewport so the newcomer immediately receives
                 // the full collaborator list instead of waiting for somebody to move.
                 ForceViewportSend();
+                ForceAssetImportStatusSend();
             }
             if (_spectatingPlayerId == viewport.PlayerId &&
                 viewport.SpectatingPlayerId == LocalPlayerId)
@@ -1003,6 +1069,7 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = false;
             _hasLastSelectionState = false;
             _lastSelectionSignature = string.Empty;
+            ResetLocalAssetImportStatusTracking();
             if (showEndedStatus && wasActiveSession)
             {
                 UnitySyncPresenceRoot.AddTimedStatus(

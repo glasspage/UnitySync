@@ -2,6 +2,9 @@
 
 ## 0.6.0 (in progress)
 
+- Show `User is importing assets...`-style collaborator status while Unity imports assets, including local Editor imports and synchronized asset imports.
+- Keep UnitySync-triggered import status active through dependency reimports, material reinitialization, compilation, and settle time until file synchronization is actually ready for scene editing.
+- Bump the UnitySync wire protocol to version 18 for collaborator asset-import presence. All connected editors must use this build.
 - Store downloaded replacement files and rollback backups under short hashed temporary filenames so valid deeply nested Assets do not exceed Windows path limits during synchronization.
 - Show connected collaborators in the list during initial file reconciliation instead of waiting for Assets synchronization to finish.
 - Show host-side Scene view status for each guest actively receiving synchronized files, using the collaborator's color and guest-reported receive percentage.

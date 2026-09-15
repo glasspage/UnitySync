@@ -16,6 +16,7 @@ namespace Glasspage.UnitySync
         Disconnected,
         Viewport,
         Selection,
+        AssetImportState,
         FileSync,
         PeerLeft,
         SceneObjectChange,
@@ -32,6 +33,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncTransportEventKind Kind;
         internal readonly UnitySyncViewportState Viewport;
         internal readonly UnitySyncSelectionState Selection;
+        internal readonly bool IsImportingAssets;
         internal readonly UnitySyncMessageType MessageType;
         internal readonly UnitySyncFileSyncMessage FileSync;
         internal readonly UnitySyncSceneObjectChange SceneChange;
@@ -50,11 +52,13 @@ namespace Glasspage.UnitySync
             UnitySyncSelectionState selection = default,
             UnitySyncMessageType messageType = default(UnitySyncMessageType),
             UnitySyncFileSyncMessage fileSync = null,
-            double receivedAtSeconds = 0d)
+            double receivedAtSeconds = 0d,
+            bool isImportingAssets = false)
         {
             Kind = kind;
             Viewport = viewport;
             Selection = selection;
+            IsImportingAssets = isImportingAssets;
             MessageType = messageType;
             FileSync = fileSync;
             SceneChange = sceneChange;
@@ -224,6 +228,15 @@ namespace Glasspage.UnitySync
             }
 
             _outboundSignal.Set();
+        }
+
+        internal void SendAssetImportState(bool isImportingAssets)
+        {
+            QueueMessage(
+                UnitySyncProtocol.CreateAssetImportState(
+                    _localPlayerId,
+                    isImportingAssets),
+                Guid.Empty);
         }
 
         internal void SendRestoreProjectControl(UnitySyncMessageType type, Guid targetPlayerId)
@@ -739,6 +752,23 @@ namespace Glasspage.UnitySync
                             Broadcast(UnitySyncProtocol.CreateSelection(message.Selection), peer);
                             break;
 
+                        case UnitySyncMessageType.AssetImportState:
+                            if (message.PlayerId != peer.PlayerId)
+                            {
+                                throw new InvalidDataException(
+                                    "A collaborator sent an asset import state for another player.");
+                            }
+
+                            EnqueueAssetImportState(
+                                message.PlayerId,
+                                message.IsImportingAssets);
+                            Broadcast(
+                                UnitySyncProtocol.CreateAssetImportState(
+                                    message.PlayerId,
+                                    message.IsImportingAssets),
+                                peer);
+                            break;
+
                         case UnitySyncMessageType.RestoreProjectRequest:
                             peer.RequestedFileSync = true;
                             peer.RequestedSceneSnapshot = false;
@@ -968,6 +998,18 @@ namespace Glasspage.UnitySync
                             }
 
                             EnqueueSelection(message.Selection);
+                            break;
+
+                        case UnitySyncMessageType.AssetImportState:
+                            if (message.PlayerId == Guid.Empty)
+                            {
+                                throw new InvalidDataException(
+                                    "The host sent an invalid asset import state.");
+                            }
+
+                            EnqueueAssetImportState(
+                                message.PlayerId,
+                                message.IsImportingAssets);
                             break;
 
                         case UnitySyncMessageType.RestoreProjectAccepted:
@@ -1381,6 +1423,20 @@ namespace Glasspage.UnitySync
                     string.Empty,
                     null,
                     selection));
+            }
+        }
+
+        private void EnqueueAssetImportState(Guid playerId, bool isImportingAssets)
+        {
+            lock (_eventsLock)
+            {
+                _events.Enqueue(new UnitySyncTransportEvent(
+                    UnitySyncTransportEventKind.AssetImportState,
+                    default,
+                    null,
+                    playerId,
+                    string.Empty,
+                    isImportingAssets: isImportingAssets));
             }
         }
 
