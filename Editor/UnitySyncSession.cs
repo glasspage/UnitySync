@@ -36,7 +36,9 @@ namespace Glasspage.UnitySync
         private static readonly ProfilerMarker SpectatedViewUpdateMarker =
             new ProfilerMarker("UnitySync.Session.SpectatedView");
         private static readonly ProfilerMarker IncomingEventsUpdateMarker =
-            new ProfilerMarker("UnitySync.Session.IncomingEvents");
+            new ProfilerMarker("US.Incoming.Total");
+        private static readonly ProfilerMarker IncomingEventDequeueMarker =
+            new ProfilerMarker("US.Incoming.Dequeue");
         private static readonly ProfilerMarker[] IncomingEventKindMarkers =
             CreateIncomingEventKindMarkers();
         private static readonly ProfilerMarker FileSyncUpdateMarker =
@@ -484,9 +486,17 @@ namespace Glasspage.UnitySync
                    processedEvents < MaximumIncomingEventsPerUpdate &&
                    (processedEvents == 0 ||
                     (System.Diagnostics.Stopwatch.GetTimestamp() - incomingStart) /
-                    (double)System.Diagnostics.Stopwatch.Frequency < IncomingEventBudgetSeconds) &&
-                   transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
+                    (double)System.Diagnostics.Stopwatch.Frequency < IncomingEventBudgetSeconds))
             {
+                UnitySyncTransportEvent transportEvent;
+                using (IncomingEventDequeueMarker.Auto())
+                {
+                    if (!transport.TryDequeue(out transportEvent))
+                    {
+                        break;
+                    }
+                }
+
                 processedEvents++;
                 using (IncomingEventKindMarkers[(int)transportEvent.Kind].Auto())
                 {
@@ -850,10 +860,30 @@ namespace Glasspage.UnitySync
             for (int index = 0; index < eventNames.Length; index++)
             {
                 markers[index] = new ProfilerMarker(
-                    "UnitySync.Session.IncomingEvents." + eventNames[index]);
+                    "US.Incoming." + GetIncomingEventProfilerName(
+                        (UnitySyncTransportEventKind)index));
             }
 
             return markers;
+        }
+
+        private static string GetIncomingEventProfilerName(UnitySyncTransportEventKind kind)
+        {
+            switch (kind)
+            {
+                case UnitySyncTransportEventKind.SceneObjectChange:
+                    return "SceneChange";
+                case UnitySyncTransportEventKind.SceneSnapshotRequest:
+                    return "SnapshotRequest";
+                case UnitySyncTransportEventKind.SceneSnapshotBegin:
+                    return "SnapshotBegin";
+                case UnitySyncTransportEventKind.SceneSnapshotEnd:
+                    return "SnapshotEnd";
+                case UnitySyncTransportEventKind.SceneSettingsChange:
+                    return "SceneSettings";
+                default:
+                    return kind.ToString();
+            }
         }
 
         private static void SendSelectionIfNeeded(UnitySyncTransport transport)
