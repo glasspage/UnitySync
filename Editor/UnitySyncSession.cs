@@ -135,6 +135,7 @@ namespace Glasspage.UnitySync
                 _joinCode = string.Empty;
                 _state = UnitySyncSessionState.Idle;
                 error = "Could not start the host: " + exception.Message;
+                AddFailure(error);
                 return false;
             }
             finally
@@ -183,6 +184,7 @@ namespace Glasspage.UnitySync
                 _transport = null;
                 _state = UnitySyncSessionState.Idle;
                 error = "Could not connect: " + exception.Message;
+                AddFailure(error);
                 return false;
             }
             finally
@@ -478,7 +480,14 @@ namespace Glasspage.UnitySync
                                 StatusEventDurationSeconds);
                         }
 
-                        AddLog(transportEvent.Message);
+                        if (transportEvent.Message.StartsWith("Connection failed:", StringComparison.Ordinal))
+                        {
+                            AddFailure(transportEvent.Message);
+                        }
+                        else
+                        {
+                            AddLog(transportEvent.Message);
+                        }
                         disconnected = true;
                         break;
 
@@ -550,7 +559,7 @@ namespace Glasspage.UnitySync
                                 out fileSyncError);
                         if (!fileHandled)
                         {
-                            AddLog(
+                            AddFailure(
                                 (isProjectUpdate ? "Project sync failed: " : "File sync failed: ") +
                                 fileSyncError);
                             if (!isProjectUpdate)
@@ -578,7 +587,7 @@ namespace Glasspage.UnitySync
                                 transportEvent.SceneChange,
                                 out string sceneError))
                         {
-                            AddLog("Scene sync skipped an update: " + sceneError);
+                            AddFailure("Scene sync skipped an update: " + sceneError);
                             Changed?.Invoke();
                         }
                         break;
@@ -593,7 +602,7 @@ namespace Glasspage.UnitySync
                                 transportEvent.SceneSnapshot,
                                 out string snapshotBeginError))
                         {
-                            AddLog("Scene sync could not start a snapshot: " + snapshotBeginError);
+                            AddFailure("Scene sync could not start a snapshot: " + snapshotBeginError);
                             // No valid boundary exists for the queued body/end packets.
                             // Stop here instead of applying a partial snapshot or flooding the log.
                             StopInternal(false, true);
@@ -612,7 +621,7 @@ namespace Glasspage.UnitySync
                                 transportEvent.SceneSnapshot.IsComplete,
                                 out string snapshotEndError))
                         {
-                            AddLog("Scene sync could not finish a snapshot: " + snapshotEndError);
+                            AddFailure("Scene sync could not finish a snapshot: " + snapshotEndError);
                             Changed?.Invoke();
                         }
                         break;
@@ -638,7 +647,7 @@ namespace Glasspage.UnitySync
                                 transportEvent.SceneSnapshot,
                                 out string sceneSettingsError))
                         {
-                            AddLog("Scene settings sync skipped an update: " + sceneSettingsError);
+                            AddFailure("Scene settings sync skipped an update: " + sceneSettingsError);
                             Changed?.Invoke();
                         }
                         else
@@ -650,6 +659,11 @@ namespace Glasspage.UnitySync
 
                     case UnitySyncTransportEventKind.Log:
                         AddLog(transportEvent.Message);
+                        Changed?.Invoke();
+                        break;
+
+                    case UnitySyncTransportEventKind.Error:
+                        AddFailure(transportEvent.Message);
                         Changed?.Invoke();
                         break;
                 }
@@ -674,7 +688,7 @@ namespace Glasspage.UnitySync
             UnitySyncFileSynchronizer.Update(transport, LocalPlayerId);
             if (UnitySyncFileSynchronizer.ConsumeGuestFailure(out string fileSyncFailure))
             {
-                AddLog("File sync failed: " + fileSyncFailure);
+                AddFailure("File sync failed: " + fileSyncFailure);
                 StopInternal(false, true);
                 return;
             }
@@ -1090,7 +1104,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after Unity reloaded scripts.");
+                AddFailure("Could not resume UnitySync after Unity reloaded scripts.");
                 Changed?.Invoke();
                 return;
             }
@@ -1127,7 +1141,7 @@ namespace Glasspage.UnitySync
             {
                 ClearFileSyncReloadReconnect();
                 EditorApplication.update -= TryResumeAfterFileSyncReload;
-                AddLog("Could not resume UnitySync after Unity reloaded scripts: " + error);
+                AddFailure("Could not resume UnitySync after Unity reloaded scripts: " + error);
                 Changed?.Invoke();
                 return;
             }
@@ -1180,6 +1194,17 @@ namespace Glasspage.UnitySync
 
             float hue = (uint)hash % 360u / 360f;
             return Color.HSVToRGB(hue, 0.72f, 1f);
+        }
+
+        private static void AddFailure(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return;
+            }
+
+            AddLog(message);
+            Debug.LogError("[UnitySync] " + message);
         }
 
         private static void AddLog(string message)
