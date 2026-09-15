@@ -200,6 +200,694 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        // Snapshot comparison is a hot guest-side path. Compare the already-deserialized
+        // incoming state directly against Unity's serialized properties instead of first
+        // materializing a second complete UnitySyncSceneObjectChange and hashing both copies.
+        // This also exits as soon as the first differing property is found.
+        internal static bool ComponentMatchesState(
+            Component component,
+            UnitySyncComponentState expectedState)
+        {
+            if (component == null ||
+                expectedState == null ||
+                !TypeMatches(component.GetType(), expectedState.TypeName))
+            {
+                return false;
+            }
+
+            SerializedObject serializedObject = new SerializedObject(component);
+            serializedObject.UpdateIfRequiredOrScript();
+            SerializedProperty iterator = serializedObject.GetIterator();
+            UnitySyncSerializedPropertyState[] expectedProperties =
+                expectedState.Properties ?? new UnitySyncSerializedPropertyState[0];
+            int expectedIndex = 0;
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                bool ignored = IsIgnoredPropertyPath(iterator.propertyPath, component.GetType());
+                enterChildren = !ignored &&
+                                iterator.propertyType != SerializedPropertyType.ObjectReference &&
+                                iterator.propertyType != SerializedPropertyType.ExposedReference;
+                if (ignored || !iterator.editable)
+                {
+                    continue;
+                }
+
+                UnitySyncSerializedPropertyState expected =
+                    expectedIndex < expectedProperties.Length
+                        ? expectedProperties[expectedIndex]
+                        : null;
+                if (!SerializedPropertyMatchesState(iterator, expected, out bool represented))
+                {
+                    return false;
+                }
+
+                if (represented)
+                {
+                    expectedIndex++;
+                }
+            }
+
+            return expectedIndex == expectedProperties.Length;
+        }
+
+        internal static bool ComponentStatesEqual(
+            UnitySyncComponentState left,
+            UnitySyncComponentState right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            if (left == null ||
+                right == null ||
+                left.ComponentIndex != right.ComponentIndex ||
+                !string.Equals(left.TypeName, right.TypeName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            UnitySyncSerializedPropertyState[] leftProperties =
+                left.Properties ?? new UnitySyncSerializedPropertyState[0];
+            UnitySyncSerializedPropertyState[] rightProperties =
+                right.Properties ?? new UnitySyncSerializedPropertyState[0];
+            if (leftProperties.Length != rightProperties.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < leftProperties.Length; index++)
+            {
+                if (!SerializedPropertyStatesEqual(leftProperties[index], rightProperties[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool SerializedPropertyMatchesState(
+            SerializedProperty property,
+            UnitySyncSerializedPropertyState expected,
+            out bool represented)
+        {
+            represented = true;
+            switch (property.propertyType)
+            {
+                case SerializedPropertyType.Integer:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Integer) &&
+                           expected.IntegerValue == property.longValue;
+
+                case SerializedPropertyType.Boolean:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Boolean) &&
+                           expected.IntegerValue == (property.boolValue ? 1L : 0L);
+
+                case SerializedPropertyType.Float:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Float) &&
+                           expected.NumberValue.Equals(property.doubleValue);
+
+                case SerializedPropertyType.String:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.String) &&
+                           string.Equals(expected.StringValue, property.stringValue, StringComparison.Ordinal);
+
+                case SerializedPropertyType.Color:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Color))
+                    {
+                        return false;
+                    }
+
+                    Color color = property.colorValue;
+                    return FloatValuesEqual(expected.FloatValues, color.r, color.g, color.b, color.a);
+
+                case SerializedPropertyType.ObjectReference:
+                case SerializedPropertyType.ExposedReference:
+                case SerializedPropertyType.Gradient:
+                    if (!TryCaptureProperty(property, out UnitySyncSerializedPropertyState captured))
+                    {
+                        return false;
+                    }
+
+                    return SerializedPropertyStatesEqual(captured, expected);
+
+                case SerializedPropertyType.LayerMask:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.LayerMask) &&
+                           expected.IntegerValue == property.intValue;
+
+                case SerializedPropertyType.Enum:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Enum) &&
+                           expected.IntegerValue == property.intValue;
+
+                case SerializedPropertyType.Vector2:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Vector2))
+                    {
+                        return false;
+                    }
+
+                    Vector2 vector2 = property.vector2Value;
+                    return FloatValuesEqual(expected.FloatValues, vector2.x, vector2.y);
+
+                case SerializedPropertyType.Vector3:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Vector3))
+                    {
+                        return false;
+                    }
+
+                    Vector3 vector3 = property.vector3Value;
+                    return FloatValuesEqual(expected.FloatValues, vector3.x, vector3.y, vector3.z);
+
+                case SerializedPropertyType.Vector4:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Vector4))
+                    {
+                        return false;
+                    }
+
+                    Vector4 vector4 = property.vector4Value;
+                    return FloatValuesEqual(
+                        expected.FloatValues,
+                        vector4.x,
+                        vector4.y,
+                        vector4.z,
+                        vector4.w);
+
+                case SerializedPropertyType.Rect:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Rect))
+                    {
+                        return false;
+                    }
+
+                    Rect rect = property.rectValue;
+                    return FloatValuesEqual(
+                        expected.FloatValues,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height);
+
+                case SerializedPropertyType.ArraySize:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.ArraySize) &&
+                           expected.IntegerValue == property.intValue;
+
+                case SerializedPropertyType.Character:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Character) &&
+                           expected.IntegerValue == property.intValue;
+
+                case SerializedPropertyType.AnimationCurve:
+                    return PropertyHeaderMatches(
+                               property,
+                               expected,
+                               UnitySyncSerializedValueKind.AnimationCurve) &&
+                           AnimationCurveMatchesState(
+                               property.animationCurveValue,
+                               expected.AnimationCurve);
+
+                case SerializedPropertyType.Bounds:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Bounds))
+                    {
+                        return false;
+                    }
+
+                    Bounds bounds = property.boundsValue;
+                    return FloatValuesEqual(
+                        expected.FloatValues,
+                        bounds.center.x,
+                        bounds.center.y,
+                        bounds.center.z,
+                        bounds.size.x,
+                        bounds.size.y,
+                        bounds.size.z);
+
+                case SerializedPropertyType.Quaternion:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Quaternion))
+                    {
+                        return false;
+                    }
+
+                    Quaternion quaternion = property.quaternionValue;
+                    return FloatValuesEqual(
+                        expected.FloatValues,
+                        quaternion.x,
+                        quaternion.y,
+                        quaternion.z,
+                        quaternion.w);
+
+                case SerializedPropertyType.Vector2Int:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Vector2Int))
+                    {
+                        return false;
+                    }
+
+                    Vector2Int vector2Int = property.vector2IntValue;
+                    return IntegerValuesEqual(expected.IntegerValues, vector2Int.x, vector2Int.y);
+
+                case SerializedPropertyType.Vector3Int:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Vector3Int))
+                    {
+                        return false;
+                    }
+
+                    Vector3Int vector3Int = property.vector3IntValue;
+                    return IntegerValuesEqual(
+                        expected.IntegerValues,
+                        vector3Int.x,
+                        vector3Int.y,
+                        vector3Int.z);
+
+                case SerializedPropertyType.RectInt:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.RectInt))
+                    {
+                        return false;
+                    }
+
+                    RectInt rectInt = property.rectIntValue;
+                    return IntegerValuesEqual(
+                        expected.IntegerValues,
+                        rectInt.x,
+                        rectInt.y,
+                        rectInt.width,
+                        rectInt.height);
+
+                case SerializedPropertyType.BoundsInt:
+                    if (!PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.BoundsInt))
+                    {
+                        return false;
+                    }
+
+                    BoundsInt boundsInt = property.boundsIntValue;
+                    return IntegerValuesEqual(
+                        expected.IntegerValues,
+                        boundsInt.position.x,
+                        boundsInt.position.y,
+                        boundsInt.position.z,
+                        boundsInt.size.x,
+                        boundsInt.size.y,
+                        boundsInt.size.z);
+
+                case SerializedPropertyType.ManagedReference:
+                    return PropertyHeaderMatches(
+                               property,
+                               expected,
+                               UnitySyncSerializedValueKind.ManagedReference) &&
+                           string.Equals(
+                               expected.StringValue,
+                               property.managedReferenceFullTypename ?? string.Empty,
+                               StringComparison.Ordinal);
+
+                case SerializedPropertyType.Hash128:
+                    return PropertyHeaderMatches(property, expected, UnitySyncSerializedValueKind.Hash128) &&
+                           string.Equals(
+                               expected.StringValue,
+                               property.hash128Value.ToString(),
+                               StringComparison.Ordinal);
+
+                default:
+                    represented = false;
+                    return true;
+            }
+        }
+
+        private static bool PropertyHeaderMatches(
+            SerializedProperty property,
+            UnitySyncSerializedPropertyState expected,
+            UnitySyncSerializedValueKind kind)
+        {
+            return expected != null &&
+                   expected.Kind == kind &&
+                   string.Equals(property.propertyPath, expected.Path, StringComparison.Ordinal);
+        }
+
+        private static bool SerializedPropertyStatesEqual(
+            UnitySyncSerializedPropertyState left,
+            UnitySyncSerializedPropertyState right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            if (left == null ||
+                right == null ||
+                left.Kind != right.Kind ||
+                !string.Equals(left.Path, right.Path, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            switch (left.Kind)
+            {
+                case UnitySyncSerializedValueKind.Integer:
+                case UnitySyncSerializedValueKind.Boolean:
+                case UnitySyncSerializedValueKind.LayerMask:
+                case UnitySyncSerializedValueKind.Enum:
+                case UnitySyncSerializedValueKind.ArraySize:
+                case UnitySyncSerializedValueKind.Character:
+                    return left.IntegerValue == right.IntegerValue;
+
+                case UnitySyncSerializedValueKind.Float:
+                    return left.NumberValue.Equals(right.NumberValue);
+
+                case UnitySyncSerializedValueKind.String:
+                case UnitySyncSerializedValueKind.ManagedReference:
+                case UnitySyncSerializedValueKind.Hash128:
+                    return string.Equals(left.StringValue, right.StringValue, StringComparison.Ordinal);
+
+                case UnitySyncSerializedValueKind.Color:
+                case UnitySyncSerializedValueKind.Vector2:
+                case UnitySyncSerializedValueKind.Vector3:
+                case UnitySyncSerializedValueKind.Vector4:
+                case UnitySyncSerializedValueKind.Rect:
+                case UnitySyncSerializedValueKind.Bounds:
+                case UnitySyncSerializedValueKind.Quaternion:
+                    return FloatArraysEqual(left.FloatValues, right.FloatValues);
+
+                case UnitySyncSerializedValueKind.Vector2Int:
+                case UnitySyncSerializedValueKind.Vector3Int:
+                case UnitySyncSerializedValueKind.RectInt:
+                case UnitySyncSerializedValueKind.BoundsInt:
+                    return IntegerArraysEqual(left.IntegerValues, right.IntegerValues);
+
+                case UnitySyncSerializedValueKind.ObjectReference:
+                case UnitySyncSerializedValueKind.ExposedReference:
+                    return ObjectReferencesEqual(left.ObjectReference, right.ObjectReference);
+
+                case UnitySyncSerializedValueKind.AnimationCurve:
+                    return AnimationCurveStatesEqual(left.AnimationCurve, right.AnimationCurve);
+
+                case UnitySyncSerializedValueKind.Gradient:
+                    return GradientStatesEqual(left.Gradient, right.Gradient);
+
+                default:
+                    return false;
+            }
+        }
+
+        private static bool ObjectReferencesEqual(
+            UnitySyncObjectReferenceState left,
+            UnitySyncObjectReferenceState right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            if (left == null ||
+                right == null ||
+                left.Kind != right.Kind ||
+                !string.Equals(
+                    left.SerializedPropertyTypeName,
+                    right.SerializedPropertyTypeName,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            switch (left.Kind)
+            {
+                case UnitySyncObjectReferenceKind.Null:
+                    return true;
+
+                case UnitySyncObjectReferenceKind.Asset:
+                    return left.LocalFileId == right.LocalFileId &&
+                           string.Equals(left.ObjectTypeName, right.ObjectTypeName, StringComparison.Ordinal) &&
+                           string.Equals(left.AssetGuid, right.AssetGuid, StringComparison.Ordinal) &&
+                           string.Equals(left.AssetPath, right.AssetPath, StringComparison.Ordinal) &&
+                           string.Equals(left.AssetName, right.AssetName, StringComparison.Ordinal) &&
+                           string.Equals(
+                               left.AssetContentHash,
+                               right.AssetContentHash,
+                               StringComparison.Ordinal);
+
+                case UnitySyncObjectReferenceKind.SceneObject:
+                    return left.ComponentIndex == right.ComponentIndex &&
+                           string.Equals(left.ObjectTypeName, right.ObjectTypeName, StringComparison.Ordinal) &&
+                           SceneAddressesEqual(left.SceneObject, right.SceneObject);
+
+                default:
+                    return false;
+            }
+        }
+
+        private static bool SceneAddressesEqual(
+            UnitySyncSceneObjectAddress left,
+            UnitySyncSceneObjectAddress right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            return left != null &&
+                   right != null &&
+                   left.SiblingIndex == right.SiblingIndex &&
+                   left.SceneIndex == right.SceneIndex &&
+                   string.Equals(left.ObjectId, right.ObjectId, StringComparison.Ordinal) &&
+                   string.Equals(left.ParentObjectId, right.ParentObjectId, StringComparison.Ordinal) &&
+                   string.Equals(left.ScenePath, right.ScenePath, StringComparison.Ordinal) &&
+                   string.Equals(left.SceneName, right.SceneName, StringComparison.Ordinal) &&
+                   IntegerArraysEqual(left.SiblingPath, right.SiblingPath);
+        }
+
+        private static bool AnimationCurveMatchesState(
+            AnimationCurve curve,
+            UnitySyncAnimationCurveState state)
+        {
+            if (state == null)
+            {
+                return false;
+            }
+
+            Keyframe[] keys = curve != null ? curve.keys : new Keyframe[0];
+            return state.PreWrapMode == (curve != null ? curve.preWrapMode : WrapMode.Default) &&
+                   state.PostWrapMode == (curve != null ? curve.postWrapMode : WrapMode.Default) &&
+                   KeyframesEqual(keys, state.Keys);
+        }
+
+        private static bool AnimationCurveStatesEqual(
+            UnitySyncAnimationCurveState left,
+            UnitySyncAnimationCurveState right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            return left != null &&
+                   right != null &&
+                   left.PreWrapMode == right.PreWrapMode &&
+                   left.PostWrapMode == right.PostWrapMode &&
+                   KeyframesEqual(left.Keys, right.Keys);
+        }
+
+        private static bool GradientStatesEqual(
+            UnitySyncGradientState left,
+            UnitySyncGradientState right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            if (left == null || right == null || left.Mode != right.Mode)
+            {
+                return false;
+            }
+
+            GradientColorKey[] leftColors = left.ColorKeys ?? new GradientColorKey[0];
+            GradientColorKey[] rightColors = right.ColorKeys ?? new GradientColorKey[0];
+            if (leftColors.Length != rightColors.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < leftColors.Length; index++)
+            {
+                if (!leftColors[index].Equals(rightColors[index]))
+                {
+                    return false;
+                }
+            }
+
+            GradientAlphaKey[] leftAlphas = left.AlphaKeys ?? new GradientAlphaKey[0];
+            GradientAlphaKey[] rightAlphas = right.AlphaKeys ?? new GradientAlphaKey[0];
+            if (leftAlphas.Length != rightAlphas.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < leftAlphas.Length; index++)
+            {
+                if (!leftAlphas[index].Equals(rightAlphas[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool KeyframesEqual(Keyframe[] left, Keyframe[] right)
+        {
+            left = left ?? new Keyframe[0];
+            right = right ?? new Keyframe[0];
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < left.Length; index++)
+            {
+                if (!left[index].Equals(right[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool FloatArraysEqual(float[] left, float[] right)
+        {
+            left = left ?? new float[0];
+            right = right ?? new float[0];
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < left.Length; index++)
+            {
+                if (!left[index].Equals(right[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool IntegerArraysEqual(int[] left, int[] right)
+        {
+            left = left ?? new int[0];
+            right = right ?? new int[0];
+            if (left.Length != right.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < left.Length; index++)
+            {
+                if (left[index] != right[index])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool FloatValuesEqual(float[] values, float x, float y)
+        {
+            return values != null &&
+                   values.Length == 2 &&
+                   values[0].Equals(x) &&
+                   values[1].Equals(y);
+        }
+
+        private static bool FloatValuesEqual(float[] values, float x, float y, float z)
+        {
+            return values != null &&
+                   values.Length == 3 &&
+                   values[0].Equals(x) &&
+                   values[1].Equals(y) &&
+                   values[2].Equals(z);
+        }
+
+        private static bool FloatValuesEqual(
+            float[] values,
+            float x,
+            float y,
+            float z,
+            float w)
+        {
+            return values != null &&
+                   values.Length == 4 &&
+                   values[0].Equals(x) &&
+                   values[1].Equals(y) &&
+                   values[2].Equals(z) &&
+                   values[3].Equals(w);
+        }
+
+        private static bool FloatValuesEqual(
+            float[] values,
+            float x,
+            float y,
+            float z,
+            float w,
+            float a,
+            float b)
+        {
+            return values != null &&
+                   values.Length == 6 &&
+                   values[0].Equals(x) &&
+                   values[1].Equals(y) &&
+                   values[2].Equals(z) &&
+                   values[3].Equals(w) &&
+                   values[4].Equals(a) &&
+                   values[5].Equals(b);
+        }
+
+        private static bool IntegerValuesEqual(int[] values, int x, int y)
+        {
+            return values != null &&
+                   values.Length == 2 &&
+                   values[0] == x &&
+                   values[1] == y;
+        }
+
+        private static bool IntegerValuesEqual(int[] values, int x, int y, int z)
+        {
+            return values != null &&
+                   values.Length == 3 &&
+                   values[0] == x &&
+                   values[1] == y &&
+                   values[2] == z;
+        }
+
+        private static bool IntegerValuesEqual(
+            int[] values,
+            int x,
+            int y,
+            int z,
+            int w)
+        {
+            return values != null &&
+                   values.Length == 4 &&
+                   values[0] == x &&
+                   values[1] == y &&
+                   values[2] == z &&
+                   values[3] == w;
+        }
+
+        private static bool IntegerValuesEqual(
+            int[] values,
+            int x,
+            int y,
+            int z,
+            int w,
+            int a,
+            int b)
+        {
+            return values != null &&
+                   values.Length == 6 &&
+                   values[0] == x &&
+                   values[1] == y &&
+                   values[2] == z &&
+                   values[3] == w &&
+                   values[4] == a &&
+                   values[5] == b;
+        }
+
         internal static bool TryCaptureFullObject(GameObject gameObject, out UnitySyncSceneObjectChange change)
         {
             change = null;

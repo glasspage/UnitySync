@@ -70,6 +70,12 @@ namespace Glasspage.UnitySync
             internal double StartTime;
         }
 
+        private sealed class CachedSnapshotComponentState
+        {
+            internal Component Component;
+            internal UnitySyncComponentState State;
+        }
+
         private const double FlushIntervalSeconds = 0.05;
         private const double TransformSyncIntervalSeconds = 0.1;
         private const double OtherSyncIntervalSeconds = 1.0;
@@ -117,6 +123,13 @@ namespace Glasspage.UnitySync
         private static readonly HashSet<int> BatchedObjectInstanceIds =
             new HashSet<int>();
 
+        private static readonly Dictionary<int, CachedSnapshotComponentState>
+            SnapshotComponentStates =
+                new Dictionary<int, CachedSnapshotComponentState>();
+
+        private static readonly List<Component> SnapshotComponentBuffer =
+            new List<Component>(16);
+
         private static bool _active;
         private static bool _applyingRemoteChange;
         private static bool _suppressPublishedSnapshotChanges;
@@ -153,6 +166,7 @@ namespace Glasspage.UnitySync
             RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
+            SnapshotComponentStates.Clear();
             _remoteSnapshot = null;
             _suppressPublishedSnapshotChanges = false;
             EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
@@ -176,6 +190,7 @@ namespace Glasspage.UnitySync
             RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
+            SnapshotComponentStates.Clear();
             _remoteSnapshot = null;
             _suppressPublishedSnapshotChanges = false;
             EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
@@ -293,6 +308,7 @@ namespace Glasspage.UnitySync
                 PendingKeysByInstanceId.Clear();
                 LastIncomingLiveHashes.Clear();
                 UnitySyncSceneObjectRegistry.Clear();
+                PruneSnapshotComponentStates();
             }
             finally
             {
@@ -591,6 +607,8 @@ namespace Glasspage.UnitySync
                     }
                 }
 
+                UpdateSnapshotComponentCacheAfterApply(change);
+
                 if (change.SnapshotId != Guid.Empty &&
                     change.HierarchyOnly &&
                     change.Address != null &&
@@ -662,35 +680,182 @@ namespace Glasspage.UnitySync
 
         private static bool SnapshotComponentAlreadyMatches(UnitySyncSceneObjectChange incoming)
         {
-            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(incoming.Address);
+            if (!TryResolveSingleComponentState(incoming, out Component component))
+            {
+                return false;
+            }
+
+            UnitySyncComponentState incomingState = incoming.Components[0];
+            int componentInstanceId = component.GetInstanceID();
+            if (SnapshotComponentStates.TryGetValue(
+                    componentInstanceId,
+                    out CachedSnapshotComponentState cached) &&
+                ReferenceEquals(cached.Component, component))
+            {
+                // Local property changes and live remote component updates invalidate this
+                // cache. If the host state differs from the previous authoritative snapshot,
+                // the local component cannot already match it.
+                return UnitySyncSceneSerializer.ComponentStatesEqual(
+                    cached.State,
+                    incomingState);
+            }
+
+            if (!UnitySyncSceneSerializer.ComponentMatchesState(component, incomingState))
+            {
+                return false;
+            }
+
+            CacheSnapshotComponentState(component, incomingState);
+            return true;
+        }
+
+        private static bool TryResolveSingleComponentState(
+            UnitySyncSceneObjectChange change,
+            out Component component)
+        {
+            component = null;
+            if (change == null ||
+                change.Address == null ||
+                change.Kind != UnitySyncSceneChangeKind.Upsert ||
+                change.HierarchyOnly ||
+                change.ReconcileComponents ||
+                change.GameObject != null ||
+                change.Components == null ||
+                change.Components.Length != 1 ||
+                change.Components[0] == null)
+            {
+                return false;
+            }
+
+            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(change.Address);
             if (gameObject == null)
             {
                 return false;
             }
 
-            int componentIndex = incoming.Components[0].ComponentIndex;
-            Component[] components = gameObject.GetComponents<Component>();
+            int componentIndex = change.Components[0].ComponentIndex;
+            SnapshotComponentBuffer.Clear();
+            gameObject.GetComponents(SnapshotComponentBuffer);
             if (componentIndex < 0 ||
-                componentIndex >= components.Length ||
-                components[componentIndex] == null ||
-                !UnitySyncSceneSerializer.TryCaptureComponent(
-                    components[componentIndex],
-                    out UnitySyncSceneObjectChange localChange))
+                componentIndex >= SnapshotComponentBuffer.Count ||
+                SnapshotComponentBuffer[componentIndex] == null)
             {
+                SnapshotComponentBuffer.Clear();
                 return false;
             }
 
-            Guid snapshotId = incoming.SnapshotId;
-            try
+            component = SnapshotComponentBuffer[componentIndex];
+            SnapshotComponentBuffer.Clear();
+            return true;
+        }
+
+        private static void CacheSnapshotComponentState(
+            Component component,
+            UnitySyncComponentState state)
+        {
+            if (component == null || state == null)
             {
-                incoming.SnapshotId = Guid.Empty;
-                return TryGetHash(incoming, out string incomingHash) &&
-                       TryGetHash(localChange, out string localHash) &&
-                       incomingHash == localHash;
+                return;
             }
-            finally
+
+            SnapshotComponentStates[component.GetInstanceID()] =
+                new CachedSnapshotComponentState
+                {
+                    Component = component,
+                    State = state
+                };
+        }
+
+        private static void InvalidateSnapshotComponentState(Component component)
+        {
+            if (component != null)
             {
-                incoming.SnapshotId = snapshotId;
+                SnapshotComponentStates.Remove(component.GetInstanceID());
+            }
+        }
+
+        private static void InvalidateSnapshotComponentStates(GameObject gameObject)
+        {
+            if (gameObject == null)
+            {
+                return;
+            }
+
+            Component[] components = gameObject.GetComponents<Component>();
+            foreach (Component component in components)
+            {
+                if (component != null)
+                {
+                    InvalidateSnapshotComponentState(component);
+                }
+            }
+        }
+
+        private static void PruneSnapshotComponentStates()
+        {
+            if (SnapshotComponentStates.Count == 0)
+            {
+                return;
+            }
+
+            List<int> staleInstanceIds = null;
+            foreach (KeyValuePair<int, CachedSnapshotComponentState> pair in SnapshotComponentStates)
+            {
+                if (pair.Value != null && pair.Value.Component != null)
+                {
+                    continue;
+                }
+
+                if (staleInstanceIds == null)
+                {
+                    staleInstanceIds = new List<int>();
+                }
+
+                staleInstanceIds.Add(pair.Key);
+            }
+
+            if (staleInstanceIds == null)
+            {
+                return;
+            }
+
+            foreach (int instanceId in staleInstanceIds)
+            {
+                SnapshotComponentStates.Remove(instanceId);
+            }
+        }
+
+        private static void UpdateSnapshotComponentCacheAfterApply(
+            UnitySyncSceneObjectChange change)
+        {
+            if (change == null ||
+                change.Kind != UnitySyncSceneChangeKind.Upsert ||
+                change.HierarchyOnly)
+            {
+                return;
+            }
+
+            if (change.ReconcileComponents)
+            {
+                InvalidateSnapshotComponentStates(
+                    UnitySyncSceneSerializer.ResolveAddress(change.Address));
+                return;
+            }
+
+            if (!TryResolveSingleComponentState(change, out Component component))
+            {
+                return;
+            }
+
+            if (change.SnapshotId != Guid.Empty)
+            {
+                CacheSnapshotComponentState(component, change.Components[0]);
+            }
+            else
+            {
+                // Live remote edits are applied while ObjectChangeEvents are suppressed.
+                // Explicit invalidation prevents a later snapshot from trusting stale state.
+                InvalidateSnapshotComponentState(component);
             }
         }
 
@@ -961,6 +1126,8 @@ namespace Glasspage.UnitySync
             {
                 return;
             }
+
+            InvalidateSnapshotComponentState(component);
 
             if (component is Transform && IsRemoteTransformInterpolating(component.gameObject))
             {
