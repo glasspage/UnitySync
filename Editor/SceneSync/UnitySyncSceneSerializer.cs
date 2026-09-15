@@ -2814,6 +2814,9 @@ namespace Glasspage.UnitySync
 
             using (PropertyValuesMarker.Auto())
             {
+                Dictionary<string, SerializedProperty> propertyLookup =
+                    BuildSerializedPropertyLookup(serializedObject);
+
                 for (int index = 0; index < properties.Length; index++)
                 {
                     UnitySyncSerializedPropertyState propertyState = properties[index];
@@ -2826,9 +2829,9 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
-                    SerializedProperty property =
-                        serializedObject.FindProperty(propertyState.Path);
-                    if (property != null)
+                    if (propertyLookup.TryGetValue(
+                            propertyState.Path,
+                            out SerializedProperty property))
                     {
                         ApplyProperty(property, propertyState);
                     }
@@ -2840,6 +2843,27 @@ namespace Glasspage.UnitySync
                 serializedObject.ApplyModifiedPropertiesWithoutUndo();
             }
             return true;
+        }
+
+        private static Dictionary<string, SerializedProperty> BuildSerializedPropertyLookup(
+            SerializedObject serializedObject)
+        {
+            Dictionary<string, SerializedProperty> lookup =
+                new Dictionary<string, SerializedProperty>(StringComparer.Ordinal);
+            if (serializedObject == null)
+            {
+                return lookup;
+            }
+
+            SerializedProperty iterator = serializedObject.GetIterator();
+            bool enterChildren = true;
+            while (iterator.Next(enterChildren))
+            {
+                enterChildren = true;
+                lookup[iterator.propertyPath] = iterator.Copy();
+            }
+
+            return lookup;
         }
 
         private static int GetSerializedPropertyPathDepth(string propertyPath)
