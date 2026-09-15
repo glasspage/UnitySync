@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
+using Unity.Profiling;
 using UnityEngine;
 
 namespace Glasspage.UnitySync
@@ -29,6 +30,25 @@ namespace Glasspage.UnitySync
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
         private const double StatusEventDurationSeconds = 8d;
+
+        private static readonly ProfilerMarker ImportStatusUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.ImportStatus");
+        private static readonly ProfilerMarker SpectatedViewUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.SpectatedView");
+        private static readonly ProfilerMarker IncomingEventsUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.IncomingEvents");
+        private static readonly ProfilerMarker[] IncomingEventKindMarkers =
+            CreateIncomingEventKindMarkers();
+        private static readonly ProfilerMarker FileSyncUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.FileSync");
+        private static readonly ProfilerMarker ProjectSyncUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.ProjectSync");
+        private static readonly ProfilerMarker SelectionUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.Selection");
+        private static readonly ProfilerMarker SceneFlushMarker =
+            new ProfilerMarker("UnitySync.Session.SceneFlush");
+        private static readonly ProfilerMarker ViewportUpdateMarker =
+            new ProfilerMarker("UnitySync.Session.Viewport");
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
@@ -415,7 +435,10 @@ namespace Glasspage.UnitySync
 
         private static void Update()
         {
-            UpdateLocalAssetImportStatus(_transport);
+            using (ImportStatusUpdateMarker.Auto())
+            {
+                UpdateLocalAssetImportStatus(_transport);
+            }
 
             // Scene loading and asset import can pump editor callbacks before they return.
             // Keep later snapshot packets queued until the current packet has finished applying.
@@ -437,7 +460,10 @@ namespace Glasspage.UnitySync
 
         private static void UpdateSession()
         {
-            UpdateSpectatedSceneView();
+            using (SpectatedViewUpdateMarker.Auto())
+            {
+                UpdateSpectatedSceneView();
+            }
 
             UnitySyncTransport transport = _transport;
             if (transport == null)
@@ -450,6 +476,8 @@ namespace Glasspage.UnitySync
             long incomingStart = System.Diagnostics.Stopwatch.GetTimestamp();
             // Yield between packets without dropping or reordering snapshot boundaries.
             // A single Unity API call can exceed this budget; the next packet waits.
+            using (IncomingEventsUpdateMarker.Auto())
+            {
             while (!disconnected &&
                    !EditorApplication.isCompiling &&
                    !EditorApplication.isUpdating &&
@@ -460,6 +488,8 @@ namespace Glasspage.UnitySync
                    transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
             {
                 processedEvents++;
+                using (IncomingEventKindMarkers[(int)transportEvent.Kind].Auto())
+                {
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
@@ -528,7 +558,7 @@ namespace Glasspage.UnitySync
                         }
 
                         UnitySyncSelectionPresence.Apply(transportEvent.Selection, LocalPlayerId);
-                        SceneView.RepaintAll();
+                        UnitySyncPresenceRoot.RequestSceneRepaint();
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
@@ -551,7 +581,7 @@ namespace Glasspage.UnitySync
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
                         UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
                         UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
-                        SceneView.RepaintAll();
+                        UnitySyncPresenceRoot.RequestSceneRepaint();
                         Changed?.Invoke();
                         break;
 
@@ -697,6 +727,8 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
                 }
+                }
+            }
             }
 
             if (disconnected)
@@ -715,7 +747,11 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            UnitySyncFileSynchronizer.Update(transport, LocalPlayerId);
+            using (FileSyncUpdateMarker.Auto())
+            {
+                UnitySyncFileSynchronizer.Update(transport, LocalPlayerId);
+            }
+
             if (UnitySyncFileSynchronizer.ConsumeGuestFailure(out string fileSyncFailure))
             {
                 AddFailure("File sync failed: " + fileSyncFailure);
@@ -747,9 +783,20 @@ namespace Glasspage.UnitySync
                 !EditorApplication.isPlayingOrWillChangePlaymode &&
                 (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
             {
-                UnitySyncProjectSynchronizer.Update(transport, LocalPlayerId);
-                SendSelectionIfNeeded(transport);
-                UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
+                using (ProjectSyncUpdateMarker.Auto())
+                {
+                    UnitySyncProjectSynchronizer.Update(transport, LocalPlayerId);
+                }
+
+                using (SelectionUpdateMarker.Auto())
+                {
+                    SendSelectionIfNeeded(transport);
+                }
+
+                using (SceneFlushMarker.Auto())
+                {
+                    UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
+                }
             }
 
             if (EditorApplication.timeSinceStartup < _nextSendTime ||
@@ -759,6 +806,8 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            using (ViewportUpdateMarker.Auto())
+            {
             SceneView sceneView =
                 _spectatingPlayerId != Guid.Empty && _spectatedSceneView != null
                     ? _spectatedSceneView
@@ -791,6 +840,20 @@ namespace Glasspage.UnitySync
             _lastViewportState = viewport;
             _hasLastViewportState = true;
             transport.SendLocalViewport(viewport);
+            }
+        }
+
+        private static ProfilerMarker[] CreateIncomingEventKindMarkers()
+        {
+            string[] eventNames = Enum.GetNames(typeof(UnitySyncTransportEventKind));
+            ProfilerMarker[] markers = new ProfilerMarker[eventNames.Length];
+            for (int index = 0; index < eventNames.Length; index++)
+            {
+                markers[index] = new ProfilerMarker(
+                    "UnitySync.Session.IncomingEvents." + eventNames[index]);
+            }
+
+            return markers;
         }
 
         private static void SendSelectionIfNeeded(UnitySyncTransport transport)
@@ -915,7 +978,7 @@ namespace Glasspage.UnitySync
                 size,
                 viewport.Orthographic,
                 true);
-            sceneView.Repaint();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
         }
 
         private static void StopSpectatingInternal(
@@ -1033,7 +1096,7 @@ namespace Glasspage.UnitySync
                 StopSpectatingInternal(true, false);
             }
 
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
             Changed?.Invoke();
         }
 
@@ -1079,7 +1142,7 @@ namespace Glasspage.UnitySync
                     StatusEventDurationSeconds);
             }
 
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
 
             if (addLog && transport != null)
             {

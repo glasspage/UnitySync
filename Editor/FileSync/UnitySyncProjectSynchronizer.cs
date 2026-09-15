@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
+using Unity.Profiling;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -33,8 +34,18 @@ namespace Glasspage.UnitySync
         private const double DirtyAssetSaveDelaySeconds = 0.05d;
         private const double MaterialSyncDelaySeconds = 1.0d;
         private const double DirtyMaterialScanIntervalSeconds = 0.25d;
+        private const double LoadedMaterialDiscoveryIntervalSeconds = 2.0d;
+        private const double DirtyAssetWorkBudgetSeconds = 0.002d;
+        private const int MaximumMaterialsPerUpdate = 32;
+        private const int MaximumDirtyAssetSavesPerUpdate = 4;
         private const double RemoteEchoSuppressionSeconds = 2.0d;
 
+        private static readonly ProfilerMarker MaterialScanMarker =
+            new ProfilerMarker("UnitySync.ScanDirtyMaterials");
+        private static readonly ProfilerMarker MaterialDiscoveryMarker =
+            new ProfilerMarker("UnitySync.DiscoverLoadedMaterials");
+        private static readonly ProfilerMarker DirtyAssetSaveMarker =
+            new ProfilerMarker("UnitySync.SaveDirtyAssets");
         private static readonly object PendingLock = new object();
         private static readonly Dictionary<string, double> PendingLocalChanges =
             new Dictionary<string, double>(StringComparer.Ordinal);
@@ -46,6 +57,8 @@ namespace Glasspage.UnitySync
             new Dictionary<int, PendingDirtyAsset>();
         private static readonly Dictionary<int, string> MaterialEditFingerprints =
             new Dictionary<int, string>();
+        private static readonly Dictionary<int, int> MaterialDirtyCounts =
+            new Dictionary<int, int>();
         private static readonly Dictionary<Guid, RemoteTransfer> RemoteTransfers =
             new Dictionary<Guid, RemoteTransfer>();
 
@@ -54,6 +67,9 @@ namespace Glasspage.UnitySync
         private static FileSystemWatcher _assetsWatcher;
         private static FileSystemWatcher _projectSettingsWatcher;
         private static double _nextDirtyMaterialScanTime;
+        private static double _nextLoadedMaterialDiscoveryTime;
+        private static Material[] _loadedMaterials = new Material[0];
+        private static int _dirtyMaterialScanIndex;
 
         internal static void BeginSession()
         {
@@ -89,6 +105,10 @@ namespace Glasspage.UnitySync
             KnownHashes.Clear();
             PendingDirtyAssets.Clear();
             MaterialEditFingerprints.Clear();
+            MaterialDirtyCounts.Clear();
+            _loadedMaterials = new Material[0];
+            _dirtyMaterialScanIndex = 0;
+            _nextLoadedMaterialDiscoveryTime = 0d;
             _nextDirtyMaterialScanTime = 0d;
             foreach (RemoteTransfer transfer in RemoteTransfers.Values)
             {
@@ -101,14 +121,22 @@ namespace Glasspage.UnitySync
 
         internal static void Update(UnitySyncTransport transport, Guid localPlayerId)
         {
-            if (!_active || transport == null || EditorApplication.isCompiling)
+            if (!_active || transport == null || EditorApplication.isCompiling ||
+                EditorApplication.isUpdating)
             {
                 return;
             }
 
             double now = GetMonotonicSeconds();
-            ScanLoadedDirtyMaterials(now);
-            FlushDirtyAssets(now);
+            using (MaterialScanMarker.Auto())
+            {
+                ScanLoadedDirtyMaterials(now);
+            }
+
+            using (DirtyAssetSaveMarker.Auto())
+            {
+                FlushDirtyAssets(now);
+            }
 
             List<string> ready = new List<string>();
             lock (PendingLock)
@@ -207,6 +235,7 @@ namespace Glasspage.UnitySync
             }
 
             UnitySyncSceneSynchronizer.MarkSceneSettingsChanged();
+            MaterialDirtyCounts.Clear();
             _nextDirtyMaterialScanTime = 0d;
         }
 
@@ -217,24 +246,72 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            _nextDirtyMaterialScanTime = now + DirtyMaterialScanIntervalSeconds;
-            Material[] materials = Resources.FindObjectsOfTypeAll<Material>();
-            HashSet<int> seen = new HashSet<int>();
-            foreach (Material material in materials)
+            // Discovery allocates an array of every loaded material. Reuse that array
+            // across scans, and never restart an unfinished pass in a large project.
+            if (_dirtyMaterialScanIndex == 0 && now >= _nextLoadedMaterialDiscoveryTime)
             {
+                using (MaterialDiscoveryMarker.Auto())
+                {
+                    _loadedMaterials = Resources.FindObjectsOfTypeAll<Material>();
+                }
+                _nextLoadedMaterialDiscoveryTime = now + LoadedMaterialDiscoveryIntervalSeconds;
+                HashSet<int> loadedIds = new HashSet<int>();
+                foreach (Material material in _loadedMaterials)
+                {
+                    if (material != null)
+                    {
+                        loadedIds.Add(material.GetInstanceID());
+                    }
+                }
+
+                List<int> stale = new List<int>();
+                foreach (int instanceId in MaterialDirtyCounts.Keys)
+                {
+                    if (!loadedIds.Contains(instanceId))
+                    {
+                        stale.Add(instanceId);
+                    }
+                }
+
+                foreach (int instanceId in stale)
+                {
+                    MaterialDirtyCounts.Remove(instanceId);
+                    MaterialEditFingerprints.Remove(instanceId);
+                }
+
+                // Discovery is one indivisible Unity call; yield before serialization.
+                return;
+            }
+
+            double started = GetMonotonicSeconds();
+            int processed = 0;
+            while (_dirtyMaterialScanIndex < _loadedMaterials.Length &&
+                   processed < MaximumMaterialsPerUpdate &&
+                   (processed == 0 || GetMonotonicSeconds() - started < DirtyAssetWorkBudgetSeconds))
+            {
+                Material material = _loadedMaterials[_dirtyMaterialScanIndex++];
+                processed++;
                 if (material == null || !EditorUtility.IsPersistent(material))
                 {
                     continue;
                 }
 
                 int instanceId = material.GetInstanceID();
-                seen.Add(instanceId);
                 if (!EditorUtility.IsDirty(material))
                 {
+                    MaterialDirtyCounts.Remove(instanceId);
                     MaterialEditFingerprints.Remove(instanceId);
                     continue;
                 }
 
+                int dirtyCount = EditorUtility.GetDirtyCount(material);
+                if (MaterialDirtyCounts.TryGetValue(instanceId, out int previousCount) &&
+                    previousCount == dirtyCount)
+                {
+                    continue;
+                }
+
+                MaterialDirtyCounts[instanceId] = dirtyCount;
                 string path = AssetDatabase.GetAssetPath(material) ?? string.Empty;
                 if (!IsLiveSyncPath(path))
                 {
@@ -252,28 +329,10 @@ namespace Glasspage.UnitySync
                 QueueDirtyAsset(material, now + MaterialSyncDelaySeconds);
             }
 
-            List<int> stale = null;
-            foreach (int instanceId in MaterialEditFingerprints.Keys)
+            if (_dirtyMaterialScanIndex >= _loadedMaterials.Length)
             {
-                if (seen.Contains(instanceId))
-                {
-                    continue;
-                }
-
-                if (stale == null)
-                {
-                    stale = new List<int>();
-                }
-
-                stale.Add(instanceId);
-            }
-
-            if (stale != null)
-            {
-                foreach (int instanceId in stale)
-                {
-                    MaterialEditFingerprints.Remove(instanceId);
-                }
+                _dirtyMaterialScanIndex = 0;
+                _nextDirtyMaterialScanTime = now + DirtyMaterialScanIntervalSeconds;
             }
         }
 
@@ -333,8 +392,19 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            double started = GetMonotonicSeconds();
+            int processed = 0;
             foreach (int instanceId in ready)
             {
+                // Saving one asset can itself exceed the budget. Always make progress,
+                // but leave the rest queued for later editor updates.
+                if (processed >= MaximumDirtyAssetSavesPerUpdate ||
+                    (processed > 0 && GetMonotonicSeconds() - started >= DirtyAssetWorkBudgetSeconds))
+                {
+                    break;
+                }
+
+                processed++;
                 if (!PendingDirtyAssets.TryGetValue(instanceId, out PendingDirtyAsset pending))
                 {
                     continue;
@@ -358,6 +428,10 @@ namespace Glasspage.UnitySync
                     AssetDatabase.SaveAssetIfDirty(asset);
                 }
 
+                // Saving resets Unity's dirty counter. Clear our baseline now, since
+                // another edit may reach the same count before the next material scan.
+                MaterialDirtyCounts.Remove(instanceId);
+                MaterialEditFingerprints.Remove(instanceId);
                 QueueAssetPath(path);
             }
         }

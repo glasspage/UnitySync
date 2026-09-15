@@ -98,7 +98,11 @@ namespace Glasspage.UnitySync
                 SceneViewSize = Mathf.Max(0.0001f, viewport.SceneViewSize);
                 SpectatingPlayerId = viewport.SpectatingPlayerId;
 
-                GameObject.name = DisplayName + " (Viewport)";
+                string markerName = DisplayName + " (Viewport)";
+                if (GameObject.name != markerName)
+                {
+                    GameObject.name = markerName;
+                }
                 if (sampleTime <= 0d)
                 {
                     sampleTime = GetMonotonicSeconds();
@@ -168,17 +172,6 @@ namespace Glasspage.UnitySync
                 Pivot = pivot;
                 transform.SetPositionAndRotation(position, rotation);
                 return true;
-            }
-
-            internal bool HasPendingInterpolation(double currentTime)
-            {
-                if (_transformSamples.Count < 2)
-                {
-                    return false;
-                }
-
-                double renderTime = currentTime - TransformInterpolationBufferSeconds;
-                return renderTime < _transformSamples[_transformSamples.Count - 1].Time;
             }
         }
 
@@ -254,6 +247,9 @@ namespace Glasspage.UnitySync
             new List<TimedStatusEvent>();
 
         private static long _nextStatusSequence;
+        private static bool _sceneRepaintPending;
+        private static double _lastSceneRepaintTime = double.NegativeInfinity;
+        private static double _lastPresenceAnimationTime = double.NegativeInfinity;
         private static GameObject _collaboratorsRoot;
         private static GUIStyle _labelStyle;
         private static GUIStyle _labelOutlineStyle;
@@ -262,7 +258,7 @@ namespace Glasspage.UnitySync
         {
             SceneView.duringSceneGui += OnSceneGUI;
             EditorApplication.update += UpdateInterpolatedTransforms;
-            UnitySyncVisualSettings.Changed += SceneView.RepaintAll;
+            UnitySyncVisualSettings.Changed += RequestSceneRepaint;
         }
 
         internal static void Apply(
@@ -299,7 +295,7 @@ namespace Glasspage.UnitySync
                 ExpiresAtSeconds = now + durationSeconds,
                 Sequence = ++_nextStatusSequence
             });
-            SceneView.RepaintAll();
+            RequestSceneRepaint();
         }
 
         internal static bool DebugMarkerVisible
@@ -362,7 +358,7 @@ namespace Glasspage.UnitySync
                 sceneViewSize,
                 Guid.Empty);
             ApplyMarker(viewport, true, GetMonotonicSeconds());
-            SceneView.RepaintAll();
+            RequestSceneRepaint();
         }
 
         internal static void UpdateDebugMarkerAppearance(string displayName, Color color)
@@ -375,13 +371,13 @@ namespace Glasspage.UnitySync
             marker.DisplayName = displayName;
             marker.Color = color;
             marker.GameObject.name = displayName + " (Viewport)";
-            SceneView.RepaintAll();
+            RequestSceneRepaint();
         }
 
         internal static void DestroyDebugMarker()
         {
             Remove(DebugMarkerId);
-            SceneView.RepaintAll();
+            RequestSceneRepaint();
         }
 
         private static void ApplyMarker(
@@ -434,7 +430,7 @@ namespace Glasspage.UnitySync
 
             if (changed)
             {
-                SceneView.RepaintAll();
+                RequestSceneRepaint();
             }
         }
 
@@ -565,8 +561,14 @@ namespace Glasspage.UnitySync
         private static void UpdateInterpolatedTransforms()
         {
             double interpolationNow = GetMonotonicSeconds();
+            bool animate = IsSceneViewActive() ||
+                           interpolationNow - _lastPresenceAnimationTime >= 0.25d;
+            if (animate)
+            {
+                _lastPresenceAnimationTime = interpolationNow;
+            }
+
             bool changed = PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
-            bool needsContinuousUpdate = false;
             List<Guid> staleIds = null;
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
             {
@@ -582,8 +584,11 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                changed |= marker.Interpolate(interpolationNow);
-                needsContinuousUpdate |= marker.HasPendingInterpolation(interpolationNow);
+                // Even hidden marker Transform writes can wake Unity's scene loop.
+                if (animate)
+                {
+                    changed |= marker.Interpolate(interpolationNow);
+                }
             }
 
             if (staleIds != null)
@@ -596,15 +601,48 @@ namespace Glasspage.UnitySync
                 DestroyCollaboratorsContainerIfEmpty();
             }
 
-            if (needsContinuousUpdate)
-            {
-                EditorApplication.QueuePlayerLoopUpdate();
-            }
-
             if (changed)
             {
-                SceneView.RepaintAll();
+                RequestSceneRepaint();
             }
+
+            FlushSceneRepaint();
+        }
+
+        // Presence animation already runs from EditorApplication.update. Forcing a
+        // player loop here also wakes unrelated ExecuteAlways scripts and windows.
+        internal static void RequestSceneRepaint()
+        {
+            _sceneRepaintPending = true;
+        }
+
+        private static void FlushSceneRepaint()
+        {
+            if (!_sceneRepaintPending)
+            {
+                return;
+            }
+
+            double interval = IsSceneViewActive() ? 0d : 0.25d;
+            double now = EditorApplication.timeSinceStartup;
+            if (now - _lastSceneRepaintTime < interval)
+            {
+                return;
+            }
+
+            _sceneRepaintPending = false;
+            _lastSceneRepaintTime = now;
+            SceneView.RepaintAll();
+        }
+
+        private static bool IsSceneViewActive()
+        {
+#if UNITY_2022_2_OR_NEWER
+            bool editorFocused = EditorApplication.isFocused;
+#else
+            bool editorFocused = UnityEditorInternal.InternalEditorUtility.isApplicationActive;
+#endif
+            return editorFocused && EditorWindow.mouseOverWindow is SceneView;
         }
 
         private static bool PruneExpiredTimedStatuses(double now)

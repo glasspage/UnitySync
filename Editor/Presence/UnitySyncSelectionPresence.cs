@@ -63,7 +63,7 @@ namespace Glasspage.UnitySync
                 ReleaseRenderTextures();
             }
 
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
         }
 
         internal static void Apply(UnitySyncSelectionState selection, Guid localPlayerId)

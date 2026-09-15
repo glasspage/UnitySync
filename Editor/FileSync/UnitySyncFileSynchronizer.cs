@@ -607,7 +607,7 @@ namespace Glasspage.UnitySync
             }
 
             HostDownloadProgress.Remove(targetPlayerId);
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
 
             Guid syncId = Guid.NewGuid();
             if (request.Scope == UnitySyncFileSyncScope.Packages)
@@ -881,7 +881,7 @@ namespace Glasspage.UnitySync
                     : 0d
             };
             HostDownloadProgress[playerId] = state;
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
             return true;
         }
 
@@ -919,7 +919,7 @@ namespace Glasspage.UnitySync
             {
                 HostDownloadProgress.Remove(playerId);
             }
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
         }
 
         private static void QueueHostTransfer(
@@ -1098,7 +1098,7 @@ namespace Glasspage.UnitySync
                 error,
                 transfer.TargetPlayerId);
             HostDownloadProgress.Remove(transfer.TargetPlayerId);
-            SceneView.RepaintAll();
+            UnitySyncPresenceRoot.RequestSceneRepaint();
             RemoveHostManifestAndTransfers(transfer.SyncId);
         }
 
