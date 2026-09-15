@@ -32,7 +32,8 @@ namespace Glasspage.UnitySync
         RestoreProjectAccepted = 23,
         RestoreProjectDeclined = 24,
         FileDownloadProgress = 25,
-        AssetImportState = 26
+        AssetImportState = 26,
+        BuildTarget = 27
     }
 
     internal enum UnitySyncFileSyncScope : byte
@@ -126,6 +127,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncSelectionState Selection;
         internal readonly UnitySyncFileSyncMessage FileSync;
         internal readonly bool IsImportingAssets;
+        internal readonly string BuildTargetName;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
@@ -136,7 +138,8 @@ namespace Glasspage.UnitySync
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
             UnitySyncSelectionState selection = default,
             UnitySyncFileSyncMessage fileSync = null,
-            bool isImportingAssets = false)
+            bool isImportingAssets = false,
+            string buildTargetName = "")
         {
             Type = type;
             PlayerId = playerId;
@@ -147,12 +150,13 @@ namespace Glasspage.UnitySync
             Selection = selection;
             FileSync = fileSync;
             IsImportingAssets = isImportingAssets;
+            BuildTargetName = buildTargetName ?? string.Empty;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 18;
+        internal const int Version = 19;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -176,13 +180,22 @@ namespace Glasspage.UnitySync
             });
         }
 
-        internal static byte[] CreateWelcome(Guid playerId, string displayName)
+        internal static byte[] CreateWelcome(
+            Guid playerId,
+            string displayName,
+            string buildTargetName)
         {
+            if (string.IsNullOrEmpty(buildTargetName))
+            {
+                throw new InvalidDataException("A welcome message requires a build target.");
+            }
+
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.Welcome);
                 WriteGuid(writer, playerId);
                 WriteString(writer, displayName);
+                WriteLimitedString(writer, buildTargetName);
             });
         }
 
@@ -404,6 +417,21 @@ namespace Glasspage.UnitySync
                 writer.Write((byte)UnitySyncMessageType.AssetImportState);
                 WriteGuid(writer, playerId);
                 writer.Write(isImportingAssets);
+            });
+        }
+
+        internal static byte[] CreateBuildTarget(Guid playerId, string buildTargetName)
+        {
+            if (playerId == Guid.Empty || string.IsNullOrEmpty(buildTargetName))
+            {
+                throw new InvalidDataException("A build target update requires a player ID and target.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.BuildTarget);
+                WriteGuid(writer, playerId);
+                WriteLimitedString(writer, buildTargetName);
             });
         }
 
@@ -633,10 +661,26 @@ namespace Glasspage.UnitySync
                     switch (type)
                     {
                         case UnitySyncMessageType.Hello:
-                        case UnitySyncMessageType.Welcome:
                             playerId = ReadGuid(reader);
                             displayName = ReadString(reader);
                             message = new UnitySyncMessage(type, playerId, displayName, default);
+                            break;
+
+                        case UnitySyncMessageType.Welcome:
+                            playerId = ReadGuid(reader);
+                            displayName = ReadString(reader);
+                            string welcomeBuildTarget = ReadLimitedString(reader);
+                            if (string.IsNullOrEmpty(welcomeBuildTarget))
+                            {
+                                throw new InvalidDataException("The welcome message has no build target.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                displayName,
+                                default,
+                                buildTargetName: welcomeBuildTarget);
                             break;
 
                         case UnitySyncMessageType.Viewport:
@@ -894,6 +938,22 @@ namespace Glasspage.UnitySync
                                 default,
                                 null,
                                 reader.ReadBoolean());
+                            break;
+
+                        case UnitySyncMessageType.BuildTarget:
+                            playerId = ReadGuid(reader);
+                            string buildTargetName = ReadLimitedString(reader);
+                            if (playerId == Guid.Empty || string.IsNullOrEmpty(buildTargetName))
+                            {
+                                throw new InvalidDataException("Invalid build target update.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                buildTargetName: buildTargetName);
                             break;
 
                         case UnitySyncMessageType.FileChunk:
