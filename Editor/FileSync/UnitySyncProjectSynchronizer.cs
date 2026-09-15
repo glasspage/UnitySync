@@ -801,20 +801,28 @@ namespace Glasspage.UnitySync
         {
             if (path.StartsWith("Assets/", StringComparison.Ordinal))
             {
-                string importPath = path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
-                    ? path.Substring(0, path.Length - ".meta".Length)
-                    : path;
-
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                if (!string.IsNullOrEmpty(importPath) &&
-                    File.Exists(Path.Combine(
-                        GetProjectRoot(),
-                        importPath.Replace('/', Path.DirectorySeparatorChar))))
+                UnitySyncSession.BeginSynchronizedAssetImport();
+                try
                 {
-                    AssetDatabase.ImportAsset(
-                        importPath,
-                        ImportAssetOptions.ForceUpdate |
-                        ImportAssetOptions.ForceSynchronousImport);
+                    string importPath = path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
+                        ? path.Substring(0, path.Length - ".meta".Length)
+                        : path;
+
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                    if (!string.IsNullOrEmpty(importPath) &&
+                        File.Exists(Path.Combine(
+                            GetProjectRoot(),
+                            importPath.Replace('/', Path.DirectorySeparatorChar))))
+                    {
+                        AssetDatabase.ImportAsset(
+                            importPath,
+                            ImportAssetOptions.ForceUpdate |
+                            ImportAssetOptions.ForceSynchronousImport);
+                    }
+                }
+                finally
+                {
+                    UnitySyncSession.EndSynchronizedAssetImport();
                 }
 
                 return;
