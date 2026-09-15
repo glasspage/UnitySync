@@ -39,6 +39,10 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("US.Prop.Values");
         private static readonly ProfilerMarker PropertyCommitMarker =
             new ProfilerMarker("US.Prop.Commit");
+        private static readonly ProfilerMarker PropertyAtomicMarker =
+            new ProfilerMarker("US.Prop.Atomic");
+        private static readonly Dictionary<Type, ProfilerMarker> ComponentPropertyTypeMarkers =
+            new Dictionary<Type, ProfilerMarker>();
         private static readonly ProfilerMarker ComponentResolveRefsMarker =
             new ProfilerMarker("US.Comp.ResolveRefs");
         private static readonly ProfilerMarker ComponentCopyMarker =
@@ -2524,6 +2528,8 @@ namespace Glasspage.UnitySync
                 if (RequiresAtomicSerializedApply(stagingComponent.GetType()))
                 {
                     using (ComponentApplyPropertiesMarker.Auto())
+                    using (GetComponentPropertyProfilerMarker(stagingComponent.GetType()).Auto())
+                    using (PropertyAtomicMarker.Auto())
                     {
                         if (!ApplySerializedPropertiesAtomicallyWithReferences(
                                 stagingComponent,
@@ -2538,6 +2544,7 @@ namespace Glasspage.UnitySync
                 else
                 {
                     using (ComponentApplyPropertiesMarker.Auto())
+                    using (GetComponentPropertyProfilerMarker(stagingComponent.GetType()).Auto())
                     {
                         if (!ApplySerializedProperties(stagingComponent, state, out error))
                         {
@@ -2843,6 +2850,23 @@ namespace Glasspage.UnitySync
                 serializedObject.ApplyModifiedPropertiesWithoutUndo();
             }
             return true;
+        }
+
+        private static ProfilerMarker GetComponentPropertyProfilerMarker(Type componentType)
+        {
+            componentType = componentType ?? typeof(Component);
+            if (!ComponentPropertyTypeMarkers.TryGetValue(
+                    componentType,
+                    out ProfilerMarker marker))
+            {
+                string typeName = string.IsNullOrEmpty(componentType.Name)
+                    ? "Unknown"
+                    : componentType.Name;
+                marker = new ProfilerMarker("US.Prop.Type." + typeName);
+                ComponentPropertyTypeMarkers[componentType] = marker;
+            }
+
+            return marker;
         }
 
         private static Dictionary<string, SerializedProperty> BuildSerializedPropertyLookup(
