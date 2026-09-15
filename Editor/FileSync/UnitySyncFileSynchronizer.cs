@@ -345,32 +345,6 @@ namespace Glasspage.UnitySync
                 UnitySyncFileSyncScope.Packages);
         }
 
-        internal static void ResumeGuestAssetImportAfterReload()
-        {
-            ResetGuestState();
-            _guestPhase = GuestPhase.ImportingAssets;
-            UnitySyncSession.BeginSynchronizedAssetImport();
-            _guestImportEarliestComplete =
-                EditorApplication.timeSinceStartup + ImportSettleSeconds;
-
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                "Finishing synchronized asset import after script reload...",
-                0.96f);
-
-            try
-            {
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                ForceReimportProjectMaterials();
-            }
-            catch (Exception exception)
-            {
-                FailGuestSync(
-                    "Could not finish synchronized Assets after script reload: " +
-                    exception.Message);
-            }
-        }
-
         internal static bool ContinueGuestSync(
             UnitySyncTransport transport,
             out string error)
@@ -1733,7 +1707,7 @@ namespace Glasspage.UnitySync
                 _guestForceRestore = false;
                 GuestActiveMismatches.Clear();
                 _guestDownloadKind = GuestDownloadKind.None;
-                UnitySyncSession.PrepareFileSyncAssetImportReloadReconnect();
+                UnitySyncSession.PrepareFileSyncReloadReconnect();
             }
             catch (Exception exception)
             {
