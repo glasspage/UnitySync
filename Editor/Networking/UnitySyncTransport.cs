@@ -251,15 +251,32 @@ namespace Glasspage.UnitySync
 
         internal void SendBuildTarget(string buildTargetName)
         {
-            if (string.IsNullOrEmpty(buildTargetName))
+            if (!_running || string.IsNullOrEmpty(buildTargetName))
             {
                 return;
             }
 
             _localBuildTargetName = buildTargetName;
-            QueueMessage(
-                UnitySyncProtocol.CreateBuildTarget(_localPlayerId, buildTargetName),
-                Guid.Empty);
+            byte[] payload =
+                UnitySyncProtocol.CreateBuildTarget(_localPlayerId, buildTargetName);
+
+            // A platform change can reload editor assemblies immediately after the
+            // active-target callback returns. Send this tiny control packet directly so
+            // it cannot be stranded in the normal asynchronous outbound queue.
+            if (_isHost)
+            {
+                Broadcast(payload, null);
+                return;
+            }
+
+            Peer server = _serverPeer;
+            if (_clientReady && server != null)
+            {
+                TrySend(server, payload);
+                return;
+            }
+
+            QueueMessage(payload, Guid.Empty);
         }
 
         internal void SendRestoreProjectControl(UnitySyncMessageType type, Guid targetPlayerId)
