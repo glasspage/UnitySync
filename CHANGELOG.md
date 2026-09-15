@@ -2,6 +2,7 @@
 
 ## 0.6.0 (in progress)
 
+- Store downloaded replacement files and rollback backups under short hashed temporary filenames so valid deeply nested Assets do not exceed Windows path limits during synchronization.
 - Show connected collaborators in the list during initial file reconciliation instead of waiting for Assets synchronization to finish.
 - Show host-side Scene view status for each guest actively receiving synchronized files, using the collaborator's color and guest-reported receive percentage.
 - Show the same byte-based receive percentage in the guest's own Unity loading bar while downloading synchronized Assets.
