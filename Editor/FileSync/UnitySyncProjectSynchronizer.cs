@@ -18,13 +18,25 @@ namespace Glasspage.UnitySync
             internal double DueTime;
         }
 
+        private readonly struct FileFingerprint
+        {
+            internal readonly long Length;
+            internal readonly ulong Hash;
+
+            internal FileFingerprint(long length, ulong hash)
+            {
+                Length = length;
+                Hash = hash;
+            }
+        }
+
         private sealed class RemoteTransfer
         {
             internal Guid PlayerId;
             internal Guid SyncId;
             internal string Path;
             internal long Length;
-            internal byte[] Hash;
+            internal ulong Hash;
             internal string TempPath;
             internal FileStream Stream;
             internal long Received;
@@ -51,8 +63,8 @@ namespace Glasspage.UnitySync
             new Dictionary<string, double>(StringComparer.Ordinal);
         private static readonly Dictionary<string, double> SuppressedUntil =
             new Dictionary<string, double>(StringComparer.Ordinal);
-        private static readonly Dictionary<string, byte[]> KnownHashes =
-            new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, FileFingerprint> KnownFiles =
+            new Dictionary<string, FileFingerprint>(StringComparer.Ordinal);
         private static readonly Dictionary<int, PendingDirtyAsset> PendingDirtyAssets =
             new Dictionary<int, PendingDirtyAsset>();
         private static readonly Dictionary<int, string> MaterialEditFingerprints =
@@ -102,7 +114,7 @@ namespace Glasspage.UnitySync
                 SuppressedUntil.Clear();
             }
 
-            KnownHashes.Clear();
+            KnownFiles.Clear();
             PendingDirtyAssets.Clear();
             MaterialEditFingerprints.Clear();
             MaterialDirtyCounts.Clear();
@@ -573,7 +585,7 @@ namespace Glasspage.UnitySync
 
             if (!File.Exists(fullPath))
             {
-                if (KnownHashes.Remove(path))
+                if (KnownFiles.Remove(path))
                 {
                     transport.SendProjectFileDelete(localPlayerId, path);
                 }
@@ -588,33 +600,41 @@ namespace Glasspage.UnitySync
 
             try
             {
-                byte[] hash = ComputeHash(fullPath);
-                if (KnownHashes.TryGetValue(path, out byte[] knownHash) &&
-                    HashesEqual(knownHash, hash))
+                ulong hash = UnitySyncXxHash64.ComputeFile(fullPath, out long length);
+                if (KnownFiles.TryGetValue(path, out FileFingerprint known) &&
+                    known.Length == length &&
+                    known.Hash == hash)
                 {
                     return;
                 }
 
-                FileInfo info = new FileInfo(fullPath);
                 Guid syncId = Guid.NewGuid();
-                transport.SendProjectFileBegin(
-                    localPlayerId,
-                    new UnitySyncFileSyncMessage
-                    {
-                        SyncId = syncId,
-                        Path = path,
-                        Length = info.Length,
-                        Hash = hash
-                    });
-
                 using (FileStream stream = new FileStream(
                            fullPath,
                            FileMode.Open,
                            FileAccess.Read,
-                           FileShare.ReadWrite | FileShare.Delete))
+                           FileShare.ReadWrite | FileShare.Delete,
+                           1024 * 1024,
+                           FileOptions.SequentialScan))
                 {
+                    if (stream.Length != length)
+                    {
+                        Requeue(path);
+                        return;
+                    }
+
+                    transport.SendProjectFileBegin(
+                        localPlayerId,
+                        new UnitySyncFileSyncMessage
+                        {
+                            SyncId = syncId,
+                            Path = path,
+                            Length = length,
+                            Hash = hash
+                        });
+
                     long offset = 0;
-                    if (info.Length == 0)
+                    if (length == 0)
                     {
                         transport.SendProjectFileChunk(
                             localPlayerId,
@@ -629,11 +649,11 @@ namespace Glasspage.UnitySync
                             });
                     }
 
-                    while (offset < info.Length)
+                    while (offset < length)
                     {
                         int size = (int)Math.Min(
                             UnitySyncProtocol.MaximumFileChunkBytes,
-                            info.Length - offset);
+                            length - offset);
                         byte[] data = new byte[size];
                         int read = stream.Read(data, 0, size);
                         if (read <= 0)
@@ -652,7 +672,7 @@ namespace Glasspage.UnitySync
                             {
                                 SyncId = syncId,
                                 Path = path,
-                                Length = info.Length,
+                                Length = length,
                                 Offset = offset,
                                 Hash = hash,
                                 Data = data
@@ -661,7 +681,7 @@ namespace Glasspage.UnitySync
                     }
                 }
 
-                KnownHashes[path] = CopyHash(hash);
+                KnownFiles[path] = new FileFingerprint(length, hash);
             }
             catch (IOException)
             {
@@ -685,8 +705,6 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             if (message == null ||
                 message.SyncId == Guid.Empty ||
-                message.Hash == null ||
-                message.Hash.Length != 32 ||
                 message.Length < 0 ||
                 !IsLiveSyncPath(message.Path))
             {
@@ -717,7 +735,7 @@ namespace Glasspage.UnitySync
                     SyncId = message.SyncId,
                     Path = message.Path,
                     Length = message.Length,
-                    Hash = CopyHash(message.Hash),
+                    Hash = message.Hash,
                     TempPath = tempPath,
                     Stream = new FileStream(
                         tempPath,
@@ -749,7 +767,7 @@ namespace Glasspage.UnitySync
                 transfer.PlayerId != playerId ||
                 !string.Equals(transfer.Path, message.Path, StringComparison.Ordinal) ||
                 transfer.Length != message.Length ||
-                !HashesEqual(transfer.Hash, message.Hash) ||
+                transfer.Hash != message.Hash ||
                 message.Data == null ||
                 message.Offset != transfer.Received ||
                 transfer.Received + message.Data.Length > transfer.Length)
@@ -774,7 +792,10 @@ namespace Glasspage.UnitySync
                 transfer.Stream.Dispose();
                 transfer.Stream = null;
 
-                if (!HashesEqual(ComputeHash(transfer.TempPath), transfer.Hash))
+                if (!UnitySyncXxHash64.MatchesFile(
+                    transfer.TempPath,
+                    transfer.Length,
+                    transfer.Hash))
                 {
                     error = "A synchronized project file failed its hash check: " +
                             transfer.Path;
@@ -826,7 +847,8 @@ namespace Glasspage.UnitySync
             }
 
             File.Copy(transfer.TempPath, targetPath, true);
-            KnownHashes[transfer.Path] = CopyHash(transfer.Hash);
+            KnownFiles[transfer.Path] =
+                new FileFingerprint(transfer.Length, transfer.Hash);
             RefreshUnityForPath(transfer.Path);
             return true;
         }
@@ -858,7 +880,7 @@ namespace Glasspage.UnitySync
                     File.Delete(fullPath);
                 }
 
-                KnownHashes.Remove(message.Path);
+                KnownFiles.Remove(message.Path);
                 RefreshUnityForPath(message.Path);
                 return true;
             }
@@ -1068,47 +1090,6 @@ namespace Glasspage.UnitySync
         private static double GetMonotonicSeconds()
         {
             return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
-        }
-
-        private static byte[] ComputeHash(string fullPath)
-        {
-            using (SHA256 sha = SHA256.Create())
-            using (FileStream stream = new FileStream(
-                       fullPath,
-                       FileMode.Open,
-                       FileAccess.Read,
-                       FileShare.ReadWrite | FileShare.Delete))
-            {
-                return sha.ComputeHash(stream);
-            }
-        }
-
-        private static bool HashesEqual(byte[] left, byte[] right)
-        {
-            if (left == null || right == null || left.Length != right.Length)
-            {
-                return false;
-            }
-
-            int difference = 0;
-            for (int index = 0; index < left.Length; index++)
-            {
-                difference |= left[index] ^ right[index];
-            }
-
-            return difference == 0;
-        }
-
-        private static byte[] CopyHash(byte[] hash)
-        {
-            if (hash == null)
-            {
-                return null;
-            }
-
-            byte[] copy = new byte[hash.Length];
-            Buffer.BlockCopy(hash, 0, copy, 0, hash.Length);
-            return copy;
         }
 
         private static void CleanupTransfer(RemoteTransfer transfer)
