@@ -1615,7 +1615,7 @@ namespace Glasspage.UnitySync
                 }
                 else
                 {
-                    targetPath = Path.Combine(_guestTempRoot, "FileStage", entry.Path);
+                    targetPath = GetGuestStagedFilePath(entry.Path);
                 }
 
                 string targetDirectory = Path.GetDirectoryName(targetPath);
@@ -2424,7 +2424,7 @@ namespace Glasspage.UnitySync
                         throw new IOException("Unsafe sync path: " + entry.Path);
                     }
 
-                    string staged = Path.Combine(_guestTempRoot, "FileStage", entry.Path);
+                    string staged = GetGuestStagedFilePath(entry.Path);
                     if (!File.Exists(staged) || !HashesEqual(ComputeHash(staged), entry.Hash))
                     {
                         throw new IOException("The staged file failed verification: " + entry.Path);
@@ -2490,7 +2490,7 @@ namespace Glasspage.UnitySync
                     TryGetFullSyncPath(path, out string target);
                     if (File.Exists(target))
                     {
-                        string backup = Path.Combine(backupRoot, path);
+                        string backup = GetGuestBackupFilePath(backupRoot, path);
                         Directory.CreateDirectory(Path.GetDirectoryName(backup));
                         File.Move(target, backup);
                         backedUp.Add(path);
@@ -2502,7 +2502,7 @@ namespace Glasspage.UnitySync
                     currentPath = path;
                     TryGetFullSyncPath(path, out string target);
                     Directory.CreateDirectory(Path.GetDirectoryName(target));
-                    File.Move(Path.Combine(_guestTempRoot, "FileStage", path), target);
+                    File.Move(GetGuestStagedFilePath(path), target);
                     installed.Add(path);
                 }
             }
@@ -2522,7 +2522,7 @@ namespace Glasspage.UnitySync
                         foreach (string path in backedUp)
                         {
                             TryGetFullSyncPath(path, out string target);
-                            File.Move(Path.Combine(backupRoot, path), target);
+                            File.Move(GetGuestBackupFilePath(backupRoot, path), target);
                         }
                     }
                     catch (Exception rollbackException)
@@ -3106,6 +3106,31 @@ namespace Glasspage.UnitySync
         {
             DirectoryInfo parent = Directory.GetParent(Application.dataPath);
             return parent != null ? parent.FullName : Application.dataPath;
+        }
+
+        private static string GetGuestStagedFilePath(string path)
+        {
+            return Path.Combine(
+                _guestTempRoot,
+                "FileStage",
+                GetShortStorageFileName(path));
+        }
+
+        private static string GetGuestBackupFilePath(string backupRoot, string path)
+        {
+            return Path.Combine(
+                backupRoot,
+                GetShortStorageFileName(path));
+        }
+
+        private static string GetShortStorageFileName(string path)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] hash = sha256.ComputeHash(
+                    System.Text.Encoding.UTF8.GetBytes(path ?? string.Empty));
+                return BitConverter.ToString(hash).Replace("-", string.Empty) + ".bin";
+            }
         }
 
         private static byte[] ComputeHash(string fullPath)
