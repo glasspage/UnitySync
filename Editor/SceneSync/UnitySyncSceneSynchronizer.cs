@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Object = UnityEngine.Object;
@@ -74,11 +75,21 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
+        private const int MaximumPendingKeysExaminedPerUpdate = 128;
         private const int SnapshotObjectsPerUpdate = 8;
         private const double CaptureBudgetSeconds = 0.008;
 
+        private static readonly ProfilerMarker SceneSettingsFlushMarker =
+            new ProfilerMarker("UnitySync.SceneSync.SceneSettings");
+        private static readonly ProfilerMarker HierarchyFlushMarker =
+            new ProfilerMarker("UnitySync.SceneSync.Hierarchy");
+        private static readonly ProfilerMarker PendingFlushMarker =
+            new ProfilerMarker("UnitySync.SceneSync.PendingChanges");
         private static readonly Dictionary<string, PendingChange> Pending =
             new Dictionary<string, PendingChange>();
+        private static readonly Queue<string> PendingOrder = new Queue<string>();
+        private static readonly Dictionary<int, HashSet<string>> PendingKeysByInstanceId =
+            new Dictionary<int, HashSet<string>>();
         private static readonly Dictionary<string, string> KnownHashes =
             new Dictionary<string, string>();
         private static readonly Dictionary<string, double> NextAllowedSendTimes =
@@ -92,6 +103,7 @@ namespace Glasspage.UnitySync
 
         private static bool _active;
         private static bool _applyingRemoteChange;
+        private static bool _suppressPublishedSnapshotChanges;
         private static double _nextFlushTime;
         private static double _nextSceneSettingsCheckTime;
         private static double _sceneSettingsSendAfterTime;
@@ -117,12 +129,16 @@ namespace Glasspage.UnitySync
             _knownSceneSettingsSignature = UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
             _pendingSceneSettingsSignature = string.Empty;
             Pending.Clear();
+            PendingOrder.Clear();
+            PendingKeysByInstanceId.Clear();
             KnownHashes.Clear();
             NextAllowedSendTimes.Clear();
             RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             _remoteSnapshot = null;
+            _suppressPublishedSnapshotChanges = false;
+            EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             UnitySyncSceneObjectRegistry.Clear();
         }
 
@@ -135,12 +151,16 @@ namespace Glasspage.UnitySync
             _nextSceneSettingsCheckTime = 0d;
             _sceneSettingsSendAfterTime = 0d;
             Pending.Clear();
+            PendingOrder.Clear();
+            PendingKeysByInstanceId.Clear();
             KnownHashes.Clear();
             NextAllowedSendTimes.Clear();
             RemoteTransformInterpolations.Clear();
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             _remoteSnapshot = null;
+            _suppressPublishedSnapshotChanges = false;
+            EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             UnitySyncSceneObjectRegistry.Clear();
         }
 
@@ -214,6 +234,8 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            _suppressPublishedSnapshotChanges = true;
+            EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             _applyingRemoteChange = true;
             try
             {
@@ -221,9 +243,13 @@ namespace Glasspage.UnitySync
                         snapshot,
                         out error))
                 {
+                    ScheduleSnapshotChangeSuppressionRelease();
                     return false;
                 }
 
+                Pending.Clear();
+                PendingOrder.Clear();
+                PendingKeysByInstanceId.Clear();
                 UnitySyncSceneObjectRegistry.Clear();
             }
             finally
@@ -251,9 +277,10 @@ namespace Glasspage.UnitySync
             }
 
             RemoteSnapshot completedSnapshot = _remoteSnapshot;
-            _remoteSnapshot = null;
             if (!hostStateComplete)
             {
+                _remoteSnapshot = null;
+                ScheduleSnapshotChangeSuppressionRelease();
                 error = "The host could not serialize one or more objects, so unmatched local " +
                         "objects were kept instead of being removed.";
                 return false;
@@ -261,6 +288,8 @@ namespace Glasspage.UnitySync
 
             if (completedSnapshot.HasApplyFailure)
             {
+                _remoteSnapshot = null;
+                ScheduleSnapshotChangeSuppressionRelease();
                 error = "One or more host objects could not be applied, so unmatched local " +
                         "objects were kept instead of being removed.";
                 return false;
@@ -294,7 +323,27 @@ namespace Glasspage.UnitySync
             finally
             {
                 _applyingRemoteChange = false;
+                _remoteSnapshot = null;
+                Pending.Clear();
+                PendingOrder.Clear();
+                PendingKeysByInstanceId.Clear();
+                ScheduleSnapshotChangeSuppressionRelease();
             }
+        }
+
+        private static void ScheduleSnapshotChangeSuppressionRelease()
+        {
+            EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
+            EditorApplication.delayCall += ReleaseSnapshotChangeSuppression;
+        }
+
+        private static void ReleaseSnapshotChangeSuppression()
+        {
+            EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
+            Pending.Clear();
+            PendingOrder.Clear();
+            PendingKeysByInstanceId.Clear();
+            _suppressPublishedSnapshotChanges = false;
         }
 
         internal static void Flush(UnitySyncTransport transport, Guid localPlayerId)
@@ -312,13 +361,23 @@ namespace Glasspage.UnitySync
             }
 
             _nextFlushTime = now + FlushIntervalSeconds;
-            FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
-            if (FlushHierarchyBatch(transport, localPlayerId))
+            using (SceneSettingsFlushMarker.Auto())
             {
-                return;
+                FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
             }
 
-            FlushPendingChanges(transport, localPlayerId, now);
+            using (HierarchyFlushMarker.Auto())
+            {
+                if (FlushHierarchyBatch(transport, localPlayerId))
+                {
+                    return;
+                }
+            }
+
+            using (PendingFlushMarker.Auto())
+            {
+                FlushPendingChanges(transport, localPlayerId, now);
+            }
         }
 
         internal static bool ApplyRemoteSceneSettings(
@@ -693,7 +752,9 @@ namespace Glasspage.UnitySync
 
         private static void OnChangesPublished(ref ObjectChangeEventStream stream)
         {
-            if (!_active || _applyingRemoteChange || EditorApplication.isPlayingOrWillChangePlaymode)
+            if (!_active || _applyingRemoteChange || _remoteSnapshot != null ||
+                _suppressPublishedSnapshotChanges ||
+                EditorApplication.isPlayingOrWillChangePlaymode)
             {
                 return;
             }
@@ -843,11 +904,13 @@ namespace Glasspage.UnitySync
             }
 
             RemovePendingForInstanceId(instanceId);
-            Pending["d:" + objectId] = new PendingChange
-            {
-                ObjectId = objectId,
-                Kind = PendingKind.Destroy
-            };
+            SetPending(
+                "d:" + objectId,
+                new PendingChange
+                {
+                    ObjectId = objectId,
+                    Kind = PendingKind.Destroy
+                });
             UnitySyncSceneObjectRegistry.ForgetHierarchy(objectId);
         }
 
@@ -876,31 +939,70 @@ namespace Glasspage.UnitySync
                 : kind == PendingKind.Structure
                     ? structureKey
                     : instanceId + ":c:" + componentIndex;
-            Pending[pendingKey] = new PendingChange
+            SetPending(
+                pendingKey,
+                new PendingChange
+                {
+                    GameObjectInstanceId = instanceId,
+                    ComponentIndex = componentIndex,
+                    ObjectId = address.ObjectId,
+                    Kind = kind
+                });
+        }
+
+        private static void SetPending(string key, PendingChange change)
+        {
+            if (!Pending.ContainsKey(key))
             {
-                GameObjectInstanceId = instanceId,
-                ComponentIndex = componentIndex,
-                ObjectId = address.ObjectId,
-                Kind = kind
-            };
+                PendingOrder.Enqueue(key);
+                if (change.GameObjectInstanceId != 0)
+                {
+                    if (!PendingKeysByInstanceId.TryGetValue(
+                            change.GameObjectInstanceId,
+                            out HashSet<string> instanceKeys))
+                    {
+                        instanceKeys = new HashSet<string>(StringComparer.Ordinal);
+                        PendingKeysByInstanceId.Add(change.GameObjectInstanceId, instanceKeys);
+                    }
+
+                    instanceKeys.Add(key);
+                }
+            }
+
+            Pending[key] = change;
+        }
+
+        private static void RemovePending(string key, PendingChange change)
+        {
+            Pending.Remove(key);
+            if (change == null || change.GameObjectInstanceId == 0 ||
+                !PendingKeysByInstanceId.TryGetValue(
+                    change.GameObjectInstanceId,
+                    out HashSet<string> instanceKeys))
+            {
+                return;
+            }
+
+            instanceKeys.Remove(key);
+            if (instanceKeys.Count == 0)
+            {
+                PendingKeysByInstanceId.Remove(change.GameObjectInstanceId);
+            }
         }
 
         private static void RemovePendingForInstanceId(int instanceId)
         {
-            List<string> obsoleteKeys = new List<string>();
-            string prefix = instanceId + ":";
-            foreach (string key in Pending.Keys)
+            if (!PendingKeysByInstanceId.TryGetValue(instanceId, out HashSet<string> keys))
             {
-                if (key.StartsWith(prefix, StringComparison.Ordinal))
-                {
-                    obsoleteKeys.Add(key);
-                }
+                return;
             }
 
-            foreach (string key in obsoleteKeys)
+            foreach (string key in keys)
             {
                 Pending.Remove(key);
             }
+
+            PendingKeysByInstanceId.Remove(instanceId);
         }
 
         private static bool FlushHierarchyBatch(UnitySyncTransport transport, Guid localPlayerId)
@@ -1021,16 +1123,24 @@ namespace Glasspage.UnitySync
         {
             if (Pending.Count == 0)
             {
+                // Removal can leave stale queue entries. Drop them without revisiting
+                // every former key in later idle updates.
+                PendingOrder.Clear();
                 return;
             }
 
-            List<string> keys = new List<string>(Pending.Keys);
             int attempted = 0;
+            int examined = 0;
+            int keysAvailableAtStart = PendingOrder.Count;
             long captureStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            for (int index = 0; index < keys.Count && attempted < MaximumChangesPerUpdate &&
-                 HasCaptureTimeRemaining(captureStart); index++)
+            while (PendingOrder.Count > 0 &&
+                   examined < keysAvailableAtStart &&
+                   examined < MaximumPendingKeysExaminedPerUpdate &&
+                   attempted < MaximumChangesPerUpdate &&
+                   HasCaptureTimeRemaining(captureStart))
             {
-                string pendingKey = keys[index];
+                string pendingKey = PendingOrder.Dequeue();
+                examined++;
                 if (!Pending.TryGetValue(pendingKey, out PendingChange pending))
                 {
                     continue;
@@ -1043,13 +1153,14 @@ namespace Glasspage.UnitySync
                 if (NextAllowedSendTimes.TryGetValue(pendingKey, out double nextAllowedSendTime) &&
                     now < nextAllowedSendTime)
                 {
+                    PendingOrder.Enqueue(pendingKey);
                     continue;
                 }
 
                 // Count failed and unchanged captures too, not only transmitted updates.
                 attempted++;
                 NextAllowedSendTimes[pendingKey] = now + interval;
-                Pending.Remove(pendingKey);
+                RemovePending(pendingKey, pending);
                 GameObject gameObject = pending.Kind == PendingKind.Destroy
                     ? null
                     : EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
