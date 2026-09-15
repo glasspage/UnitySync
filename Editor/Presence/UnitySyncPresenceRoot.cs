@@ -212,6 +212,7 @@ namespace Glasspage.UnitySync
         private const double TransformInterpolationBufferSeconds = 0.1d;
         private const int MaximumBufferedTransformSamples = 8;
         private const float DirectionLineOpacityMultiplier = 0.6f;
+        private const float ViewportScale = 0.75f;
         private const float ForegroundStrokeWidth = 1f;
         private const float OutlineStrokeWidth = 3f;
         private const float NeutralOutlineSwitchValue = 0.35f;
@@ -667,7 +668,7 @@ namespace Glasspage.UnitySync
 
             Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
             Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
-            float directionLineDistance = UnitySyncVisualSettings.LineDistance;
+            float directionLineDistance = UnitySyncVisualSettings.LineDistance * ViewportScale;
             Matrix4x4 previousMatrix = Handles.matrix;
             Color previousColor = Handles.color;
 
@@ -698,11 +699,11 @@ namespace Glasspage.UnitySync
 
                 if (marker.Orthographic)
                 {
-                    float height = Mathf.Clamp(marker.OrthographicSize * 0.12f, 0.15f, 1.5f);
+                    float height = Mathf.Clamp(marker.OrthographicSize * 0.12f, 0.15f, 1.5f) * ViewportScale;
                     float width = height * marker.Aspect;
                     DrawWireCube(
-                        Vector3.forward * 0.08f,
-                        new Vector3(width, height, 0.16f),
+                        Vector3.forward * (0.08f * ViewportScale),
+                        new Vector3(width, height, 0.16f * ViewportScale),
                         outlineColor,
                         foregroundColor);
                 }
@@ -729,7 +730,7 @@ namespace Glasspage.UnitySync
                         directionLineColor);
                     DrawOutlinedDisc(
                         Vector3.forward * directionLineDistance,
-                        0.04f,
+                        0.04f * ViewportScale,
                         directionLineOutlineColor,
                         directionLineColor);
                 }
@@ -1064,8 +1065,8 @@ namespace Glasspage.UnitySync
             Color outlineColor,
             Color foregroundColor)
         {
-            const float nearDistance = 0.05f;
-            const float farDistance = 0.8f;
+            const float nearDistance = 0.05f * ViewportScale;
+            const float farDistance = 0.8f * ViewportScale;
 
             float tangent = Mathf.Tan(Mathf.Clamp(fieldOfView, 5f, 170f) * 0.5f * Mathf.Deg2Rad);
             float nearHalfHeight = tangent * nearDistance;
