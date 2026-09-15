@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
+using UnityEditor.Build;
 using Unity.Profiling;
 using UnityEngine;
 
@@ -27,6 +28,7 @@ namespace Glasspage.UnitySync
         private const string FileSyncResumeDisplayNameKey = "Glasspage.UnitySync.FileSyncResume.DisplayName";
         private const string FileSyncResumeColorKey = "Glasspage.UnitySync.FileSyncResume.Color";
         private const string FileSyncResumeApprovedKey = "Glasspage.UnitySync.FileSyncResume.Approved";
+        private const string FileSyncResumeHostKey = "Glasspage.UnitySync.FileSyncResume.Host";
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
         private const double StatusEventDurationSeconds = 8d;
@@ -81,6 +83,11 @@ namespace Glasspage.UnitySync
         private static int _synchronizedAssetImportDepth;
         private static bool _hasLastAssetImportState;
         private static bool _lastAssetImportState;
+        private static bool _buildTargetLiveSyncEnabled;
+        private static bool _guestSceneSnapshotPending;
+        private static string _hostBuildTargetName = string.Empty;
+        private static bool _suppressBuildTargetChanged;
+        private static BuildTarget _suppressedBuildTarget = BuildTarget.NoTarget;
 
         internal static event Action Changed;
 
@@ -132,10 +139,14 @@ namespace Glasspage.UnitySync
                 _displayName = NormalizeDisplayName(displayName);
                 _color = NormalizeColor(color);
                 _transport = new UnitySyncTransport(LocalPlayerId, _displayName, secret);
+                _hostBuildTargetName = ActiveBuildTargetName;
+                _transport.SetLocalBuildTarget(_hostBuildTargetName);
                 _transport.StartHost(port);
                 _joinCode = code;
                 _guestJoinCode = string.Empty;
                 _guestSyncApproved = true;
+                _buildTargetLiveSyncEnabled = true;
+                _guestSceneSnapshotPending = false;
                 ClearFileSyncReloadReconnect();
                 _state = UnitySyncSessionState.Hosting;
                 _nextSendTime = 0d;
@@ -195,6 +206,9 @@ namespace Glasspage.UnitySync
                 _transport.StartClient(data.Address, data.Port);
                 _guestJoinCode = joinCode;
                 _guestSyncApproved = false;
+                _hostBuildTargetName = string.Empty;
+                _buildTargetLiveSyncEnabled = false;
+                _guestSceneSnapshotPending = false;
                 _state = UnitySyncSessionState.Connecting;
                 _nextSendTime = 0d;
                 _hasLastViewportState = false;
@@ -503,6 +517,13 @@ namespace Glasspage.UnitySync
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
+                        if (string.IsNullOrEmpty(_hostBuildTargetName))
+                        {
+                            AddFailure("The host did not provide an active build target.");
+                            disconnected = true;
+                            break;
+                        }
+
                         bool resumedAfterReload = _fileSyncResumeConnectionPending;
                         _state = UnitySyncSessionState.Connected;
                         UnitySyncFileSynchronizer.BeginGuestSync(
@@ -601,6 +622,28 @@ namespace Glasspage.UnitySync
                             transportEvent.IsImportingAssets);
                         break;
 
+                    case UnitySyncTransportEventKind.BuildTarget:
+                        if (HandleRemoteBuildTarget(
+                                transport,
+                                transportEvent.PlayerId,
+                                transportEvent.BuildTargetName,
+                                out bool buildTargetSwitched))
+                        {
+                            if (buildTargetSwitched)
+                            {
+                                // Switching platforms schedules script compilation/reload. Leave
+                                // later packets queued so scene/file work cannot run under the old
+                                // target before Unity has completed the transition.
+                                return;
+                            }
+                        }
+                        else if (_state != UnitySyncSessionState.Hosting)
+                        {
+                            StopInternal(false, true);
+                            return;
+                        }
+                        break;
+
                     case UnitySyncTransportEventKind.FileSync:
                         bool isProjectUpdate =
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
@@ -694,6 +737,10 @@ namespace Glasspage.UnitySync
                             AddFailure("Scene sync could not finish a snapshot: " + snapshotEndError);
                             Changed?.Invoke();
                         }
+                        else if (_state == UnitySyncSessionState.Connected)
+                        {
+                            _buildTargetLiveSyncEnabled = true;
+                        }
                         break;
 
                     case UnitySyncTransportEventKind.SceneSnapshotRequest:
@@ -776,11 +823,28 @@ namespace Glasspage.UnitySync
 
             if (UnitySyncFileSynchronizer.ConsumeGuestReadyForSceneSnapshot())
             {
+                _guestSceneSnapshotPending = true;
+            }
+
+            if (_guestSceneSnapshotPending)
+            {
                 if (!_guestSyncApproved)
                 {
                     _guestSyncApproved = true;
                 }
 
+                if (!EnsureHostBuildTargetBeforeSceneLoad(out bool buildTargetSwitched))
+                {
+                    StopInternal(false, true);
+                    return;
+                }
+
+                if (buildTargetSwitched)
+                {
+                    return;
+                }
+
+                _guestSceneSnapshotPending = false;
                 UnitySyncSceneSynchronizer.BeginSession();
                 UnitySyncProjectSynchronizer.BeginSession();
                 transport.RequestSceneSnapshot();
@@ -1154,6 +1218,11 @@ namespace Glasspage.UnitySync
             _guestJoinCode = string.Empty;
             _guestSyncApproved = false;
             _fileSyncResumeConnectionPending = false;
+            _buildTargetLiveSyncEnabled = false;
+            _guestSceneSnapshotPending = false;
+            _hostBuildTargetName = string.Empty;
+            _suppressBuildTargetChanged = false;
+            _suppressedBuildTarget = BuildTarget.NoTarget;
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
