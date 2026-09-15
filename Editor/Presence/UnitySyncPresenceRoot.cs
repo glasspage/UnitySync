@@ -248,6 +248,8 @@ namespace Glasspage.UnitySync
 
         private static readonly Dictionary<Guid, ViewportMarker> Markers =
             new Dictionary<Guid, ViewportMarker>();
+        private static readonly Dictionary<Guid, double> ImportingAssetsStartedAt =
+            new Dictionary<Guid, double>();
         private static readonly List<TimedStatusEvent> TimedStatusEvents =
             new List<TimedStatusEvent>();
 
@@ -409,8 +411,36 @@ namespace Glasspage.UnitySync
             marker.Apply(viewport, sampleTime);
         }
 
+        internal static void SetImportingAssets(Guid playerId, bool isImportingAssets)
+        {
+            if (playerId == Guid.Empty)
+            {
+                return;
+            }
+
+            bool changed;
+            if (isImportingAssets)
+            {
+                changed = !ImportingAssetsStartedAt.ContainsKey(playerId);
+                if (changed)
+                {
+                    ImportingAssetsStartedAt[playerId] = EditorApplication.timeSinceStartup;
+                }
+            }
+            else
+            {
+                changed = ImportingAssetsStartedAt.Remove(playerId);
+            }
+
+            if (changed)
+            {
+                SceneView.RepaintAll();
+            }
+        }
+
         internal static void Remove(Guid playerId)
         {
+            ImportingAssetsStartedAt.Remove(playerId);
             if (!Markers.TryGetValue(playerId, out ViewportMarker marker))
             {
                 return;
@@ -495,6 +525,7 @@ namespace Glasspage.UnitySync
 
         internal static void Clear()
         {
+            ImportingAssetsStartedAt.Clear();
             List<Guid> remoteMarkerIds = new List<Guid>();
             foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
             {
@@ -782,7 +813,7 @@ namespace Glasspage.UnitySync
             PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
 
             List<StatusDisplay> statuses = new List<StatusDisplay>(
-                TimedStatusEvents.Count + 4);
+                TimedStatusEvents.Count + ImportingAssetsStartedAt.Count + 4);
             foreach (TimedStatusEvent statusEvent in TimedStatusEvents)
             {
                 statuses.Add(new StatusDisplay(
@@ -793,11 +824,29 @@ namespace Glasspage.UnitySync
                     statusEvent.Sequence));
             }
 
+            foreach (KeyValuePair<Guid, double> importing in ImportingAssetsStartedAt)
+            {
+                if (!Markers.TryGetValue(importing.Key, out ViewportMarker marker) ||
+                    marker.GameObject == null ||
+                    marker.IsDebug)
+                {
+                    continue;
+                }
+
+                statuses.Add(new StatusDisplay(
+                    marker.DisplayName + " is importing assets...",
+                    marker.Color,
+                    UnitySyncSceneStatusPriority.Ongoing,
+                    importing.Value,
+                    0));
+            }
+
             UnitySyncHostDownloadProgress[] progress =
                 UnitySyncFileSynchronizer.GetHostDownloadProgresses();
             foreach (UnitySyncHostDownloadProgress item in progress)
             {
-                if (!Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
+                if (ImportingAssetsStartedAt.ContainsKey(item.PlayerId) ||
+                    !Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
                     marker.GameObject == null ||
                     marker.IsDebug)
                 {
