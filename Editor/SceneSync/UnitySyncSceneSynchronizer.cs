@@ -308,6 +308,7 @@ namespace Glasspage.UnitySync
                 PendingKeysByInstanceId.Clear();
                 LastIncomingLiveHashes.Clear();
                 UnitySyncSceneObjectRegistry.Clear();
+                PruneSnapshotComponentStates();
             }
             finally
             {
@@ -787,6 +788,40 @@ namespace Glasspage.UnitySync
                 {
                     InvalidateSnapshotComponentState(component);
                 }
+            }
+        }
+
+        private static void PruneSnapshotComponentStates()
+        {
+            if (SnapshotComponentStates.Count == 0)
+            {
+                return;
+            }
+
+            List<int> staleInstanceIds = null;
+            foreach (KeyValuePair<int, CachedSnapshotComponentState> pair in SnapshotComponentStates)
+            {
+                if (pair.Value != null && pair.Value.Component != null)
+                {
+                    continue;
+                }
+
+                if (staleInstanceIds == null)
+                {
+                    staleInstanceIds = new List<int>();
+                }
+
+                staleInstanceIds.Add(pair.Key);
+            }
+
+            if (staleInstanceIds == null)
+            {
+                return;
+            }
+
+            foreach (int instanceId in staleInstanceIds)
+            {
+                SnapshotComponentStates.Remove(instanceId);
             }
         }
 
