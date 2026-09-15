@@ -2208,9 +2208,10 @@ namespace Glasspage.UnitySync
                             "Remove version " + extra.version + Environment.NewLine +
                             "Remove it using its package manager; dependencies may disappear when their parent package is removed.",
                         PackageName = extra.name,
-                        Action = GetPackageChecklistAction(extra.name, vccManaged),
-                        ShowAdditionalWebSearch = vccManaged &&
-                            !IsIncludedCreatorCompanionPackage(extra.name, extra.displayName)
+                        Action = vccManaged
+                            ? PackageChecklistAction.CreatorCompanion
+                            : PackageChecklistAction.UnityPackageManager,
+                        ShowAdditionalWebSearch = false
                     },
                     vccManaged);
             }
