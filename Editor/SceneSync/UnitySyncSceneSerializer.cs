@@ -41,6 +41,16 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("US.Prop.Commit");
         private static readonly ProfilerMarker PropertyAtomicMarker =
             new ProfilerMarker("US.Prop.Atomic");
+        private static readonly ProfilerMarker AtomicStructureMarker =
+            new ProfilerMarker("US.Atomic.Structure");
+        private static readonly ProfilerMarker AtomicValuesMarker =
+            new ProfilerMarker("US.Atomic.Values");
+        private static readonly ProfilerMarker AtomicReferencesMarker =
+            new ProfilerMarker("US.Atomic.References");
+        private static readonly ProfilerMarker AtomicCommitMarker =
+            new ProfilerMarker("US.Atomic.Commit");
+        private static readonly ProfilerMarker AtomicVerifyMarker =
+            new ProfilerMarker("US.Atomic.Verify");
         private static readonly Dictionary<Type, ProfilerMarker> ComponentPropertyTypeMarkers =
             new Dictionary<Type, ProfilerMarker>();
         private static readonly ProfilerMarker ComponentResolveRefsMarker =
@@ -2625,27 +2635,31 @@ namespace Glasspage.UnitySync
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
 
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            using (AtomicStructureMarker.Auto())
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                foreach (UnitySyncSerializedPropertyState propertyState in
+                         state.Properties ?? new UnitySyncSerializedPropertyState[0])
                 {
-                    continue;
-                }
+                    if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                    {
+                        continue;
+                    }
 
-                if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
-                    propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
-                {
-                    continue;
-                }
+                    if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                        propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
+                    {
+                        continue;
+                    }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null)
-                {
-                    ApplyProperty(property, propertyState);
+                    SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
+                    if (property != null)
+                    {
+                        ApplyProperty(property, propertyState);
+                    }
                 }
             }
 
+            using (AtomicValuesMarker.Auto())
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
@@ -2668,6 +2682,7 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            using (AtomicReferencesMarker.Auto())
             foreach (UnitySyncSerializedPropertyState propertyState in
                      state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
@@ -2720,9 +2735,13 @@ namespace Glasspage.UnitySync
             // Commit the whole serialized state once. This is required for components such as
             // VRC.Udon.UdonBehaviour whose deserialization callback expects multiple serialized
             // fields to change as one coherent unit.
-            serializedObject.ApplyModifiedPropertiesWithoutUndo();
-            serializedObject.UpdateIfRequiredOrScript();
+            using (AtomicCommitMarker.Auto())
+            {
+                serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                serializedObject.UpdateIfRequiredOrScript();
+            }
 
+            using (AtomicVerifyMarker.Auto())
             foreach (ResolvedObjectReferenceAssignment assignment in assignments)
             {
                 SerializedProperty property = serializedObject.FindProperty(assignment.Path);
