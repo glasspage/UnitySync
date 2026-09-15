@@ -43,6 +43,7 @@ namespace Glasspage.UnitySync
             internal Guid TargetPlayerId;
             internal UnitySyncSceneSnapshotBoundary Snapshot;
             internal List<GameObject> Objects;
+            internal readonly HashSet<int> FullStateSceneHandles = new HashSet<int>();
             internal int Index;
             internal int ComponentIndex;
             internal HierarchyBatchPhase Phase;
@@ -221,7 +222,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            HierarchyBatches.Enqueue(new HierarchyBatch
+            HierarchyBatch batch = new HierarchyBatch
             {
                 TargetPlayerId = targetPlayerId,
                 Snapshot = new UnitySyncSceneSnapshotBoundary
@@ -231,7 +232,30 @@ namespace Glasspage.UnitySync
                 },
                 Objects = UnitySyncSceneSerializer.GetAllSceneObjects(),
                 Phase = HierarchyBatchPhase.BeginSnapshot
-            });
+            };
+
+            // File/asset synchronization completes before the guest requests this snapshot,
+            // and PrepareScenesForSnapshot opens those synchronized scene assets on the guest.
+            // A saved, clean host scene therefore already has its full serialized component
+            // state on disk at both ends. Only dirty/unsaved scenes need an expensive full-state
+            // replay; all scenes still receive the hierarchy pass so object IDs are established.
+            for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+            {
+                Scene scene = SceneManager.GetSceneAt(sceneIndex);
+                if (!scene.IsValid() ||
+                    !scene.isLoaded ||
+                    EditorSceneManager.IsPreviewScene(scene))
+                {
+                    continue;
+                }
+
+                if (scene.isDirty || string.IsNullOrEmpty(scene.path))
+                {
+                    batch.FullStateSceneHandles.Add(scene.handle);
+                }
+            }
+
+            HierarchyBatches.Enqueue(batch);
         }
 
         internal static bool BeginRemoteSnapshot(
@@ -1193,6 +1217,13 @@ namespace Glasspage.UnitySync
                 if (gameObject == null)
                 {
                     batch.HasCaptureFailure = true;
+                    batch.Index++;
+                    batch.ComponentIndex = 0;
+                    continue;
+                }
+
+                if (!batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
+                {
                     batch.Index++;
                     batch.ComponentIndex = 0;
                     continue;
