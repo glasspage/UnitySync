@@ -42,6 +42,7 @@ namespace Glasspage.UnitySync
         private UnitySyncSessionState _previousSessionState;
 
         private static GUIStyle _activeSessionFoldoutStyle;
+        private static GUIStyle _richWarningHelpBoxStyle;
 
         [MenuItem("UnitySync/Session", false, 0)]
         private static void Open()
@@ -557,17 +558,15 @@ namespace Glasspage.UnitySync
                 int fileCount = UnitySyncSession.PendingFileDownloadCount;
                 long downloadBytes = UnitySyncSession.PendingFileDownloadBytes;
                 string fileLabel = fileCount == 1 ? "file" : "files";
-                EditorGUILayout.HelpBox(
-                    "The host has " +
+                DrawRichWarningHelpBox(
                     fileCount +
                     " " +
                     fileLabel +
-                    " you need to download (" +
-                    FormatBytes(downloadBytes) +
-                    "). " +
-                    UnitySyncFileSynchronizer.GuestPendingDeletionCount +
-                    " guest-only files will be deleted. Review the file list in the Activity Log before continuing.",
-                    MessageType.Warning);
+                    " (" +
+                    FormatMegabytes(downloadBytes) +
+                    ") will be received from the host. Guest-only files will be deleted. " +
+                    "<b>This will overwrite the whole project!</b> " +
+                    "Make a backup of anything you want to keep.");
 
                 bool disconnected = false;
                 using (new EditorGUILayout.HorizontalScope())
@@ -640,29 +639,35 @@ namespace Glasspage.UnitySync
             return UnitySyncSession.DefaultColor;
         }
 
-        private static string FormatBytes(long bytes)
+        private static string FormatMegabytes(long bytes)
         {
-            if (bytes < 1024)
-            {
-                return bytes + " B";
-            }
-
-            string[] units = { "KB", "MB", "GB", "TB" };
-            double value = bytes;
-            int unitIndex = -1;
-            do
-            {
-                value /= 1024d;
-                unitIndex++;
-            }
-            while (value >= 1024d && unitIndex < units.Length - 1);
-
-            string format = value >= 100d
+            double megabytes = bytes / (1024d * 1024d);
+            string format = megabytes >= 100d
                 ? "0"
-                : value >= 10d
+                : megabytes >= 10d
                     ? "0.0"
                     : "0.00";
-            return value.ToString(format) + " " + units[unitIndex];
+            return megabytes.ToString(format) + " MB";
+        }
+
+        private static void DrawRichWarningHelpBox(string message)
+        {
+            if (_richWarningHelpBoxStyle == null)
+            {
+                _richWarningHelpBoxStyle = new GUIStyle(EditorStyles.helpBox)
+                {
+                    richText = true,
+                    wordWrap = true
+                };
+            }
+
+            GUIContent content = new GUIContent(
+                message,
+                EditorGUIUtility.IconContent("console.warnicon").image);
+            GUILayout.Label(
+                content,
+                _richWarningHelpBoxStyle,
+                GUILayout.ExpandWidth(true));
         }
 
         private static Color NormalizeColor(Color color)
