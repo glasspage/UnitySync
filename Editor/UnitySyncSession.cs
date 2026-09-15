@@ -625,7 +625,6 @@ namespace Glasspage.UnitySync
                     case UnitySyncTransportEventKind.BuildTarget:
                         if (HandleRemoteBuildTarget(
                                 transport,
-                                transportEvent.PlayerId,
                                 transportEvent.BuildTargetName,
                                 out bool buildTargetSwitched))
                         {
@@ -1204,7 +1203,6 @@ namespace Glasspage.UnitySync
 
         private static bool HandleRemoteBuildTarget(
             UnitySyncTransport transport,
-            Guid playerId,
             string buildTargetName,
             out bool switched)
         {
@@ -1226,7 +1224,6 @@ namespace Glasspage.UnitySync
                     // this editor cannot use, re-assert the host's actual target so the
                     // requesting guest and every other collaborator converge again.
                     _hostBuildTargetName = ActiveBuildTargetName;
-                    transport.SetLocalBuildTarget(_hostBuildTargetName);
                     transport.SendBuildTarget(_hostBuildTargetName);
                 }
 
@@ -1239,7 +1236,6 @@ namespace Glasspage.UnitySync
                 // switches. Re-emit the update with the host player ID so every guest
                 // sees the same single source of truth.
                 _hostBuildTargetName = ActiveBuildTargetName;
-                transport.SetLocalBuildTarget(_hostBuildTargetName);
                 transport.SendBuildTarget(_hostBuildTargetName);
             }
 
