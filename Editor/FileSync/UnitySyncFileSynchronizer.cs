@@ -1381,17 +1381,10 @@ namespace Glasspage.UnitySync
             }
 
             _guestDownloadTotalBytes = 0;
-            string[] neededPaths = new string[GuestMismatches.Count];
             for (int index = 0; index < GuestMismatches.Count; index++)
             {
                 FileEntry entry = GuestMismatches[index];
                 _guestDownloadTotalBytes += entry.Length;
-                neededPaths[index] = entry.Path;
-            }
-
-            foreach (string path in GuestObsoletePaths)
-            {
-                transport.LogLocal("Guest-only file to remove: " + path);
             }
 
             if (_guestAutoContinue)
@@ -1411,7 +1404,7 @@ namespace Glasspage.UnitySync
             _guestPhase = GuestPhase.WaitingForConfirmation;
             EditorUtility.ClearProgressBar();
             UnitySyncSession.ReportFileSyncDownloadRequired(
-                neededPaths,
+                GuestMismatches.Count,
                 _guestDownloadTotalBytes);
         }
 
