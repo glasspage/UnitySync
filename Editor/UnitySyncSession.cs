@@ -480,7 +480,8 @@ namespace Glasspage.UnitySync
                                 StatusEventDurationSeconds);
                         }
 
-                        if (transportEvent.Message.StartsWith("Connection failed:", StringComparison.Ordinal))
+                        if (!string.IsNullOrEmpty(transportEvent.Message) &&
+                            transportEvent.Message.StartsWith("Connection failed:", StringComparison.Ordinal))
                         {
                             AddFailure(transportEvent.Message);
                         }
