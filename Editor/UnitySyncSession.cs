@@ -37,6 +37,8 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("UnitySync.Session.SpectatedView");
         private static readonly ProfilerMarker IncomingEventsUpdateMarker =
             new ProfilerMarker("UnitySync.Session.IncomingEvents");
+        private static readonly ProfilerMarker[] IncomingEventKindMarkers =
+            CreateIncomingEventKindMarkers();
         private static readonly ProfilerMarker FileSyncUpdateMarker =
             new ProfilerMarker("UnitySync.Session.FileSync");
         private static readonly ProfilerMarker ProjectSyncUpdateMarker =
@@ -486,6 +488,8 @@ namespace Glasspage.UnitySync
                    transport.TryDequeue(out UnitySyncTransportEvent transportEvent))
             {
                 processedEvents++;
+                using (IncomingEventKindMarkers[(int)transportEvent.Kind].Auto())
+                {
                 switch (transportEvent.Kind)
                 {
                     case UnitySyncTransportEventKind.Connected:
@@ -723,6 +727,7 @@ namespace Glasspage.UnitySync
                         Changed?.Invoke();
                         break;
                 }
+                }
             }
             }
 
@@ -836,6 +841,19 @@ namespace Glasspage.UnitySync
             _hasLastViewportState = true;
             transport.SendLocalViewport(viewport);
             }
+        }
+
+        private static ProfilerMarker[] CreateIncomingEventKindMarkers()
+        {
+            string[] eventNames = Enum.GetNames(typeof(UnitySyncTransportEventKind));
+            ProfilerMarker[] markers = new ProfilerMarker[eventNames.Length];
+            for (int index = 0; index < eventNames.Length; index++)
+            {
+                markers[index] = new ProfilerMarker(
+                    "UnitySync.Session.IncomingEvents." + eventNames[index]);
+            }
+
+            return markers;
         }
 
         private static void SendSelectionIfNeeded(UnitySyncTransport transport)
