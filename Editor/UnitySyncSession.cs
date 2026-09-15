@@ -287,27 +287,15 @@ namespace Glasspage.UnitySync
         }
 
         internal static void ReportFileSyncDownloadRequired(
-            string[] neededPaths,
+            int fileCount,
             long totalBytes)
         {
-            if (neededPaths == null)
-            {
-                return;
-            }
-
             AddLog(
                 "Host file comparison found " +
-                neededPaths.Length +
+                fileCount +
                 " file(s) to download (" +
                 totalBytes +
                 " byte(s)).");
-            if (neededPaths.Length > 0)
-            {
-                AddLog(
-                    "Files needed from host:\n" +
-                    string.Join("\n", neededPaths));
-            }
-
             Changed?.Invoke();
         }
 
