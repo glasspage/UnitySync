@@ -33,6 +33,12 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("US.Comp.ValidateRefs");
         private static readonly ProfilerMarker ComponentApplyPropertiesMarker =
             new ProfilerMarker("US.Comp.Properties");
+        private static readonly ProfilerMarker PropertyStructureMarker =
+            new ProfilerMarker("US.Prop.Structure");
+        private static readonly ProfilerMarker PropertyValuesMarker =
+            new ProfilerMarker("US.Prop.Values");
+        private static readonly ProfilerMarker PropertyCommitMarker =
+            new ProfilerMarker("US.Prop.Commit");
         private static readonly ProfilerMarker ComponentResolveRefsMarker =
             new ProfilerMarker("US.Comp.ResolveRefs");
         private static readonly ProfilerMarker ComponentCopyMarker =
@@ -2744,55 +2750,115 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
+            UnitySyncSerializedPropertyState[] properties =
+                state.Properties ?? new UnitySyncSerializedPropertyState[0];
+            Type componentType = component.GetType();
 
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            // Array resizing and managed-reference changes can alter the serialized layout.
+            // The old implementation committed after every single structural property, which
+            // can invoke expensive Unity/SDK serialization callbacks hundreds of times for one
+            // component. Apply structural changes in path-depth batches instead: parent layouts
+            // are committed before nested children, while peers share one commit.
+            int maximumStructuralDepth = -1;
+            for (int index = 0; index < properties.Length; index++)
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                UnitySyncSerializedPropertyState propertyState = properties[index];
+                if (propertyState == null ||
+                    IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                    (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                     propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference))
                 {
                     continue;
                 }
 
-                if (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
-                    propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference)
-                {
-                    continue;
-                }
+                maximumStructuralDepth = Math.Max(
+                    maximumStructuralDepth,
+                    GetSerializedPropertyPathDepth(propertyState.Path));
+            }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null && ApplyProperty(property, propertyState))
+            using (PropertyStructureMarker.Auto())
+            {
+                for (int depth = 0; depth <= maximumStructuralDepth; depth++)
                 {
-                    serializedObject.ApplyModifiedPropertiesWithoutUndo();
-                    serializedObject.UpdateIfRequiredOrScript();
+                    bool changedAtDepth = false;
+                    for (int index = 0; index < properties.Length; index++)
+                    {
+                        UnitySyncSerializedPropertyState propertyState = properties[index];
+                        if (propertyState == null ||
+                            IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                            (propertyState.Kind != UnitySyncSerializedValueKind.ArraySize &&
+                             propertyState.Kind != UnitySyncSerializedValueKind.ManagedReference) ||
+                            GetSerializedPropertyPathDepth(propertyState.Path) != depth)
+                        {
+                            continue;
+                        }
+
+                        SerializedProperty property =
+                            serializedObject.FindProperty(propertyState.Path);
+                        if (property != null && ApplyProperty(property, propertyState))
+                        {
+                            changedAtDepth = true;
+                        }
+                    }
+
+                    if (changedAtDepth)
+                    {
+                        using (PropertyCommitMarker.Auto())
+                        {
+                            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+                            serializedObject.UpdateIfRequiredOrScript();
+                        }
+                    }
                 }
             }
 
-            serializedObject.UpdateIfRequiredOrScript();
-
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            using (PropertyValuesMarker.Auto())
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                for (int index = 0; index < properties.Length; index++)
                 {
-                    continue;
-                }
+                    UnitySyncSerializedPropertyState propertyState = properties[index];
+                    if (propertyState == null ||
+                        IsIgnoredPropertyPath(propertyState.Path, componentType) ||
+                        propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
+                        propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
+                        IsObjectReferenceKind(propertyState.Kind))
+                    {
+                        continue;
+                    }
 
-                if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
-                    propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
-                    IsObjectReferenceKind(propertyState.Kind))
-                {
-                    continue;
-                }
-
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null)
-                {
-                    ApplyProperty(property, propertyState);
+                    SerializedProperty property =
+                        serializedObject.FindProperty(propertyState.Path);
+                    if (property != null)
+                    {
+                        ApplyProperty(property, propertyState);
+                    }
                 }
             }
 
-            serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            using (PropertyCommitMarker.Auto())
+            {
+                serializedObject.ApplyModifiedPropertiesWithoutUndo();
+            }
             return true;
+        }
+
+        private static int GetSerializedPropertyPathDepth(string propertyPath)
+        {
+            if (string.IsNullOrEmpty(propertyPath))
+            {
+                return 0;
+            }
+
+            int depth = 0;
+            for (int index = 0; index < propertyPath.Length; index++)
+            {
+                if (propertyPath[index] == '.')
+                {
+                    depth++;
+                }
+            }
+
+            return depth;
         }
 
         private static bool TryCreateStagingComponent(
