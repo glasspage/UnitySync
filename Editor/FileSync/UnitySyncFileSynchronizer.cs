@@ -241,9 +241,15 @@ namespace Glasspage.UnitySync
                 BeginHostManifest(transport, localPlayerId, playerId,
                     new UnitySyncFileSyncMessage { Scope = UnitySyncFileSyncScope.Project },
                     out string error);
-                transport.LogLocal(string.IsNullOrEmpty(error)
-                    ? "Accepted full project restore for " + playerId.ToString("N") + "."
-                    : error);
+                if (string.IsNullOrEmpty(error))
+                {
+                    transport.LogLocal(
+                        "Accepted full project restore for " + playerId.ToString("N") + ".");
+                }
+                else
+                {
+                    transport.LogLocalError(error);
+                }
             }
         }
 
@@ -693,7 +699,7 @@ namespace Glasspage.UnitySync
                         "The host could not build its " + build.Scope +
                         " manifest: " + message,
                         build.TargetPlayerId);
-                    transport.LogLocal(
+                    transport.LogLocalError(
                         "File sync could not build the host project manifest: " + message);
                     continue;
                 }
