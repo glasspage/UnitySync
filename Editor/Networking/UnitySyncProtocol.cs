@@ -111,7 +111,7 @@ namespace Glasspage.UnitySync
         internal long Offset;
         internal int FileCount;
         internal long TotalBytes;
-        internal byte[] Hash = new byte[0];
+        internal ulong Hash;
         internal byte[] Data = new byte[0];
         internal string Error = string.Empty;
     }
@@ -307,7 +307,7 @@ namespace Glasspage.UnitySync
             UnitySyncFileSyncMessage state)
         {
             ValidateFileSyncState(state, true);
-            if (state.Length < 0 || state.Hash == null || state.Hash.Length != 32)
+            if (state.Length < 0)
             {
                 throw new InvalidDataException("Invalid file manifest entry.");
             }
@@ -445,9 +445,7 @@ namespace Glasspage.UnitySync
                 state.Offset < 0 ||
                 state.Offset > state.Length ||
                 data.Length > MaximumFileChunkBytes ||
-                state.Offset + data.Length > state.Length ||
-                state.Hash == null ||
-                state.Hash.Length != 32)
+                state.Offset + data.Length > state.Length)
             {
                 throw new InvalidDataException("Invalid file chunk.");
             }
@@ -490,7 +488,7 @@ namespace Glasspage.UnitySync
             UnitySyncFileSyncMessage state)
         {
             ValidateFileSyncState(state, true);
-            if (state.Length < 0 || state.Hash == null || state.Hash.Length != 32)
+            if (state.Length < 0)
             {
                 throw new InvalidDataException("Invalid project file update.");
             }
@@ -516,9 +514,7 @@ namespace Glasspage.UnitySync
                 state.Offset < 0 ||
                 state.Offset > state.Length ||
                 data.Length > MaximumFileChunkBytes ||
-                state.Offset + data.Length > state.Length ||
-                state.Hash == null ||
-                state.Hash.Length != 32)
+                state.Offset + data.Length > state.Length)
             {
                 throw new InvalidDataException("Invalid project file chunk.");
             }
@@ -799,7 +795,7 @@ namespace Glasspage.UnitySync
                                 SyncId = ReadGuid(reader),
                                 Path = ReadFilePath(reader),
                                 Length = reader.ReadInt64(),
-                                Hash = ReadExactBytes(reader, 32)
+                                Hash = reader.ReadUInt64()
                             };
                             if (manifestEntry.SyncId == Guid.Empty || manifestEntry.Length < 0)
                             {
@@ -964,7 +960,7 @@ namespace Glasspage.UnitySync
                                 Path = ReadFilePath(reader),
                                 Length = reader.ReadInt64(),
                                 Offset = reader.ReadInt64(),
-                                Hash = ReadExactBytes(reader, 32)
+                                Hash = reader.ReadUInt64()
                             };
                             int chunkLength = reader.ReadInt32();
                             if (fileChunk.SyncId == Guid.Empty ||
@@ -1020,7 +1016,7 @@ namespace Glasspage.UnitySync
                                 SyncId = ReadGuid(reader),
                                 Path = ReadFilePath(reader),
                                 Length = reader.ReadInt64(),
-                                Hash = ReadExactBytes(reader, 32)
+                                Hash = reader.ReadUInt64()
                             };
                             if (projectFileBegin.SyncId == Guid.Empty ||
                                 projectFileBegin.Length < 0)
@@ -1047,7 +1043,7 @@ namespace Glasspage.UnitySync
                                 Path = ReadFilePath(reader),
                                 Length = reader.ReadInt64(),
                                 Offset = reader.ReadInt64(),
-                                Hash = ReadExactBytes(reader, 32)
+                                Hash = reader.ReadUInt64()
                             };
                             int projectChunkLength = reader.ReadInt32();
                             if (projectFileChunk.SyncId == Guid.Empty ||
