@@ -23,7 +23,8 @@ namespace Glasspage.UnitySync
         SceneSnapshotBegin,
         SceneSnapshotEnd,
         SceneSettingsChange,
-        Log
+        Log,
+        Error
     }
 
     internal readonly struct UnitySyncTransportEvent
@@ -365,7 +366,7 @@ namespace Glasspage.UnitySync
                 byte[] payload = UnitySyncProtocol.CreateSceneObjectChange(playerId, change);
                 if (payload.Length > UnitySyncProtocol.MaximumFrameSize - 128)
                 {
-                    Enqueue(UnitySyncTransportEventKind.Log, "A scene update was too large to send.");
+                    Enqueue(UnitySyncTransportEventKind.Error, "A scene update was too large to send.");
                     return;
                 }
 
@@ -376,7 +377,7 @@ namespace Glasspage.UnitySync
                 exception is InvalidDataException ||
                 exception is OverflowException)
             {
-                Enqueue(UnitySyncTransportEventKind.Log, "Could not serialize a scene update: " + exception.Message);
+                Enqueue(UnitySyncTransportEventKind.Error, "Could not serialize a scene update: " + exception.Message);
             }
         }
 
@@ -452,6 +453,11 @@ namespace Glasspage.UnitySync
         internal void LogLocal(string message)
         {
             Enqueue(UnitySyncTransportEventKind.Log, message ?? string.Empty);
+        }
+
+        internal void LogLocalError(string message)
+        {
+            Enqueue(UnitySyncTransportEventKind.Error, message ?? string.Empty);
         }
 
         internal bool TryDequeue(out UnitySyncTransportEvent transportEvent)
@@ -538,7 +544,7 @@ namespace Glasspage.UnitySync
                 {
                     if (_running)
                     {
-                        Enqueue(UnitySyncTransportEventKind.Log, "The host listener stopped unexpectedly.");
+                        Enqueue(UnitySyncTransportEventKind.Error, "The host listener stopped unexpectedly.");
                     }
                 }
                 catch (ObjectDisposedException)
@@ -549,7 +555,7 @@ namespace Glasspage.UnitySync
                 {
                     if (_running)
                     {
-                        Enqueue(UnitySyncTransportEventKind.Log, "Could not accept a collaborator: " + exception.Message);
+                        Enqueue(UnitySyncTransportEventKind.Error, "Could not accept a collaborator: " + exception.Message);
                     }
                 }
             }
@@ -876,13 +882,13 @@ namespace Glasspage.UnitySync
                 if (_running && authenticated && !peer.Superseded)
                 {
                     Enqueue(
-                        UnitySyncTransportEventKind.Log,
+                        UnitySyncTransportEventKind.Error,
                         peer.DisplayName + " disconnected: " + exception.Message);
                 }
                 else if (_running && !authenticated)
                 {
                     Enqueue(
-                        UnitySyncTransportEventKind.Log,
+                        UnitySyncTransportEventKind.Error,
                         "Rejected collaborator connection: " + exception.Message);
                 }
             }
@@ -1192,7 +1198,7 @@ namespace Glasspage.UnitySync
             }
             catch (InvalidDataException exception)
             {
-                Enqueue(UnitySyncTransportEventKind.Log, "Could not send an update: " + exception.Message);
+                Enqueue(UnitySyncTransportEventKind.Error, "Could not send an update: " + exception.Message);
             }
         }
 
