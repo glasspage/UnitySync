@@ -2405,7 +2405,7 @@ namespace Glasspage.UnitySync
             GameObject stagingObject = null;
             try
             {
-                if (!TryCreateStagingComponent(component.GetType(), out stagingObject, out Component stagingComponent))
+                if (!TryCreateStagingComponent(component, out stagingObject, out Component stagingComponent))
                 {
                     error = "Could not create a staging " + component.GetType().Name + ".";
                     return false;
@@ -2685,10 +2685,11 @@ namespace Glasspage.UnitySync
         }
 
         private static bool TryCreateStagingComponent(
-            Type componentType,
+            Component sourceComponent,
             out GameObject stagingObject,
             out Component stagingComponent)
         {
+            Type componentType = sourceComponent.GetType();
             stagingObject = null;
             stagingComponent = null;
 
@@ -2710,7 +2711,31 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
-            stagingComponent = stagingObject.AddComponent(componentType);
+            // Native components can require a Renderer without specifying a concrete
+            // subtype that AddComponent can construct (for example VRCAVProVideoScreen).
+            // Reproduce the source object's renderer before adding the dependent component.
+            // Do not clone the source or copy renderer state: that would run unrelated
+            // scripts or let staging callbacks modify the live scene renderer.
+            if (!(sourceComponent is Renderer))
+            {
+                Renderer sourceRenderer = sourceComponent.GetComponent<Renderer>();
+                if (sourceRenderer is ParticleSystemRenderer)
+                {
+                    // ParticleSystemRenderer is created by its owning ParticleSystem.
+                    stagingObject.AddComponent<ParticleSystem>();
+                }
+                else if (sourceRenderer != null &&
+                         stagingObject.AddComponent(sourceRenderer.GetType()) == null)
+                {
+                    return false;
+                }
+            }
+
+            stagingComponent = stagingObject.GetComponent(componentType);
+            if (stagingComponent == null)
+            {
+                stagingComponent = stagingObject.AddComponent(componentType);
+            }
             return stagingComponent != null;
         }
 
@@ -3507,6 +3532,26 @@ namespace Glasspage.UnitySync
             Type assetType = ResolveType(reference.ObjectTypeName);
             if (assetType == null || !typeof(Object).IsAssignableFrom(assetType))
             {
+                return false;
+            }
+
+            if (assetType == typeof(LightmapParameters))
+            {
+                // These presets live in the built-in extra asset container, not in
+                // Assets/Packages. The project-asset resolver intentionally skips it.
+                // Enumerate the container instead of guessing a resource filename or
+                // substituting the guest's current default lightmap parameters.
+                foreach (Object candidate in AssetDatabase.LoadAllAssetsAtPath(
+                             "Resources/unity_builtin_extra"))
+                {
+                    if (BuiltinAssetCandidateMatches(candidate, reference) &&
+                        ExactAssetIdentityMatches(candidate, reference))
+                    {
+                        value = candidate;
+                        return true;
+                    }
+                }
+
                 return false;
             }
 
