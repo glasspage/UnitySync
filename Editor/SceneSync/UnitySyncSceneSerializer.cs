@@ -2033,7 +2033,13 @@ namespace Glasspage.UnitySync
                     state.Kind = UnitySyncSerializedValueKind.ObjectReference;
                     int instanceId = property.objectReferenceInstanceIDValue;
                     Object objectReference = instanceId == 0 ? null : EditorUtility.InstanceIDToObject(instanceId);
-                    if (instanceId != 0 && objectReference == null)
+                    // A missing mesh/material has a nonzero serialized instance ID but
+                    // resolves to null. Send an explicit null (including array slots),
+                    // without modifying the host's serialized reference. Keep rejecting
+                    // unresolved references of other types and live incompatible objects.
+                    if (instanceId != 0 && objectReference == null &&
+                        property.type != "PPtr<Mesh>" && property.type != "PPtr<$Mesh>" &&
+                        property.type != "PPtr<Material>" && property.type != "PPtr<$Material>")
                     {
                         return false;
                     }
