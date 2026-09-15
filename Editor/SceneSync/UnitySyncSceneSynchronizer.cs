@@ -85,6 +85,16 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("UnitySync.SceneSync.Hierarchy");
         private static readonly ProfilerMarker PendingFlushMarker =
             new ProfilerMarker("UnitySync.SceneSync.PendingChanges");
+        private static readonly ProfilerMarker RemoteSerializerApplyMarker =
+            new ProfilerMarker("US.Scene.SerializerApply");
+        private static readonly ProfilerMarker RemoteRememberStateMarker =
+            new ProfilerMarker("US.Scene.RememberState");
+        private static readonly ProfilerMarker SnapshotEndSettingsMarker =
+            new ProfilerMarker("US.SnapEnd.Settings");
+        private static readonly ProfilerMarker SnapshotEndFingerprintMarker =
+            new ProfilerMarker("US.SnapEnd.Fingerprint");
+        private static readonly ProfilerMarker SnapshotEndPruneMarker =
+            new ProfilerMarker("US.SnapEnd.Prune");
         private static readonly Dictionary<string, PendingChange> Pending =
             new Dictionary<string, PendingChange>();
         private static readonly Queue<string> PendingOrder = new Queue<string>();
@@ -298,22 +308,31 @@ namespace Glasspage.UnitySync
             _applyingRemoteChange = true;
             try
             {
-                if (!UnitySyncSceneSerializer.ApplySceneSettings(
-                        completedSnapshot.Boundary,
-                        out error))
+                using (SnapshotEndSettingsMarker.Auto())
                 {
-                    return false;
+                    if (!UnitySyncSceneSerializer.ApplySceneSettings(
+                            completedSnapshot.Boundary,
+                            out error))
+                    {
+                        return false;
+                    }
                 }
 
-                _knownSceneSettingsSignature =
-                    UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
+                using (SnapshotEndFingerprintMarker.Auto())
+                {
+                    _knownSceneSettingsSignature =
+                        UnitySyncSceneSerializer.GetRenderSettingsFingerprint();
+                }
                 _pendingSceneSettingsSignature = string.Empty;
                 _sceneSettingsSendAfterTime = 0d;
 
-                return UnitySyncSceneSerializer.PruneSnapshot(
-                    completedSnapshot.Boundary,
-                    completedSnapshot.RepresentedObjectIds,
-                    out error);
+                using (SnapshotEndPruneMarker.Auto())
+                {
+                    return UnitySyncSceneSerializer.PruneSnapshot(
+                        completedSnapshot.Boundary,
+                        completedSnapshot.RepresentedObjectIds,
+                        out error);
+                }
             }
             catch (Exception exception)
             {
@@ -504,14 +523,17 @@ namespace Glasspage.UnitySync
             _applyingRemoteChange = true;
             try
             {
-                if (!UnitySyncSceneSerializer.Apply(change, out error))
+                using (RemoteSerializerApplyMarker.Auto())
                 {
-                    if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
+                    if (!UnitySyncSceneSerializer.Apply(change, out error))
                     {
-                        _remoteSnapshot.HasApplyFailure = true;
-                    }
+                        if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
+                        {
+                            _remoteSnapshot.HasApplyFailure = true;
+                        }
 
-                    return false;
+                        return false;
+                    }
                 }
 
                 if (change.SnapshotId != Guid.Empty &&
@@ -528,7 +550,10 @@ namespace Glasspage.UnitySync
                 // Live edits still need the applied-state hash for delayed echo suppression.
                 if (change.SnapshotId == Guid.Empty)
                 {
-                    RememberAppliedState(change);
+                    using (RemoteRememberStateMarker.Auto())
+                    {
+                        RememberAppliedState(change);
+                    }
                 }
 
                 if (interpolateTransform && transform != null)
