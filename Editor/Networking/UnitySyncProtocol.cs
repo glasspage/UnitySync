@@ -31,7 +31,8 @@ namespace Glasspage.UnitySync
         RestoreProjectRequest = 22,
         RestoreProjectAccepted = 23,
         RestoreProjectDeclined = 24,
-        FileDownloadProgress = 25
+        FileDownloadProgress = 25,
+        AssetImportState = 26
     }
 
     internal enum UnitySyncFileSyncScope : byte
@@ -124,6 +125,7 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncSceneSnapshotBoundary SceneSnapshot;
         internal readonly UnitySyncSelectionState Selection;
         internal readonly UnitySyncFileSyncMessage FileSync;
+        internal readonly bool IsImportingAssets;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
@@ -133,7 +135,8 @@ namespace Glasspage.UnitySync
             UnitySyncSceneObjectChange sceneChange = null,
             UnitySyncSceneSnapshotBoundary sceneSnapshot = null,
             UnitySyncSelectionState selection = default,
-            UnitySyncFileSyncMessage fileSync = null)
+            UnitySyncFileSyncMessage fileSync = null,
+            bool isImportingAssets = false)
         {
             Type = type;
             PlayerId = playerId;
@@ -143,12 +146,13 @@ namespace Glasspage.UnitySync
             SceneSnapshot = sceneSnapshot;
             Selection = selection;
             FileSync = fileSync;
+            IsImportingAssets = isImportingAssets;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 17;
+        internal const int Version = 18;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -385,6 +389,21 @@ namespace Glasspage.UnitySync
                 writer.Write((byte)state.Scope);
                 writer.Write(state.Offset);
                 writer.Write(state.TotalBytes);
+            });
+        }
+
+        internal static byte[] CreateAssetImportState(Guid playerId, bool isImportingAssets)
+        {
+            if (playerId == Guid.Empty)
+            {
+                throw new InvalidDataException("An asset import state requires a player ID.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.AssetImportState);
+                WriteGuid(writer, playerId);
+                writer.Write(isImportingAssets);
             });
         }
 
@@ -856,6 +875,25 @@ namespace Glasspage.UnitySync
                                 null,
                                 default,
                                 downloadProgress);
+                            break;
+
+                        case UnitySyncMessageType.AssetImportState:
+                            playerId = ReadGuid(reader);
+                            if (playerId == Guid.Empty)
+                            {
+                                throw new InvalidDataException("Invalid asset import state.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                null,
+                                null,
+                                default,
+                                null,
+                                reader.ReadBoolean());
                             break;
 
                         case UnitySyncMessageType.FileChunk:
