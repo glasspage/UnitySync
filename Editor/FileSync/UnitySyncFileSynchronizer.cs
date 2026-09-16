@@ -1923,9 +1923,26 @@ namespace Glasspage.UnitySync
 
             try
             {
+                HashSet<string> materialsToReimport =
+                    CollectDirectSynchronizedMaterials();
+
+                // Capture dependencies on guest-only assets before Refresh forgets their
+                // AssetDatabase paths. This preserves the old broad-reimport correctness
+                // for materials that must drop a reference to something the host removed.
+                AddMaterialsDependingOnPaths(
+                    materialsToReimport,
+                    CollectObsoleteDependencyAssetPaths());
+
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 ForceReimportSynchronizedDependencies();
-                ForceReimportProjectMaterials();
+
+                // Refresh/import first so newly added assets and changed GUID mappings are
+                // visible to the dependency database, then find only materials that point at
+                // synchronized dependencies instead of force-importing every project material.
+                AddMaterialsDependingOnPaths(
+                    materialsToReimport,
+                    CollectSynchronizedDependencyAssetPaths());
+                ForceReimportSynchronizedMaterials(materialsToReimport);
             }
             catch (Exception exception)
             {
@@ -1965,12 +1982,85 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static void ForceReimportProjectMaterials()
+        private static HashSet<string> CollectDirectSynchronizedMaterials()
         {
-            EditorUtility.DisplayProgressBar(
-                "UnitySync — Syncing Files",
-                "Reinitializing synchronized materials...",
-                0.97f);
+            HashSet<string> materials = new HashSet<string>(StringComparer.Ordinal);
+            foreach (FileEntry entry in GuestAssetMismatches)
+            {
+                string path = NormalizeDependencyAssetPath(entry.Path);
+                if (path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
+                {
+                    materials.Add(path);
+                }
+            }
+
+            return materials;
+        }
+
+        private static HashSet<string> CollectSynchronizedDependencyAssetPaths()
+        {
+            HashSet<string> paths = new HashSet<string>(StringComparer.Ordinal);
+            foreach (FileEntry entry in GuestAssetMismatches)
+            {
+                string sourcePath = entry.Path ?? string.Empty;
+                string path = NormalizeDependencyAssetPath(sourcePath);
+                if (string.IsNullOrEmpty(path))
+                {
+                    continue;
+                }
+
+                // A changed .mat is reimported directly. Only scan other materials for it
+                // when its .meta changed, because that changes its cross-asset identity.
+                bool materialContentsOnly =
+                    sourcePath.EndsWith(".mat", StringComparison.OrdinalIgnoreCase);
+                if (!materialContentsOnly)
+                {
+                    paths.Add(path);
+                }
+            }
+
+            return paths;
+        }
+
+        private static HashSet<string> CollectObsoleteDependencyAssetPaths()
+        {
+            HashSet<string> paths = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string obsoletePath in GuestObsoletePaths)
+            {
+                string path = NormalizeDependencyAssetPath(obsoletePath);
+                if (!string.IsNullOrEmpty(path))
+                {
+                    paths.Add(path);
+                }
+            }
+
+            return paths;
+        }
+
+        private static string NormalizeDependencyAssetPath(string path)
+        {
+            string normalized = (path ?? string.Empty).Replace('\\', '/');
+            if (!IsAssetPath(normalized) || !IsSafeSyncPath(normalized))
+            {
+                return string.Empty;
+            }
+
+            if (normalized.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = normalized.Substring(0, normalized.Length - ".meta".Length);
+            }
+
+            return normalized;
+        }
+
+        private static void AddMaterialsDependingOnPaths(
+            HashSet<string> materials,
+            HashSet<string> dependencyPaths)
+        {
+            if (materials == null || dependencyPaths == null || dependencyPaths.Count == 0)
+            {
+                return;
+            }
 
             string[] materialGuids = AssetDatabase.FindAssets(
                 "t:Material",
@@ -1979,9 +2069,46 @@ namespace Glasspage.UnitySync
 
             foreach (string guid in materialGuids)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!IsSafeSyncPath(path) ||
-                    !path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
+                string materialPath = AssetDatabase.GUIDToAssetPath(guid);
+                if (!IsSafeSyncPath(materialPath) ||
+                    !materialPath.EndsWith(".mat", StringComparison.OrdinalIgnoreCase) ||
+                    materials.Contains(materialPath))
+                {
+                    continue;
+                }
+
+                string[] dependencies = AssetDatabase.GetDependencies(materialPath, false);
+                foreach (string dependency in dependencies)
+                {
+                    if (dependencyPaths.Contains(dependency))
+                    {
+                        materials.Add(materialPath);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static void ForceReimportSynchronizedMaterials(
+            HashSet<string> materialPaths)
+        {
+            if (materialPaths == null || materialPaths.Count == 0)
+            {
+                return;
+            }
+
+            EditorUtility.DisplayProgressBar(
+                "UnitySync — Syncing Files",
+                "Reinitializing affected synchronized materials... (" +
+                materialPaths.Count + ")",
+                0.97f);
+
+            List<string> sortedPaths = new List<string>(materialPaths);
+            sortedPaths.Sort(StringComparer.Ordinal);
+            foreach (string path in sortedPaths)
+            {
+                if (!TryGetFullSyncPath(path, out string fullPath) ||
+                    !File.Exists(fullPath))
                 {
                     continue;
                 }
