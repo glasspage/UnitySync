@@ -193,6 +193,11 @@ namespace Glasspage.UnitySync
                     return "sending scene snapshot";
                 }
 
+                if (DeferredRemoteChanges.Count > 0)
+                {
+                    return "waiting for synchronized asset";
+                }
+
                 if (Pending.Count > 0)
                 {
                     return "syncing " + Pending.Count + " scene " +
