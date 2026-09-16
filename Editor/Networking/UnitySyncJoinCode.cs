@@ -37,7 +37,7 @@ namespace Glasspage.UnitySync
 
             if (!IPAddress.TryParse(addressText, out IPAddress address) || address.AddressFamily != AddressFamily.InterNetwork)
             {
-                error = "Host address must be a valid IPv4 address, such as the host's Radmin VPN address.";
+                error = "Host address must be a valid IPv4 address, such as the host's Hamachi IPv4 address.";
                 return false;
             }
 
@@ -167,6 +167,18 @@ namespace Glasspage.UnitySync
                 // Fall through to localhost if network enumeration is unavailable.
             }
 
+            // Hamachi assigns clients IPv4 addresses in 25.0.0.0/8. Prefer that
+            // adapter when available so the generated join code works out of the box
+            // for the recommended connection method.
+            foreach (IPAddress address in candidates)
+            {
+                if (address.GetAddressBytes()[0] == 25)
+                {
+                    return address.ToString();
+                }
+            }
+
+            // Keep Radmin's 26.x.x.x range as a secondary fallback for existing users.
             foreach (IPAddress address in candidates)
             {
                 if (address.GetAddressBytes()[0] == 26)
