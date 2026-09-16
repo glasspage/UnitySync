@@ -103,8 +103,7 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const double RemoteInitializationTimeoutSeconds = 2.0;
-        private const double DeferredRemoteAssetRetryIntervalSeconds = 1.0;
-        private const double DeferredRemoteAssetTimeoutSeconds = 5.0;
+        private const double DeferredRemoteAssetRetryDelaySeconds = 2.0;
         private const int MaximumDeferredRemoteRetriesPerUpdate = 8;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
@@ -904,7 +903,7 @@ namespace Glasspage.UnitySync
             {
                 existing.Change = change;
                 existing.LastError = error;
-                existing.NextRetryTime = now + DeferredRemoteAssetRetryIntervalSeconds;
+                existing.NextRetryTime = now + DeferredRemoteAssetRetryDelaySeconds;
                 return;
             }
 
@@ -914,7 +913,7 @@ namespace Glasspage.UnitySync
                 StateHash = stateHash,
                 LastError = error,
                 FirstDeferredTime = now,
-                NextRetryTime = now + DeferredRemoteAssetRetryIntervalSeconds
+                NextRetryTime = now + DeferredRemoteAssetRetryDelaySeconds
             };
         }
 
@@ -972,17 +971,6 @@ namespace Glasspage.UnitySync
                         out string retryError))
                 {
                     DeferredRemoteChanges.Remove(stateKey);
-                    continue;
-                }
-
-                bool canStillRetry =
-                    IsRetryableProjectAssetResolutionFailure(deferred.Change, retryError) &&
-                    now - deferred.FirstDeferredTime < DeferredRemoteAssetTimeoutSeconds;
-                if (canStillRetry)
-                {
-                    deferred.LastError = retryError;
-                    deferred.NextRetryTime =
-                        now + DeferredRemoteAssetRetryIntervalSeconds;
                     continue;
                 }
 
