@@ -237,6 +237,11 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            // A reconnecting guest keeps the same player identity. If an earlier connection
+            // dropped while its snapshot was still being emitted, that unfinished batch must
+            // not run ahead of the new connection's snapshot request.
+            CancelSnapshotsForPlayer(targetPlayerId);
+
             HierarchyBatch batch = new HierarchyBatch
             {
                 TargetPlayerId = targetPlayerId,
@@ -271,6 +276,26 @@ namespace Glasspage.UnitySync
             }
 
             HierarchyBatches.Enqueue(batch);
+        }
+
+        internal static void CancelSnapshotsForPlayer(Guid targetPlayerId)
+        {
+            if (targetPlayerId == Guid.Empty || HierarchyBatches.Count == 0)
+            {
+                return;
+            }
+
+            int batchCount = HierarchyBatches.Count;
+            for (int index = 0; index < batchCount; index++)
+            {
+                HierarchyBatch batch = HierarchyBatches.Dequeue();
+                if (batch.Snapshot != null && batch.TargetPlayerId == targetPlayerId)
+                {
+                    continue;
+                }
+
+                HierarchyBatches.Enqueue(batch);
+            }
         }
 
         internal static bool BeginRemoteSnapshot(
