@@ -441,11 +441,11 @@ namespace Glasspage.UnitySync
             }
 
             // A full snapshot must remain ordered: live scene edits are sent after its End packet
-            // so the receiver cannot have them overwritten by later snapshot state. Ordinary
-            // created-hierarchy batches have no snapshot boundary, so unrelated live edits may
-            // continue alongside them instead of being starved.
-            bool snapshotBatchBlocksLiveChanges =
-                HierarchyBatches.Count > 0 && HierarchyBatches.Peek().Snapshot != null;
+            // so the receiver cannot have them overwritten by later snapshot state. This includes
+            // a snapshot queued behind an ordinary created-hierarchy batch, because its boundary
+            // was already captured. When no snapshot is queued, unrelated live edits may continue
+            // alongside created-hierarchy batches instead of being starved.
+            bool snapshotBatchBlocksLiveChanges = _outgoingSnapshotCount > 0;
             using (HierarchyFlushMarker.Auto())
             {
                 if (FlushHierarchyBatch(transport, localPlayerId) &&
