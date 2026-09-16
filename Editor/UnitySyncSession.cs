@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
 using UnityEditor.Build;
+using UnityEditor.SceneManagement;
 using Unity.Profiling;
 using UnityEngine;
 
@@ -166,6 +167,16 @@ namespace Glasspage.UnitySync
             if (_transport != null)
             {
                 error = "Stop the current UnitySync session first.";
+                return false;
+            }
+
+            // A saved scene gives file synchronization a stable baseline and avoids
+            // replaying an otherwise-identical dirty scene as full component state.
+            // Save before opening the listener so cancelling/failing the save never
+            // leaves a partially-started host session behind.
+            if (!EditorSceneManager.SaveOpenScenes())
+            {
+                error = "Could not save all open scenes. Hosting was not started.";
                 return false;
             }
 
