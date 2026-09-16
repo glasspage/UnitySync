@@ -32,63 +32,73 @@ namespace Glasspage.UnitySync
             CancellationToken cancellationToken,
             out long length)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            const int maximumAttempts = 2;
 
-            FileInfo before = new FileInfo(fullPath);
-            before.Refresh();
-            if (!before.Exists)
+            for (int attempt = 0; attempt < maximumAttempts; attempt++)
             {
-                throw new FileNotFoundException(
-                    "File disappeared before it could be hashed.",
-                    fullPath);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            long beforeLength = before.Length;
-            long beforeLastWriteTicks = before.LastWriteTimeUtc.Ticks;
-            string key = NormalizeProjectPath(projectPath);
-
-            lock (CacheLock)
-            {
-                EnsureLoadedLocked(projectRoot);
-                if (Entries.TryGetValue(key, out CacheEntry cached) &&
-                    cached.Length == beforeLength &&
-                    cached.LastWriteTicks == beforeLastWriteTicks)
+                FileInfo before = new FileInfo(fullPath);
+                before.Refresh();
+                if (!before.Exists)
                 {
-                    length = cached.Length;
-                    return cached.Hash;
+                    throw new FileNotFoundException(
+                        "File disappeared before it could be hashed.",
+                        fullPath);
+                }
+
+                long beforeLength = before.Length;
+                long beforeLastWriteTicks = before.LastWriteTimeUtc.Ticks;
+                string key = NormalizeProjectPath(projectPath);
+
+                lock (CacheLock)
+                {
+                    EnsureLoadedLocked(projectRoot);
+                    if (Entries.TryGetValue(key, out CacheEntry cached) &&
+                        cached.Length == beforeLength &&
+                        cached.LastWriteTicks == beforeLastWriteTicks)
+                    {
+                        length = cached.Length;
+                        return cached.Hash;
+                    }
+                }
+
+                ulong hash = UnitySyncXxHash64.ComputeFile(
+                    fullPath,
+                    cancellationToken,
+                    out long hashedLength);
+
+                FileInfo after = new FileInfo(fullPath);
+                after.Refresh();
+                if (after.Exists &&
+                    hashedLength == beforeLength &&
+                    after.Length == beforeLength &&
+                    after.LastWriteTimeUtc.Ticks == beforeLastWriteTicks)
+                {
+                    lock (CacheLock)
+                    {
+                        EnsureLoadedLocked(projectRoot);
+                        Entries[key] = new CacheEntry
+                        {
+                            Length = hashedLength,
+                            LastWriteTicks = beforeLastWriteTicks,
+                            Hash = hash
+                        };
+                        _dirty = true;
+                    }
+
+                    length = hashedLength;
+                    return hash;
+                }
+
+                if (attempt + 1 < maximumAttempts)
+                {
+                    continue;
                 }
             }
 
-            ulong hash = UnitySyncXxHash64.ComputeFile(
-                fullPath,
-                cancellationToken,
-                out long hashedLength);
-
-            FileInfo after = new FileInfo(fullPath);
-            after.Refresh();
-            if (!after.Exists ||
-                hashedLength != beforeLength ||
-                after.Length != beforeLength ||
-                after.LastWriteTimeUtc.Ticks != beforeLastWriteTicks)
-            {
-                throw new IOException(
-                    "File changed while its cached hash was being generated.");
-            }
-
-            lock (CacheLock)
-            {
-                EnsureLoadedLocked(projectRoot);
-                Entries[key] = new CacheEntry
-                {
-                    Length = hashedLength,
-                    LastWriteTicks = beforeLastWriteTicks,
-                    Hash = hash
-                };
-                _dirty = true;
-            }
-
-            length = hashedLength;
-            return hash;
+            throw new IOException(
+                "File changed while its cached hash was being generated.");
         }
 
         internal static ulong GetOrCompute(
@@ -155,13 +165,24 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            ulong actualHash = GetOrCompute(
-                projectRoot,
-                projectPath,
-                fullPath,
-                CancellationToken.None,
-                out long actualLength);
-            return actualLength == expectedLength && actualHash == expectedHash;
+            try
+            {
+                ulong actualHash = GetOrCompute(
+                    projectRoot,
+                    projectPath,
+                    fullPath,
+                    CancellationToken.None,
+                    out long actualLength);
+                return actualLength == expectedLength && actualHash == expectedHash;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
         }
 
         internal static void Invalidate(string projectRoot, string projectPath)
