@@ -1276,6 +1276,12 @@ namespace Glasspage.UnitySync
                     }
                 }
             }
+            catch (EndOfStreamException)
+            {
+                // EOF after the welcome handshake is the normal result when the host ends
+                // the session and closes its TCP stream. Keep the default disconnect reason
+                // so the session layer exits cleanly instead of reporting a connection failure.
+            }
             catch (Exception exception) when (
                 exception is IOException ||
                 exception is SocketException ||
