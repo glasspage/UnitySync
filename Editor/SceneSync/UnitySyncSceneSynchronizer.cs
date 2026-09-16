@@ -1732,6 +1732,23 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            bool needsPromotion = false;
+            foreach (PendingChange pending in Pending.Values)
+            {
+                if (pending != null &&
+                    pending.GameObjectInstanceId != 0 &&
+                    !CanSendPendingDuringSnapshot(batch, pending))
+                {
+                    needsPromotion = true;
+                    break;
+                }
+            }
+
+            if (!needsPromotion)
+            {
+                return;
+            }
+
             HashSet<int> remainingInstanceIds = new HashSet<int>();
             for (int index = batch.Index; index < batch.Objects.Count; index++)
             {
