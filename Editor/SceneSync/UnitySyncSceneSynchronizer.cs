@@ -44,6 +44,8 @@ namespace Glasspage.UnitySync
             internal UnitySyncSceneSnapshotBoundary Snapshot;
             internal List<GameObject> Objects;
             internal readonly HashSet<int> FullStateSceneHandles = new HashSet<int>();
+            internal readonly HashSet<string> SentHierarchyObjectIds =
+                new HashSet<string>(StringComparer.Ordinal);
             internal int Index;
             internal int ComponentIndex;
             internal HierarchyBatchPhase Phase;
@@ -84,7 +86,7 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
-        private const int SnapshotObjectsPerUpdate = 8;
+        private const int SnapshotObjectsPerUpdate = 16;
         private const double CaptureBudgetSeconds = 0.008;
 
         private static readonly ProfilerMarker SceneSettingsFlushMarker =
@@ -482,6 +484,30 @@ namespace Glasspage.UnitySync
                 FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
             }
 
+            HierarchyBatch activeSnapshotBatch =
+                HierarchyBatches.Count > 0 && HierarchyBatches.Peek().Snapshot != null
+                    ? HierarchyBatches.Peek()
+                    : null;
+
+            if (activeSnapshotBatch != null)
+            {
+                // Live edits should not sit behind minutes of initial snapshot traffic. If the
+                // edited object (or a new/current parent) has not had its synchronized identity
+                // established on the guest yet, move that hierarchy chain to the front first.
+                PromotePendingSnapshotHierarchy(activeSnapshotBatch);
+                using (PendingFlushMarker.Auto())
+                {
+                    if (FlushPendingChanges(
+                            transport,
+                            localPlayerId,
+                            now,
+                            activeSnapshotBatch))
+                    {
+                        return;
+                    }
+                }
+            }
+
             using (HierarchyFlushMarker.Auto())
             {
                 if (FlushHierarchyBatch(transport, localPlayerId))
@@ -492,7 +518,7 @@ namespace Glasspage.UnitySync
 
             using (PendingFlushMarker.Auto())
             {
-                FlushPendingChanges(transport, localPlayerId, now);
+                FlushPendingChanges(transport, localPlayerId, now, null);
             }
         }
 
@@ -1415,6 +1441,11 @@ namespace Glasspage.UnitySync
                     }
 
                     transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
+                    if (change.Address != null &&
+                        !string.IsNullOrEmpty(change.Address.ObjectId))
+                    {
+                        batch.SentHierarchyObjectIds.Add(change.Address.ObjectId);
+                    }
                 }
 
                 if (batch.Index >= batch.Objects.Count)
@@ -1542,19 +1573,21 @@ namespace Glasspage.UnitySync
                    components[pending.ComponentIndex] is Transform;
         }
 
-        private static void FlushPendingChanges(
+        private static bool FlushPendingChanges(
             UnitySyncTransport transport,
             Guid localPlayerId,
-            double now)
+            double now,
+            HierarchyBatch activeSnapshotBatch)
         {
             if (Pending.Count == 0)
             {
                 // Removal can leave stale queue entries. Drop them without revisiting
                 // every former key in later idle updates.
                 PendingOrder.Clear();
-                return;
+                return false;
             }
 
+            bool sentAny = false;
             int attempted = 0;
             int examined = 0;
             int keysAvailableAtStart = PendingOrder.Count;
@@ -1569,6 +1602,13 @@ namespace Glasspage.UnitySync
                 examined++;
                 if (!Pending.TryGetValue(pendingKey, out PendingChange pending))
                 {
+                    continue;
+                }
+
+                if (activeSnapshotBatch != null &&
+                    !CanSendPendingDuringSnapshot(activeSnapshotBatch, pending))
+                {
+                    PendingOrder.Enqueue(pendingKey);
                     continue;
                 }
 
@@ -1619,6 +1659,145 @@ namespace Glasspage.UnitySync
                 // allowed through; only suppress consecutive identical incoming live states.
                 LastIncomingLiveHashes.Remove(stateKey);
                 transport.SendSceneObjectChange(localPlayerId, change);
+                sentAny = true;
+            }
+
+            return sentAny;
+        }
+
+        private static bool CanSendPendingDuringSnapshot(
+            HierarchyBatch batch,
+            PendingChange pending)
+        {
+            if (batch == null || batch.Snapshot == null)
+            {
+                return true;
+            }
+
+            if (batch.Phase == HierarchyBatchPhase.BeginSnapshot)
+            {
+                return false;
+            }
+
+            if (batch.Phase != HierarchyBatchPhase.Hierarchy)
+            {
+                return true;
+            }
+
+            if (pending == null ||
+                string.IsNullOrEmpty(pending.ObjectId) ||
+                !batch.SentHierarchyObjectIds.Contains(pending.ObjectId))
+            {
+                return false;
+            }
+
+            if (pending.Kind == PendingKind.Destroy || pending.GameObjectInstanceId == 0)
+            {
+                return true;
+            }
+
+            GameObject gameObject =
+                EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
+            if (gameObject == null)
+            {
+                return false;
+            }
+
+            Transform parent = gameObject.transform.parent;
+            while (parent != null)
+            {
+                if (!UnitySyncSceneObjectRegistry.TryGetId(
+                        parent.gameObject,
+                        out string parentObjectId) ||
+                    !batch.SentHierarchyObjectIds.Contains(parentObjectId))
+                {
+                    return false;
+                }
+
+                parent = parent.parent;
+            }
+
+            return true;
+        }
+
+        private static void PromotePendingSnapshotHierarchy(HierarchyBatch batch)
+        {
+            if (batch == null ||
+                batch.Snapshot == null ||
+                batch.Phase != HierarchyBatchPhase.Hierarchy ||
+                batch.Objects == null ||
+                batch.Index >= batch.Objects.Count ||
+                Pending.Count == 0)
+            {
+                return;
+            }
+
+            HashSet<int> remainingInstanceIds = new HashSet<int>();
+            for (int index = batch.Index; index < batch.Objects.Count; index++)
+            {
+                GameObject remainingObject = batch.Objects[index];
+                if (remainingObject != null)
+                {
+                    remainingInstanceIds.Add(remainingObject.GetInstanceID());
+                }
+            }
+
+            List<GameObject> promoted = new List<GameObject>();
+            HashSet<int> promotedInstanceIds = new HashSet<int>();
+            foreach (PendingChange pending in Pending.Values)
+            {
+                if (pending == null || pending.GameObjectInstanceId == 0)
+                {
+                    continue;
+                }
+
+                GameObject gameObject =
+                    EditorUtility.InstanceIDToObject(pending.GameObjectInstanceId) as GameObject;
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                List<GameObject> hierarchyChain = new List<GameObject>();
+                Transform current = gameObject.transform;
+                while (current != null)
+                {
+                    hierarchyChain.Add(current.gameObject);
+                    current = current.parent;
+                }
+
+                for (int chainIndex = hierarchyChain.Count - 1; chainIndex >= 0; chainIndex--)
+                {
+                    GameObject hierarchyObject = hierarchyChain[chainIndex];
+                    int instanceId = hierarchyObject.GetInstanceID();
+                    if (remainingInstanceIds.Contains(instanceId) &&
+                        promotedInstanceIds.Add(instanceId))
+                    {
+                        promoted.Add(hierarchyObject);
+                    }
+                }
+            }
+
+            if (promoted.Count == 0)
+            {
+                return;
+            }
+
+            List<GameObject> reordered = new List<GameObject>(batch.Objects.Count - batch.Index);
+            reordered.AddRange(promoted);
+            for (int index = batch.Index; index < batch.Objects.Count; index++)
+            {
+                GameObject remainingObject = batch.Objects[index];
+                if (remainingObject == null ||
+                    !promotedInstanceIds.Contains(remainingObject.GetInstanceID()))
+                {
+                    reordered.Add(remainingObject);
+                }
+            }
+
+            for (int offset = 0; offset < reordered.Count; offset++)
+            {
+                batch.Objects[batch.Index + offset] = reordered[offset];
             }
         }
 
