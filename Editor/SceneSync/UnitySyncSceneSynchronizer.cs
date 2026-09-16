@@ -1527,7 +1527,12 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                if (!batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
+                // Snapshot batches can rely on the synchronized saved-scene baseline and
+                // selectively replay only dirty component state. A live-created hierarchy has
+                // no receiver-side baseline, so every current component must follow its
+                // hierarchy shell.
+                if (batch.Snapshot != null &&
+                    !batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
                 {
                     batch.Index++;
                     batch.ComponentIndex = 0;
@@ -1539,7 +1544,8 @@ namespace Glasspage.UnitySync
                 {
                     Component candidate = components[batch.ComponentIndex];
                     if (candidate != null &&
-                        batch.FullStateComponentInstanceIds.Contains(candidate.GetInstanceID()))
+                        (batch.Snapshot == null ||
+                         batch.FullStateComponentInstanceIds.Contains(candidate.GetInstanceID())))
                     {
                         break;
                     }
