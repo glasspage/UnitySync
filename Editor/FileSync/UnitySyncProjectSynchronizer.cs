@@ -588,6 +588,28 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool ProjectFileNeedsSend(string path, string fullPath)
+        {
+            try
+            {
+                ulong hash = UnitySyncFileHashCache.GetOrCompute(
+                    _projectRoot,
+                    path,
+                    fullPath,
+                    out long length);
+                return !KnownFiles.TryGetValue(path, out FileFingerprint known) ||
+                       known.Length != length ||
+                       known.Hash != hash;
+            }
+            catch (Exception exception) when (
+                exception is IOException ||
+                exception is UnauthorizedAccessException ||
+                exception is CryptographicException)
+            {
+                return true;
+            }
+        }
+
         private static void TrySendLocalChange(
             UnitySyncTransport transport,
             Guid localPlayerId,
@@ -596,6 +618,23 @@ namespace Glasspage.UnitySync
             if (!TryGetFullProjectPath(path, out string fullPath))
             {
                 return;
+            }
+
+            // New Unity assets must arrive with the source editor's .meta identity before
+            // the asset itself is imported remotely. Otherwise Unity can generate/import
+            // the asset under a different GUID and a simultaneous scene reference to the
+            // host GUID cannot resolve. Send a changed companion meta first when needed.
+            if (path.StartsWith("Assets/", StringComparison.Ordinal) &&
+                !path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(fullPath))
+            {
+                string metaPath = path + ".meta";
+                if (TryGetFullProjectPath(metaPath, out string fullMetaPath) &&
+                    File.Exists(fullMetaPath) &&
+                    ProjectFileNeedsSend(metaPath, fullMetaPath))
+                {
+                    TrySendLocalChange(transport, localPlayerId, metaPath);
+                }
             }
 
             if (!File.Exists(fullPath))
@@ -926,9 +965,23 @@ namespace Glasspage.UnitySync
                 UnitySyncSession.BeginSynchronizedAssetImport();
                 try
                 {
-                    string importPath = path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
+                    bool isMeta = path.EndsWith(
+                        ".meta",
+                        StringComparison.OrdinalIgnoreCase);
+                    string importPath = isMeta
                         ? path.Substring(0, path.Length - ".meta".Length)
                         : path;
+
+                    // Do not let Unity import a newly received asset before the source
+                    // editor's meta file has arrived. Importing first can generate a local
+                    // meta/GUID, after which scene references carrying the source GUID fail.
+                    if (!isMeta &&
+                        !File.Exists(Path.Combine(
+                            GetProjectRoot(),
+                            (path + ".meta").Replace('/', Path.DirectorySeparatorChar))))
+                    {
+                        return;
+                    }
 
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     if (!string.IsNullOrEmpty(importPath) &&
