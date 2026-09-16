@@ -184,6 +184,7 @@ namespace Glasspage.UnitySync
 
         private const string ExcludedFolderName = "SerializedUdonPrograms";
         private const int CompareFilesPerUpdate = 12;
+        private const int CachedCompareFilesPerUpdate = 512;
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 512;
         private const long MaximumQueuedFileTransferBytes = 128L * 1024L * 1024L;
@@ -1004,7 +1005,7 @@ namespace Glasspage.UnitySync
                             continue;
                         }
 
-                        // The manifest already contains a SHA-256 for this file. Avoid hashing it
+                        // The manifest already contains an XXH64 for this file. Avoid hashing it
                         // a second time before transfer; the guest verifies against the manifest.
                         transfer.Stream = new FileStream(
                             fullPath,
@@ -1293,13 +1294,14 @@ namespace Glasspage.UnitySync
         private static void UpdateGuestComparison(UnitySyncTransport transport)
         {
             int processed = 0;
+            int uncachedHashes = 0;
             string projectRoot = GetProjectRoot();
             try
             {
-                while (processed < CompareFilesPerUpdate &&
+                while (processed < CachedCompareFilesPerUpdate &&
                        _guestCompareIndex < GuestManifest.Count)
                 {
-                    FileEntry entry = GuestManifest[_guestCompareIndex++];
+                    FileEntry entry = GuestManifest[_guestCompareIndex];
                     bool matches = false;
                     bool replaceWholePackage =
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
@@ -1308,13 +1310,36 @@ namespace Glasspage.UnitySync
                         TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
-                        matches = UnitySyncFileHashCache.MatchesFile(
+                        bool cached = UnitySyncFileHashCache.TryGetCachedHash(
                             projectRoot,
                             entry.Path,
                             fullPath,
-                            entry.Length,
-                            entry.Hash);
+                            out long localLength,
+                            out ulong localHash);
+                        if (cached)
+                        {
+                            matches =
+                                localLength == entry.Length &&
+                                localHash == entry.Hash;
+                        }
+                        else if (localLength == entry.Length)
+                        {
+                            if (uncachedHashes >= CompareFilesPerUpdate)
+                            {
+                                break;
+                            }
+
+                            matches = UnitySyncFileHashCache.MatchesFile(
+                                projectRoot,
+                                entry.Path,
+                                fullPath,
+                                entry.Length,
+                                entry.Hash);
+                            uncachedHashes++;
+                        }
                     }
+
+                    _guestCompareIndex++;
 
                     if (!matches &&
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
