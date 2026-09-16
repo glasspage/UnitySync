@@ -224,6 +224,9 @@ namespace Glasspage.UnitySync
         private const float BottomRightStatusRightMargin = 12f;
         private const float BottomRightStatusBottomMargin = 12f;
         private const float BottomRightStatusSpacing = 4f;
+        private const float BottomRightStatusOpacity = 0.8f;
+        private const float SceneUpdateStatusBottomMargin = 12f;
+        private const float SceneUpdateStatusOpacity = 0.8f;
         private const int DiscSegmentCount = 48;
 
         private static readonly Guid DebugMarkerId = new Guid("f47f5129-96d0-40ac-a62c-6db83ea543fa");
@@ -660,6 +663,9 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            DrawSceneUpdateStatus(sceneView);
+            DrawBottomRightStatuses(sceneView, BottomRightStatusOpacity);
+
             float opacity = UnitySyncVisualSettings.ViewportOpacity;
             if (opacity <= 0f)
             {
@@ -746,7 +752,6 @@ namespace Glasspage.UnitySync
                 localPlayerId,
                 spectatingPlayerId,
                 opacity);
-            DrawBottomRightStatuses(sceneView, opacity);
         }
 
         private static void DrawDisplayName(
@@ -827,6 +832,37 @@ namespace Glasspage.UnitySync
                     statusIndex++);
             }
 
+            Handles.EndGUI();
+        }
+
+        private static void DrawSceneUpdateStatus(SceneView sceneView)
+        {
+            if (!UnitySyncSceneSynchronizer.TryGetRemoteSnapshotProgress(
+                    out float progress01))
+            {
+                return;
+            }
+
+            int percent = Mathf.Clamp(
+                Mathf.RoundToInt(progress01 * 100f),
+                0,
+                100);
+            GUIContent content = new GUIContent(
+                "Updating scene (" + percent + "%)...");
+            EnsureLabelStyles();
+            Vector2 labelSize = _labelStyle.CalcSize(content);
+            Rect labelRect = new Rect(
+                (sceneView.position.width - labelSize.x) * 0.5f,
+                sceneView.position.height - SceneUpdateStatusBottomMargin - labelSize.y,
+                labelSize.x,
+                labelSize.y);
+
+            Handles.BeginGUI();
+            DrawOutlinedGuiLabel(
+                labelRect,
+                content,
+                Color.white,
+                SceneUpdateStatusOpacity);
             Handles.EndGUI();
         }
 
