@@ -29,6 +29,9 @@ namespace Glasspage.UnitySync
             new ProfilerMarker("US.Apply.MarkDirty");
         private static readonly ProfilerMarker ComponentStageCreateMarker =
             new ProfilerMarker("US.Comp.StageCreate");
+        private static readonly HashSet<int> SnapshotDirtySceneHandles =
+            new HashSet<int>();
+        private static Guid _snapshotDirtyMarkerId = Guid.Empty;
         private static readonly ProfilerMarker ComponentValidateRefsMarker =
             new ProfilerMarker("US.Comp.ValidateRefs");
         private static readonly ProfilerMarker ComponentApplyPropertiesMarker =
@@ -1509,6 +1512,20 @@ namespace Glasspage.UnitySync
                         return false;
                     }
 
+                    // File synchronization normally gives the guest the exact same saved
+                    // RenderSettings baseline. Avoid rewriting it and forcing DynamicGI when
+                    // every environment value/reference already matches.
+                    if (VerifyEnvironmentSettingsOnActiveScene(
+                            descriptor,
+                            skyboxMaterial,
+                            customReflection,
+                            sun,
+                            out _))
+                    {
+                        appliedSceneCount++;
+                        continue;
+                    }
+
                     if (!ApplyEnvironmentSettingsToActiveScene(
                             descriptor,
                             skyboxMaterial,
@@ -2428,7 +2445,8 @@ namespace Glasspage.UnitySync
                     }
                 }
 
-                if (change.GameObject != null)
+                if (change.GameObject != null &&
+                    !GameObjectSettingsMatch(gameObject, change.GameObject))
                 {
                     using (ApplyGameObjectMarker.Auto())
                     {
@@ -2438,7 +2456,7 @@ namespace Glasspage.UnitySync
 
                 using (ApplyDirtyMarker.Auto())
                 {
-                    EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                    MarkSceneDirtyForChange(gameObject.scene, change.SnapshotId);
                 }
                 return true;
             }
@@ -2476,7 +2494,7 @@ namespace Glasspage.UnitySync
 
             using (ApplyDirtyMarker.Auto())
             {
-                EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                MarkSceneDirtyForChange(gameObject.scene, change.SnapshotId);
             }
             return true;
         }
@@ -3262,6 +3280,50 @@ namespace Glasspage.UnitySync
             }
 
             return false;
+        }
+
+        private static bool GameObjectSettingsMatch(
+            GameObject gameObject,
+            UnitySyncGameObjectState state)
+        {
+            if (gameObject == null || state == null ||
+                !string.Equals(gameObject.name, state.Name, StringComparison.Ordinal) ||
+                gameObject.activeSelf != state.ActiveSelf ||
+                gameObject.layer != Mathf.Clamp(state.Layer, 0, 31) ||
+                GameObjectUtility.GetStaticEditorFlags(gameObject) !=
+                    (StaticEditorFlags)state.StaticEditorFlags)
+            {
+                return false;
+            }
+
+            try
+            {
+                return string.Equals(gameObject.tag, state.Tag, StringComparison.Ordinal);
+            }
+            catch (UnityException)
+            {
+                return false;
+            }
+        }
+
+        private static void MarkSceneDirtyForChange(Scene scene, Guid snapshotId)
+        {
+            if (snapshotId == Guid.Empty)
+            {
+                EditorSceneManager.MarkSceneDirty(scene);
+                return;
+            }
+
+            if (_snapshotDirtyMarkerId != snapshotId)
+            {
+                _snapshotDirtyMarkerId = snapshotId;
+                SnapshotDirtySceneHandles.Clear();
+            }
+
+            if (SnapshotDirtySceneHandles.Add(scene.handle))
+            {
+                EditorSceneManager.MarkSceneDirty(scene);
+            }
         }
 
         private static void ApplyGameObjectSettings(GameObject gameObject, UnitySyncGameObjectState state)
@@ -4255,6 +4317,46 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool ComponentLayoutMatches(
+            Component[] currentComponents,
+            UnitySyncComponentState[] desiredStates)
+        {
+            if (currentComponents == null ||
+                desiredStates == null ||
+                currentComponents.Length != desiredStates.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < desiredStates.Length; index++)
+            {
+                UnitySyncComponentState state = desiredStates[index];
+                if (state == null || state.ComponentIndex != index)
+                {
+                    return false;
+                }
+
+                Component component = currentComponents[index];
+                if (component == null)
+                {
+                    if (!string.IsNullOrEmpty(state.TypeName))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(state.TypeName) ||
+                    !TypeMatches(component.GetType(), state.TypeName))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static bool ReconcileComponents(
             GameObject gameObject,
             UnitySyncComponentState[] desiredStates,
@@ -4262,6 +4364,16 @@ namespace Glasspage.UnitySync
         {
             error = string.Empty;
             desiredStates = desiredStates ?? new UnitySyncComponentState[0];
+
+            // Hierarchy snapshot packets carry component layout even when the synchronized
+            // saved scene is already identical. Most objects can exit here without resolving
+            // types, allocating a desired type array, or repeatedly calling GetComponents.
+            Component[] currentLayout = gameObject.GetComponents<Component>();
+            if (ComponentLayoutMatches(currentLayout, desiredStates))
+            {
+                return true;
+            }
+
             if (desiredStates.Length == 0 ||
                 desiredStates[0] == null ||
                 desiredStates[0].ComponentIndex != 0 ||
@@ -5339,6 +5451,13 @@ namespace Glasspage.UnitySync
         private static void SetFilteredSiblingIndex(Transform transform, int filteredIndex)
         {
             if (transform == null || filteredIndex < 0)
+            {
+                return;
+            }
+
+            // Initial snapshots usually adopt an already-identical saved hierarchy. Avoid
+            // rebuilding the sibling list and calling SetSiblingIndex for the common no-op.
+            if (GetFilteredSiblingIndex(transform) == filteredIndex)
             {
                 return;
             }
