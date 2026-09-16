@@ -579,10 +579,7 @@ namespace Glasspage.UnitySync
             }
 
             double now = GetMonotonicSeconds();
-            if (!IsSuppressed(path, now))
-            {
-                UnitySyncFileHashCache.Invalidate(_projectRoot, path);
-            }
+            UnitySyncFileHashCache.Invalidate(_projectRoot, path);
 
             double due = now + ChangeDebounceSeconds;
             lock (PendingLock)
