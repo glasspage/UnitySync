@@ -21,6 +21,7 @@ namespace Glasspage.UnitySync
         private const string Version = "0.8.0";
         private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
+        private const double DebugRefreshIntervalSeconds = 0.5d;
 
         private static readonly Color ActiveSessionColor = new Color(1f, 0.55f, 0.15f);
 
@@ -40,6 +41,12 @@ namespace Glasspage.UnitySync
         private string _debugDisplayName = "Debug User";
         private Color _debugColor;
         private UnitySyncSessionState _previousSessionState;
+        private double _nextDebugRefreshTime;
+        private double _lastDebugSpeedSampleTime;
+        private long _lastDebugBytesSent;
+        private long _lastDebugBytesReceived;
+        private double _debugUploadBytesPerSecond;
+        private double _debugDownloadBytesPerSecond;
 
         private static GUIStyle _activeSessionFoldoutStyle;
         private static GUIStyle _richWarningHelpBoxStyle;
@@ -79,6 +86,7 @@ namespace Glasspage.UnitySync
         private void OnDisable()
         {
             UnitySyncSession.Changed -= Repaint;
+            EditorApplication.update -= UpdateDebugRefresh;
         }
 
         private void OnGUI()
@@ -792,18 +800,28 @@ namespace Glasspage.UnitySync
 
         private void DrawDebug()
         {
+            bool wasShowingDebug = _showDebug;
             _showDebug = EditorGUILayout.Foldout(_showDebug, "Debug", true);
+            if (_showDebug != wasShowingDebug)
+            {
+                SetDebugRefreshEnabled(_showDebug);
+            }
+
             if (!_showDebug)
             {
                 return;
             }
 
+            UpdateDebugTransferRates();
+            EditorGUILayout.LabelField(
+                "Network: Up " + FormatTransferRate(_debugUploadBytesPerSecond) +
+                " | Down " + FormatTransferRate(_debugDownloadBytesPerSecond),
+                EditorStyles.miniLabel);
+            EditorGUILayout.LabelField(
+                "Background: " + UnitySyncSession.GetDebugBackgroundWork(),
+                EditorStyles.miniLabel);
             EditorGUILayout.Space();
-            EditorGUILayout.HelpBox(
-                "Restore replaces Assets and ProjectSettings with the host's files, " +
-                "including files that already match. Guest-only files and unsaved scene edits are removed. " +
-                "Packages must be managed manually. The host must accept the request in Debug. Downloading and importing may take a long time.",
-                MessageType.Warning);
+
             bool connectedGuest = UnitySyncSession.State == UnitySyncSessionState.Connected;
             using (new EditorGUI.DisabledScope(!connectedGuest || UnitySyncSession.IsFileSyncing))
             {
@@ -901,6 +919,90 @@ namespace Glasspage.UnitySync
                 "The test gizmo is placed at the current Scene view pivot.",
                 EditorStyles.wordWrappedMiniLabel);
             EditorGUI.indentLevel--;
+        }
+
+        private void SetDebugRefreshEnabled(bool enabled)
+        {
+            EditorApplication.update -= UpdateDebugRefresh;
+            if (!enabled)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            _lastDebugSpeedSampleTime = now;
+            _nextDebugRefreshTime = now + DebugRefreshIntervalSeconds;
+            _lastDebugBytesSent = UnitySyncSession.TotalBytesSent;
+            _lastDebugBytesReceived = UnitySyncSession.TotalBytesReceived;
+            _debugUploadBytesPerSecond = 0d;
+            _debugDownloadBytesPerSecond = 0d;
+            EditorApplication.update += UpdateDebugRefresh;
+        }
+
+        private void UpdateDebugRefresh()
+        {
+            if (!_showDebug)
+            {
+                EditorApplication.update -= UpdateDebugRefresh;
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            if (now < _nextDebugRefreshTime)
+            {
+                return;
+            }
+
+            _nextDebugRefreshTime = now + DebugRefreshIntervalSeconds;
+            Repaint();
+        }
+
+        private void UpdateDebugTransferRates()
+        {
+            double now = EditorApplication.timeSinceStartup;
+            double elapsed = now - _lastDebugSpeedSampleTime;
+            if (elapsed < DebugRefreshIntervalSeconds)
+            {
+                return;
+            }
+
+            long bytesSent = UnitySyncSession.TotalBytesSent;
+            long bytesReceived = UnitySyncSession.TotalBytesReceived;
+            long sentDelta = bytesSent >= _lastDebugBytesSent
+                ? bytesSent - _lastDebugBytesSent
+                : 0L;
+            long receivedDelta = bytesReceived >= _lastDebugBytesReceived
+                ? bytesReceived - _lastDebugBytesReceived
+                : 0L;
+
+            _debugUploadBytesPerSecond = sentDelta / elapsed;
+            _debugDownloadBytesPerSecond = receivedDelta / elapsed;
+            _lastDebugBytesSent = bytesSent;
+            _lastDebugBytesReceived = bytesReceived;
+            _lastDebugSpeedSampleTime = now;
+        }
+
+        private static string FormatTransferRate(double bytesPerSecond)
+        {
+            if (bytesPerSecond < 1024d)
+            {
+                return bytesPerSecond.ToString("0") + " B/s";
+            }
+
+            double kilobytes = bytesPerSecond / 1024d;
+            if (kilobytes < 1024d)
+            {
+                return kilobytes.ToString(kilobytes >= 100d ? "0" : "0.0") + " KB/s";
+            }
+
+            double megabytes = kilobytes / 1024d;
+            if (megabytes < 1024d)
+            {
+                return megabytes.ToString(megabytes >= 100d ? "0" : "0.0") + " MB/s";
+            }
+
+            double gigabytes = megabytes / 1024d;
+            return gigabytes.ToString(gigabytes >= 100d ? "0" : "0.0") + " GB/s";
         }
 
         private static string NormalizeDebugDisplayName(string displayName)
