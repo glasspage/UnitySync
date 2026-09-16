@@ -1355,6 +1355,11 @@ namespace Glasspage.UnitySync
                         continue;
                     }
 
+                    // This hierarchy packet already contains the current GameObject settings.
+                    // Seed that baseline before adding the snapshot ID so a follow-up Unity
+                    // property event for the same value is not sent again as a live update.
+                    RememberHierarchyGameObject(change);
+
                     if (batch.Snapshot != null)
                     {
                         change.SnapshotId = batch.Snapshot.SnapshotId;
@@ -1420,6 +1425,12 @@ namespace Glasspage.UnitySync
                     batch.HasCaptureFailure = true;
                     continue;
                 }
+
+                // The component state is now authoritative locally as well. Remember it before
+                // adding the snapshot ID, because live hashes intentionally do not include a
+                // snapshot boundary. This suppresses delayed/no-op Unity change notifications
+                // that would otherwise resend the exact same component state.
+                Remember(change);
 
                 if (batch.Snapshot != null)
                 {
@@ -1548,7 +1559,11 @@ namespace Glasspage.UnitySync
 
                 if (hasHash)
                 {
-                    KnownHashes[stateKey] = hash;
+                    // Full structural packets contain GameObject and component state together.
+                    // Remember all of those sub-states, not only the aggregate structure hash,
+                    // so follow-up Unity events for values already included in this packet are
+                    // suppressed instead of being serialized and sent again.
+                    Remember(change, stateKey, hash);
                 }
 
                 // A real local edit means a later packet equal to an older remote state must be
@@ -1655,7 +1670,21 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            KnownHashes[GetStateKey(change)] = GetHash(change);
+            Remember(change, GetStateKey(change), GetHash(change));
+        }
+
+        private static void Remember(
+            UnitySyncSceneObjectChange change,
+            string stateKey,
+            string hash)
+        {
+            if (change == null || change.Address == null ||
+                change.Kind == UnitySyncSceneChangeKind.Destroy || change.HierarchyOnly)
+            {
+                return;
+            }
+
+            KnownHashes[stateKey] = hash;
 
             if (change.ReconcileComponents)
             {
@@ -1670,8 +1699,14 @@ namespace Glasspage.UnitySync
                     KnownHashes[GetStateKey(gameObjectOnly)] = GetHash(gameObjectOnly);
                 }
 
-                foreach (UnitySyncComponentState component in change.Components)
+                foreach (UnitySyncComponentState component in
+                         change.Components ?? new UnitySyncComponentState[0])
                 {
+                    if (component == null)
+                    {
+                        continue;
+                    }
+
                     UnitySyncSceneObjectChange componentOnly = new UnitySyncSceneObjectChange
                     {
                         Kind = UnitySyncSceneChangeKind.Upsert,
@@ -1681,6 +1716,25 @@ namespace Glasspage.UnitySync
                     KnownHashes[GetStateKey(componentOnly)] = GetHash(componentOnly);
                 }
             }
+        }
+
+        private static void RememberHierarchyGameObject(UnitySyncSceneObjectChange change)
+        {
+            if (change == null ||
+                change.Address == null ||
+                !change.HierarchyOnly ||
+                change.GameObject == null)
+            {
+                return;
+            }
+
+            UnitySyncSceneObjectChange gameObjectOnly = new UnitySyncSceneObjectChange
+            {
+                Kind = UnitySyncSceneChangeKind.Upsert,
+                Address = change.Address,
+                GameObject = change.GameObject
+            };
+            KnownHashes[GetStateKey(gameObjectOnly)] = GetHash(gameObjectOnly);
         }
 
         private static string GetStateKey(UnitySyncSceneObjectChange change)

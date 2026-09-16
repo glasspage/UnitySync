@@ -79,6 +79,7 @@ namespace Glasspage.UnitySync
         {
             internal byte[] Payload;
             internal Guid TargetPlayerId;
+            internal string CoalesceKey = string.Empty;
         }
 
         private sealed class Peer
@@ -128,10 +129,18 @@ namespace Glasspage.UnitySync
         private readonly object _peersLock = new object();
         private readonly List<Peer> _peers = new List<Peer>();
         private readonly object _eventsLock = new object();
-        private readonly Queue<UnitySyncTransportEvent> _events = new Queue<UnitySyncTransportEvent>();
+        private readonly LinkedList<UnitySyncTransportEvent> _events =
+            new LinkedList<UnitySyncTransportEvent>();
+        private readonly Dictionary<string, LinkedListNode<UnitySyncTransportEvent>>
+            _pendingIncomingLiveSceneEvents =
+                new Dictionary<string, LinkedListNode<UnitySyncTransportEvent>>(StringComparer.Ordinal);
         private readonly object _outboundLock = new object();
         private readonly AutoResetEvent _outboundSignal = new AutoResetEvent(false);
-        private readonly Queue<OutboundMessage> _pendingMessages = new Queue<OutboundMessage>();
+        private readonly LinkedList<OutboundMessage> _pendingMessages =
+            new LinkedList<OutboundMessage>();
+        private readonly Dictionary<string, LinkedListNode<OutboundMessage>>
+            _pendingOutgoingLiveSceneMessages =
+                new Dictionary<string, LinkedListNode<OutboundMessage>>(StringComparer.Ordinal);
         private long _pendingMessageBytes;
 
         private volatile bool _running;
@@ -423,7 +432,19 @@ namespace Glasspage.UnitySync
                     return;
                 }
 
-                QueueMessage(payload, targetPlayerId);
+                if (TryGetLiveSceneStateKey(change, out string liveStateKey))
+                {
+                    QueueMessage(
+                        payload,
+                        targetPlayerId,
+                        targetPlayerId.ToString("N") + "|" + liveStateKey);
+                }
+                else
+                {
+                    // Snapshot, hierarchy, structure, and destroy packets are ordering barriers.
+                    // Never let a later property packet move across one of these operations.
+                    QueueMessage(payload, targetPlayerId);
+                }
             }
             catch (Exception exception) when (
                 exception is ArgumentException ||
@@ -471,6 +492,14 @@ namespace Glasspage.UnitySync
 
         private void QueueMessage(byte[] payload, Guid targetPlayerId)
         {
+            QueueMessage(payload, targetPlayerId, string.Empty);
+        }
+
+        private void QueueMessage(
+            byte[] payload,
+            Guid targetPlayerId,
+            string coalesceKey)
+        {
             if (!_running)
             {
                 return;
@@ -478,12 +507,48 @@ namespace Glasspage.UnitySync
 
             lock (_outboundLock)
             {
-                _pendingMessages.Enqueue(new OutboundMessage
+                if (!string.IsNullOrEmpty(coalesceKey))
                 {
-                    Payload = payload,
-                    TargetPlayerId = targetPlayerId
-                });
-                _pendingMessageBytes += payload != null ? payload.LongLength : 0L;
+                    if (_pendingOutgoingLiveSceneMessages.TryGetValue(
+                            coalesceKey,
+                            out LinkedListNode<OutboundMessage> existingNode) &&
+                        existingNode != null &&
+                        existingNode.List == _pendingMessages)
+                    {
+                        long previousLength = existingNode.Value.Payload != null
+                            ? existingNode.Value.Payload.LongLength
+                            : 0L;
+                        long replacementLength = payload != null ? payload.LongLength : 0L;
+                        existingNode.Value.Payload = payload;
+                        existingNode.Value.TargetPlayerId = targetPlayerId;
+                        _pendingMessageBytes += replacementLength - previousLength;
+                        _outboundSignal.Set();
+                        return;
+                    }
+
+                    OutboundMessage coalescedMessage = new OutboundMessage
+                    {
+                        Payload = payload,
+                        TargetPlayerId = targetPlayerId,
+                        CoalesceKey = coalesceKey
+                    };
+                    LinkedListNode<OutboundMessage> coalescedNode =
+                        _pendingMessages.AddLast(coalescedMessage);
+                    _pendingOutgoingLiveSceneMessages[coalesceKey] = coalescedNode;
+                    _pendingMessageBytes += payload != null ? payload.LongLength : 0L;
+                }
+                else
+                {
+                    // Any non-coalescable message is an ordering barrier. Existing queued live
+                    // states stay in place, but later updates may not replace them across it.
+                    _pendingOutgoingLiveSceneMessages.Clear();
+                    _pendingMessages.AddLast(new OutboundMessage
+                    {
+                        Payload = payload,
+                        TargetPlayerId = targetPlayerId
+                    });
+                    _pendingMessageBytes += payload != null ? payload.LongLength : 0L;
+                }
             }
 
             _outboundSignal.Set();
@@ -523,7 +588,20 @@ namespace Glasspage.UnitySync
                     return false;
                 }
 
-                transportEvent = _events.Dequeue();
+                LinkedListNode<UnitySyncTransportEvent> firstNode = _events.First;
+                transportEvent = firstNode.Value;
+                if (TryGetIncomingLiveSceneCoalesceKey(
+                        transportEvent,
+                        out string coalesceKey) &&
+                    _pendingIncomingLiveSceneEvents.TryGetValue(
+                        coalesceKey,
+                        out LinkedListNode<UnitySyncTransportEvent> mappedNode) &&
+                    ReferenceEquals(firstNode, mappedNode))
+                {
+                    _pendingIncomingLiveSceneEvents.Remove(coalesceKey);
+                }
+
+                _events.RemoveFirst();
                 return true;
             }
         }
@@ -639,8 +717,10 @@ namespace Glasspage.UnitySync
                     _pendingLocalViewport = null;
                     selectionPayload = _pendingLocalSelection;
                     _pendingLocalSelection = null;
-                    messages = _pendingMessages.ToArray();
+                    messages = new OutboundMessage[_pendingMessages.Count];
+                    _pendingMessages.CopyTo(messages, 0);
                     _pendingMessages.Clear();
+                    _pendingOutgoingLiveSceneMessages.Clear();
                 }
 
                 if (!_running)
@@ -712,7 +792,7 @@ namespace Glasspage.UnitySync
                     {
                         foreach (OutboundMessage message in messages)
                         {
-                            _pendingMessages.Enqueue(message);
+                            _pendingMessages.AddLast(message);
                         }
                     }
                 }
@@ -1460,7 +1540,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
+                _events.AddLast(new UnitySyncTransportEvent(kind, default, null, Guid.Empty, message));
             }
         }
 
@@ -1468,7 +1548,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.Disconnected,
                     default,
                     null,
@@ -1481,7 +1561,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.Viewport,
                     viewport,
                     null,
@@ -1495,7 +1575,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.Selection,
                     default,
                     null,
@@ -1510,7 +1590,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.AssetImportState,
                     default,
                     null,
@@ -1524,7 +1604,8 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.BuildTarget,
                     default,
                     null,
@@ -1541,7 +1622,8 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.FileSync,
                     default,
                     null,
@@ -1558,7 +1640,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.PeerLeft,
                     default,
                     null,
@@ -1569,14 +1651,40 @@ namespace Glasspage.UnitySync
 
         private void EnqueueSceneChange(Guid playerId, UnitySyncSceneObjectChange change)
         {
+            UnitySyncTransportEvent transportEvent = new UnitySyncTransportEvent(
+                UnitySyncTransportEventKind.SceneObjectChange,
+                default,
+                change,
+                playerId,
+                string.Empty);
+
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
-                    UnitySyncTransportEventKind.SceneObjectChange,
-                    default,
-                    change,
-                    playerId,
-                    string.Empty));
+                if (TryGetIncomingLiveSceneCoalesceKey(
+                        transportEvent,
+                        out string coalesceKey))
+                {
+                    if (_pendingIncomingLiveSceneEvents.TryGetValue(
+                            coalesceKey,
+                            out LinkedListNode<UnitySyncTransportEvent> existingNode) &&
+                        existingNode != null &&
+                        existingNode.List == _events)
+                    {
+                        // Keep the queue position but replace stale intermediate state with the
+                        // newest value. This is the same latest-state principle used by viewport
+                        // and selection transport, without crossing structural ordering barriers.
+                        existingNode.Value = transportEvent;
+                        return;
+                    }
+
+                    LinkedListNode<UnitySyncTransportEvent> node =
+                        _events.AddLast(transportEvent);
+                    _pendingIncomingLiveSceneEvents[coalesceKey] = node;
+                    return;
+                }
+
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(transportEvent);
             }
         }
 
@@ -1584,7 +1692,7 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSnapshotRequest,
                     default,
                     null,
@@ -1599,7 +1707,8 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSnapshotBegin,
                     default,
                     null,
@@ -1615,7 +1724,8 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSnapshotEnd,
                     default,
                     null,
@@ -1631,7 +1741,8 @@ namespace Glasspage.UnitySync
         {
             lock (_eventsLock)
             {
-                _events.Enqueue(new UnitySyncTransportEvent(
+                BreakIncomingLiveSceneCoalescingLocked();
+                _events.AddLast(new UnitySyncTransportEvent(
                     UnitySyncTransportEventKind.SceneSettingsChange,
                     default,
                     null,
@@ -1639,6 +1750,60 @@ namespace Glasspage.UnitySync
                     string.Empty,
                     snapshot));
             }
+        }
+
+        private static bool TryGetLiveSceneStateKey(
+            UnitySyncSceneObjectChange change,
+            out string stateKey)
+        {
+            stateKey = string.Empty;
+            if (change == null ||
+                change.Address == null ||
+                change.SnapshotId != Guid.Empty ||
+                change.Kind != UnitySyncSceneChangeKind.Upsert ||
+                change.HierarchyOnly ||
+                change.ReconcileComponents)
+            {
+                return false;
+            }
+
+            if (change.GameObject != null &&
+                (change.Components == null || change.Components.Length == 0))
+            {
+                stateKey = change.Address.Key + "|g";
+                return true;
+            }
+
+            if (change.GameObject == null &&
+                change.Components != null &&
+                change.Components.Length == 1 &&
+                change.Components[0] != null)
+            {
+                stateKey = change.Address.Key + "|c:" + change.Components[0].ComponentIndex;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetIncomingLiveSceneCoalesceKey(
+            UnitySyncTransportEvent transportEvent,
+            out string coalesceKey)
+        {
+            coalesceKey = string.Empty;
+            if (transportEvent.Kind != UnitySyncTransportEventKind.SceneObjectChange ||
+                !TryGetLiveSceneStateKey(transportEvent.SceneChange, out string stateKey))
+            {
+                return false;
+            }
+
+            coalesceKey = transportEvent.PlayerId.ToString("N") + "|" + stateKey;
+            return true;
+        }
+
+        private void BreakIncomingLiveSceneCoalescingLocked()
+        {
+            _pendingIncomingLiveSceneEvents.Clear();
         }
     }
 }
