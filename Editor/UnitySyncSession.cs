@@ -101,6 +101,10 @@ namespace Glasspage.UnitySync
             UnitySyncFileSynchronizer.GuestPendingDownloadFileCount;
         internal static long PendingFileDownloadBytes =>
             UnitySyncFileSynchronizer.GuestPendingDownloadBytes;
+        internal static long TotalBytesSent =>
+            _transport != null ? _transport.TotalBytesSent : 0L;
+        internal static long TotalBytesReceived =>
+            _transport != null ? _transport.TotalBytesReceived : 0L;
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
         internal static Guid CurrentPlayerId => LocalPlayerId;
         internal static Guid SpectatingPlayerId => _spectatingPlayerId;
@@ -113,6 +117,38 @@ namespace Glasspage.UnitySync
             AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.delayCall += ScheduleFileSyncResume;
+        }
+
+        internal static string GetDebugBackgroundWork()
+        {
+            List<string> work = new List<string>();
+
+            string fileWork = UnitySyncFileSynchronizer.DebugBackgroundWork;
+            if (!string.IsNullOrEmpty(fileWork))
+            {
+                work.Add(fileWork);
+            }
+
+            string sceneWork = UnitySyncSceneSynchronizer.DebugBackgroundWork;
+            if (!string.IsNullOrEmpty(sceneWork))
+            {
+                work.Add(sceneWork);
+            }
+
+            if (_transport != null)
+            {
+                int pendingIncoming = _transport.PendingIncomingEventCount;
+                if (pendingIncoming > 0)
+                {
+                    work.Add(
+                        "processing " + pendingIncoming + " queued network " +
+                        (pendingIncoming == 1 ? "event" : "events"));
+                }
+            }
+
+            return work.Count == 0
+                ? "none"
+                : string.Join(", ", work.ToArray());
         }
 
         internal static bool StartHost(

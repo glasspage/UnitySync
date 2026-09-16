@@ -142,6 +142,8 @@ namespace Glasspage.UnitySync
             _pendingOutgoingLiveSceneMessages =
                 new Dictionary<string, LinkedListNode<OutboundMessage>>(StringComparer.Ordinal);
         private long _pendingMessageBytes;
+        private long _totalBytesSent;
+        private long _totalBytesReceived;
 
         private volatile bool _running;
         private volatile bool _clientReady;
@@ -161,6 +163,18 @@ namespace Glasspage.UnitySync
 
         internal bool IsRunning => _running;
         internal bool IsClientReady => _clientReady;
+        internal long TotalBytesSent => Interlocked.Read(ref _totalBytesSent);
+        internal long TotalBytesReceived => Interlocked.Read(ref _totalBytesReceived);
+        internal int PendingIncomingEventCount
+        {
+            get
+            {
+                lock (_eventsLock)
+                {
+                    return _events.Count;
+                }
+            }
+        }
         internal long PendingOutboundBytes
         {
             get
@@ -1303,6 +1317,7 @@ namespace Glasspage.UnitySync
             }
 
             byte[] envelope = ReadExact(peer.Stream, frameLength);
+            Interlocked.Add(ref _totalBytesReceived, 4L + frameLength);
             byte[] plaintext;
             lock (_cryptoLock)
             {
@@ -1344,6 +1359,9 @@ namespace Glasspage.UnitySync
                 peer.Stream.Write(lengthBytes, 0, lengthBytes.Length);
                 peer.Stream.Write(envelope, 0, envelope.Length);
                 peer.Stream.Flush();
+                Interlocked.Add(
+                    ref _totalBytesSent,
+                    lengthBytes.LongLength + envelope.LongLength);
             }
         }
 

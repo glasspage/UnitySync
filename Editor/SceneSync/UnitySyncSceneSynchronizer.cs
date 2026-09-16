@@ -148,6 +148,30 @@ namespace Glasspage.UnitySync
             EditorApplication.update += UpdateRemoteTransformInterpolations;
         }
 
+        internal static string DebugBackgroundWork
+        {
+            get
+            {
+                if (_remoteSnapshot != null)
+                {
+                    return "applying scene snapshot";
+                }
+
+                if (HierarchyBatches.Count > 0)
+                {
+                    return "sending scene snapshot";
+                }
+
+                if (Pending.Count > 0)
+                {
+                    return "syncing " + Pending.Count + " scene " +
+                           (Pending.Count == 1 ? "change" : "changes");
+                }
+
+                return string.Empty;
+            }
+        }
+
         internal static void BeginSession()
         {
             CompleteRemoteTransformInterpolations();

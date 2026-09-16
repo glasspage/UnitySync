@@ -306,6 +306,44 @@ namespace Glasspage.UnitySync
             (_guestRequestedScope == UnitySyncFileSyncScope.Packages ||
              _guestRequestedScope == UnitySyncFileSyncScope.Project ||
              IsWaitingForRestoreApproval);
+        internal static string DebugBackgroundWork
+        {
+            get
+            {
+                List<string> work = new List<string>();
+
+                if (HostManifestBuilds.Count > 0)
+                {
+                    work.Add("building host file manifest");
+                }
+                if (HostManifestSends.Count > 0)
+                {
+                    work.Add("sending file manifest");
+                }
+                if (HostTransfers.Count > 0)
+                {
+                    work.Add("uploading files");
+                }
+
+                switch (_guestPhase)
+                {
+                    case GuestPhase.WaitingForManifest:
+                        work.Add("receiving file manifest");
+                        break;
+                    case GuestPhase.Comparing:
+                        work.Add("comparing files");
+                        break;
+                    case GuestPhase.Downloading:
+                        work.Add("downloading files");
+                        break;
+                    case GuestPhase.ImportingAssets:
+                        work.Add("importing assets");
+                        break;
+                }
+
+                return string.Join(", ", work.ToArray());
+            }
+        }
         internal static bool IsGuestAwaitingDownloadConfirmation =>
             _guestPhase == GuestPhase.WaitingForConfirmation;
         internal static int GuestPendingDownloadFileCount =>
