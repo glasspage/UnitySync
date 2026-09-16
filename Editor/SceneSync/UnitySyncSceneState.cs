@@ -105,6 +105,9 @@ namespace Glasspage.UnitySync
     internal sealed class UnitySyncSceneSnapshotBoundary
     {
         internal Guid SnapshotId;
+        // Number of snapshot SceneObjectChange packets the host expects to emit. This lets the
+        // guest show real snapshot application progress without estimating from elapsed time.
+        internal int TotalChangeCount;
         // Set on the end boundary. An incomplete snapshot may update objects, but it must not
         // remove unmatched local objects because the host did not provide a complete state.
         internal bool IsComplete = true;
