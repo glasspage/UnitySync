@@ -977,13 +977,14 @@ namespace Glasspage.UnitySync
                         ? path.Substring(0, path.Length - ".meta".Length)
                         : path;
 
-                    // Do not let Unity import a newly received asset before the source
-                    // editor's meta file has arrived. Importing first can generate a local
-                    // meta/GUID, after which scene references carrying the source GUID fail.
-                    if (!isMeta &&
-                        !File.Exists(Path.Combine(
-                            GetProjectRoot(),
-                            (path + ".meta").Replace('/', Path.DirectorySeparatorChar))))
+                    // A new asset and its source .meta must be present together before
+                    // Unity sees either one. Importing the asset first can generate a local
+                    // GUID; refreshing an orphan .meta first can make Unity delete it.
+                    string assetFullPath = Path.Combine(
+                        GetProjectRoot(),
+                        importPath.Replace('/', Path.DirectorySeparatorChar));
+                    string metaFullPath = assetFullPath + ".meta";
+                    if (!File.Exists(assetFullPath) || !File.Exists(metaFullPath))
                     {
                         return;
                     }
