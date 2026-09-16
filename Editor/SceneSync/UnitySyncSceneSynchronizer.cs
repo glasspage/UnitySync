@@ -106,7 +106,9 @@ namespace Glasspage.UnitySync
         private const int MaximumDeferredRemoteRetriesPerUpdate = 8;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
-        // The time budget remains the primary frame-time guard. A 16-object cap made cheap\n        // unchanged hierarchy snapshots artificially take several seconds in large scenes.\n        private const int SnapshotObjectsPerUpdate = 128;
+        // The time budget remains the primary frame-time guard. A 16-object cap made cheap
+        // unchanged hierarchy snapshots artificially take several seconds in large scenes.
+        private const int SnapshotObjectsPerUpdate = 128;
         private const double CaptureBudgetSeconds = 0.008;
 
         private static readonly ProfilerMarker SceneSettingsFlushMarker =
