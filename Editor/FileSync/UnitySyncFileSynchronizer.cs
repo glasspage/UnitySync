@@ -183,7 +183,7 @@ namespace Glasspage.UnitySync
         }
 
         private const string ExcludedFolderName = "SerializedUdonPrograms";
-        private const int CompareFilesPerUpdate = 12;
+        private const int UncachedCompareFilesPerUpdate = 12;
         private const int CachedCompareFilesPerUpdate = 512;
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 512;
@@ -1307,8 +1307,7 @@ namespace Glasspage.UnitySync
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
                         IsUnderPackageRootToReplace(entry.Path);
                     if (!_guestForceRestore && !replaceWholePackage &&
-                        TryGetFullSyncPath(entry.Path, out string fullPath) &&
-                        File.Exists(fullPath))
+                        TryGetFullSyncPath(entry.Path, out string fullPath))
                     {
                         bool cached = UnitySyncFileHashCache.TryGetCachedHash(
                             projectRoot,
@@ -1324,7 +1323,7 @@ namespace Glasspage.UnitySync
                         }
                         else if (localLength == entry.Length)
                         {
-                            if (uncachedHashes >= CompareFilesPerUpdate)
+                            if (uncachedHashes >= UncachedCompareFilesPerUpdate)
                             {
                                 break;
                             }
