@@ -56,6 +56,7 @@ namespace Glasspage.UnitySync
         {
             internal UnitySyncSceneSnapshotBoundary Boundary;
             internal bool HasApplyFailure;
+            internal int AppliedChangeCount;
             internal readonly HashSet<string> RepresentedObjectIds =
                 new HashSet<string>(StringComparer.Ordinal);
         }
@@ -301,6 +302,26 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            int totalChangeCount = batch.Objects != null ? batch.Objects.Count : 0;
+            foreach (GameObject gameObject in batch.Objects ?? new List<GameObject>())
+            {
+                if (gameObject == null ||
+                    !batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
+                {
+                    continue;
+                }
+
+                Component[] components = gameObject.GetComponents<Component>();
+                foreach (Component component in components)
+                {
+                    if (component != null)
+                    {
+                        totalChangeCount++;
+                    }
+                }
+            }
+
+            batch.Snapshot.TotalChangeCount = totalChangeCount;
             HierarchyBatches.Enqueue(batch);
         }
 
@@ -370,6 +391,24 @@ namespace Glasspage.UnitySync
             {
                 Boundary = snapshot
             };
+            UnitySyncPresenceRoot.RequestSceneRepaint();
+            return true;
+        }
+
+        internal static bool TryGetRemoteSnapshotProgress(out float progress01)
+        {
+            if (_remoteSnapshot == null)
+            {
+                progress01 = 0f;
+                return false;
+            }
+
+            int total = _remoteSnapshot.Boundary != null
+                ? _remoteSnapshot.Boundary.TotalChangeCount
+                : 0;
+            progress01 = total > 0
+                ? Mathf.Clamp01(_remoteSnapshot.AppliedChangeCount / (float)total)
+                : 0f;
             return true;
         }
 
@@ -389,6 +428,7 @@ namespace Glasspage.UnitySync
             if (!hostStateComplete)
             {
                 _remoteSnapshot = null;
+                UnitySyncPresenceRoot.RequestSceneRepaint();
                 ScheduleSnapshotChangeSuppressionRelease();
                 error = "The host could not serialize one or more objects, so unmatched local " +
                         "objects were kept instead of being removed.";
@@ -398,6 +438,7 @@ namespace Glasspage.UnitySync
             if (completedSnapshot.HasApplyFailure)
             {
                 _remoteSnapshot = null;
+                UnitySyncPresenceRoot.RequestSceneRepaint();
                 ScheduleSnapshotChangeSuppressionRelease();
                 error = "One or more host objects could not be applied, so unmatched local " +
                         "objects were kept instead of being removed.";
@@ -442,6 +483,7 @@ namespace Glasspage.UnitySync
             {
                 _applyingRemoteChange = false;
                 _remoteSnapshot = null;
+                UnitySyncPresenceRoot.RequestSceneRepaint();
                 Pending.Clear();
                 PendingOrder.Clear();
                 PendingKeysByInstanceId.Clear();
@@ -630,6 +672,12 @@ namespace Glasspage.UnitySync
             {
                 error = "The scene update does not belong to the active host snapshot.";
                 return false;
+            }
+
+            if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
+            {
+                _remoteSnapshot.AppliedChangeCount++;
+                UnitySyncPresenceRoot.RequestSceneRepaint();
             }
 
             if (change.SnapshotId == Guid.Empty)
