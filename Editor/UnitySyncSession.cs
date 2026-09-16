@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
 using UnityEditor.Build;
+using UnityEditor.SceneManagement;
 using Unity.Profiling;
 using UnityEngine;
 
@@ -56,6 +57,8 @@ namespace Glasspage.UnitySync
 
         private static readonly Guid LocalPlayerId;
         private static readonly List<string> Logs = new List<string>();
+        private static readonly HashSet<Guid> HostProjectSyncPlayers = new HashSet<Guid>();
+        private static readonly HashSet<Guid> HostSceneSyncPlayers = new HashSet<Guid>();
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
         private static string _displayName = "Collaborator";
@@ -88,6 +91,8 @@ namespace Glasspage.UnitySync
         private static string _hostBuildTargetName = string.Empty;
         private static bool _suppressBuildTargetChanged;
         private static BuildTarget _suppressedBuildTarget = BuildTarget.NoTarget;
+        private static bool _hostProjectSyncActive;
+        private static bool _hostSceneSyncActive;
 
         internal static event Action Changed;
 
@@ -165,6 +170,16 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            // A saved scene gives file synchronization a stable baseline and avoids
+            // replaying an otherwise-identical dirty scene as full component state.
+            // Save before opening the listener so cancelling/failing the save never
+            // leaves a partially-started host session behind.
+            if (!EditorSceneManager.SaveOpenScenes())
+            {
+                error = "Could not save all open scenes. Hosting was not started.";
+                return false;
+            }
+
             if (!UnitySyncJoinCode.TryCreate(advertisedAddress, port, out string code, out byte[] secret, out error))
             {
                 return false;
@@ -190,8 +205,10 @@ namespace Glasspage.UnitySync
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
                 ResetLocalAssetImportStatusTracking();
-                UnitySyncSceneSynchronizer.BeginSession();
-                UnitySyncProjectSynchronizer.BeginSession();
+                HostProjectSyncPlayers.Clear();
+                HostSceneSyncPlayers.Clear();
+                _hostProjectSyncActive = false;
+                _hostSceneSyncActive = false;
                 UnitySyncPresenceRoot.AddTimedStatus(
                     "Session started",
                     Color.white,
@@ -629,6 +646,13 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.PeerLeft:
+                        if (_state == UnitySyncSessionState.Hosting)
+                        {
+                            HostSceneSyncPlayers.Remove(transportEvent.PlayerId);
+                            HostProjectSyncPlayers.Remove(transportEvent.PlayerId);
+                            UpdateHostSynchronizerActivity();
+                        }
+
                         if (UnitySyncPresenceRoot.TryGetViewport(
                                 transportEvent.PlayerId,
                                 out UnitySyncViewportState departingViewport))
@@ -681,6 +705,14 @@ namespace Glasspage.UnitySync
                         break;
 
                     case UnitySyncTransportEventKind.FileSync:
+                        if (_state == UnitySyncSessionState.Hosting &&
+                            (transportEvent.MessageType == UnitySyncMessageType.FileSyncRequest ||
+                             transportEvent.MessageType == UnitySyncMessageType.RestoreProjectRequest))
+                        {
+                            HostProjectSyncPlayers.Add(transportEvent.PlayerId);
+                            EnsureHostProjectSynchronizerStarted();
+                        }
+
                         bool isProjectUpdate =
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileBegin ||
                             transportEvent.MessageType == UnitySyncMessageType.ProjectFileChunk ||
@@ -783,6 +815,14 @@ namespace Glasspage.UnitySync
                         if (IsGuestSyncDeferred)
                         {
                             break;
+                        }
+
+                        if (_state == UnitySyncSessionState.Hosting)
+                        {
+                            HostProjectSyncPlayers.Add(transportEvent.PlayerId);
+                            HostSceneSyncPlayers.Add(transportEvent.PlayerId);
+                            EnsureHostProjectSynchronizerStarted();
+                            EnsureHostSceneSynchronizerStarted();
                         }
 
                         UnitySyncSceneSynchronizer.QueueFullSceneSnapshot(transportEvent.PlayerId);
@@ -889,9 +929,14 @@ namespace Glasspage.UnitySync
             }
 
             bool guestFileSyncing = UnitySyncFileSynchronizer.IsGuestSyncing;
+            bool liveSceneSyncReady =
+                _state == UnitySyncSessionState.Connected ||
+                (_state == UnitySyncSessionState.Hosting &&
+                 _hostSceneSyncActive &&
+                 HostSceneSyncPlayers.Count > 0);
             if (!guestFileSyncing &&
                 !EditorApplication.isPlayingOrWillChangePlaymode &&
-                (_state == UnitySyncSessionState.Hosting || _state == UnitySyncSessionState.Connected))
+                liveSceneSyncReady)
             {
                 using (ProjectSyncUpdateMarker.Auto())
                 {
@@ -1423,6 +1468,48 @@ namespace Glasspage.UnitySync
                    Mathf.Approximately(left.a, right.a);
         }
 
+        private static void EnsureHostProjectSynchronizerStarted()
+        {
+            if (_state != UnitySyncSessionState.Hosting || _hostProjectSyncActive)
+            {
+                return;
+            }
+
+            UnitySyncProjectSynchronizer.BeginSession();
+            _hostProjectSyncActive = true;
+        }
+
+        private static void EnsureHostSceneSynchronizerStarted()
+        {
+            if (_state != UnitySyncSessionState.Hosting || _hostSceneSyncActive)
+            {
+                return;
+            }
+
+            UnitySyncSceneSynchronizer.BeginSession();
+            _hostSceneSyncActive = true;
+        }
+
+        private static void UpdateHostSynchronizerActivity()
+        {
+            if (_state != UnitySyncSessionState.Hosting)
+            {
+                return;
+            }
+
+            if (_hostSceneSyncActive && HostSceneSyncPlayers.Count == 0)
+            {
+                UnitySyncSceneSynchronizer.EndSession();
+                _hostSceneSyncActive = false;
+            }
+
+            if (_hostProjectSyncActive && HostProjectSyncPlayers.Count == 0)
+            {
+                UnitySyncProjectSynchronizer.EndSession();
+                _hostProjectSyncActive = false;
+            }
+        }
+
         private static void StopInternal(bool addLog, bool showEndedStatus)
         {
             bool wasActiveSession =
@@ -1447,6 +1534,10 @@ namespace Glasspage.UnitySync
             UnitySyncFileSynchronizer.EndSession();
             UnitySyncProjectSynchronizer.EndSession();
             UnitySyncSceneSynchronizer.EndSession();
+            HostProjectSyncPlayers.Clear();
+            HostSceneSyncPlayers.Clear();
+            _hostProjectSyncActive = false;
+            _hostSceneSyncActive = false;
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();
             _hasLastViewportState = false;
