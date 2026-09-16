@@ -44,6 +44,7 @@ namespace Glasspage.UnitySync
             internal UnitySyncSceneSnapshotBoundary Snapshot;
             internal List<GameObject> Objects;
             internal readonly HashSet<int> FullStateSceneHandles = new HashSet<int>();
+            internal readonly HashSet<int> FullStateComponentInstanceIds = new HashSet<int>();
             internal readonly HashSet<string> SentHierarchyObjectIds =
                 new HashSet<string>(StringComparer.Ordinal);
             internal int Index;
@@ -283,9 +284,10 @@ namespace Glasspage.UnitySync
 
             // File/asset synchronization completes before the guest requests this snapshot,
             // and PrepareScenesForSnapshot opens those synchronized scene assets on the guest.
-            // A saved, clean host scene therefore already has its full serialized component
-            // state on disk at both ends. Only dirty/unsaved scenes need an expensive full-state
-            // replay; all scenes still receive the hierarchy pass so object IDs are established.
+            // Saved scene files therefore provide the shared component baseline. For a dirty
+            // saved scene, replay only components Unity actually marks dirty; otherwise a tiny
+            // unsaved edit makes the guest deeply compare every component in the scene. Unsaved
+            // scenes have no shared file baseline, so they still require every component.
             for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
             {
                 Scene scene = SceneManager.GetSceneAt(sceneIndex);
@@ -302,7 +304,6 @@ namespace Glasspage.UnitySync
                 }
             }
 
-            int totalChangeCount = batch.Objects != null ? batch.Objects.Count : 0;
             foreach (GameObject gameObject in batch.Objects ?? new List<GameObject>())
             {
                 if (gameObject == null ||
@@ -311,17 +312,21 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
+                bool sendEveryComponent = string.IsNullOrEmpty(gameObject.scene.path);
                 Component[] components = gameObject.GetComponents<Component>();
                 foreach (Component component in components)
                 {
-                    if (component != null)
+                    if (component != null &&
+                        (sendEveryComponent || EditorUtility.IsDirty(component)))
                     {
-                        totalChangeCount++;
+                        batch.FullStateComponentInstanceIds.Add(component.GetInstanceID());
                     }
                 }
             }
 
-            batch.Snapshot.TotalChangeCount = totalChangeCount;
+            batch.Snapshot.TotalChangeCount =
+                (batch.Objects != null ? batch.Objects.Count : 0) +
+                batch.FullStateComponentInstanceIds.Count;
             HierarchyBatches.Enqueue(batch);
         }
 
@@ -1530,10 +1535,17 @@ namespace Glasspage.UnitySync
                 }
 
                 Component[] components = gameObject.GetComponents<Component>();
-                while (batch.ComponentIndex < components.Length &&
-                       components[batch.ComponentIndex] == null)
+                while (batch.ComponentIndex < components.Length)
                 {
-                    // Missing-script slots have no serialized state beyond the hierarchy packet.
+                    Component candidate = components[batch.ComponentIndex];
+                    if (candidate != null &&
+                        batch.FullStateComponentInstanceIds.Contains(candidate.GetInstanceID()))
+                    {
+                        break;
+                    }
+
+                    // Missing-script slots and unchanged components need no serialized state
+                    // beyond the hierarchy packet / synchronized saved scene baseline.
                     batch.ComponentIndex++;
                 }
 
