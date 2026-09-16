@@ -20,7 +20,7 @@ namespace Glasspage.UnitySync
     internal static class UnitySyncSession
     {
         private const double SendIntervalSeconds = 0.1;
-        private const int MaximumIncomingEventsPerUpdate = 64;
+        private const int MaximumIncomingEventsPerUpdate = 128;
         private const double IncomingEventBudgetSeconds = 0.008;
         private const string PlayerIdSessionKey = "Glasspage.UnitySync.PlayerId";
         private const string FileSyncResumePendingKey = "Glasspage.UnitySync.FileSyncResume.Pending";
