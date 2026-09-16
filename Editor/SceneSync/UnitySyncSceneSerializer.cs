@@ -3322,13 +3322,16 @@ namespace Glasspage.UnitySync
             error = string.Empty;
             SerializedObject serializedObject = new SerializedObject(component);
             serializedObject.UpdateIfRequiredOrScript();
+            UnitySyncSerializedPropertyState[] properties =
+                state.Properties ?? new UnitySyncSerializedPropertyState[0];
+            Type componentType = component.GetType();
 
             using (AtomicStructureMarker.Auto())
             {
-                foreach (UnitySyncSerializedPropertyState propertyState in
-                         state.Properties ?? new UnitySyncSerializedPropertyState[0])
+                foreach (UnitySyncSerializedPropertyState propertyState in properties)
                 {
-                    if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
+                    if (propertyState == null ||
+                        IsIgnoredPropertyPath(propertyState.Path, componentType))
                     {
                         continue;
                     }
@@ -3347,48 +3350,61 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            Dictionary<string, SerializedProperty> propertyLookup;
+            HashSet<string> objectReferencePaths;
             using (AtomicValuesMarker.Auto())
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
             {
-                if (propertyState == null || IsIgnoredPropertyPath(propertyState.Path, component.GetType()))
-                {
-                    continue;
-                }
+                // UdonBehaviour can expose thousands of serialized value entries. Resolving every
+                // incoming path independently with SerializedObject.FindProperty makes this phase
+                // effectively quadratic in large behaviours. Walk the serialized layout once and
+                // reuse O(1) lookups for both scalar values and the following reference phase.
+                propertyLookup = BuildSerializedPropertyLookup(
+                    serializedObject,
+                    out objectReferencePaths);
 
-                if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
-                    propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
-                    IsObjectReferenceKind(propertyState.Kind))
+                foreach (UnitySyncSerializedPropertyState propertyState in properties)
                 {
-                    continue;
-                }
+                    if (propertyState == null ||
+                        IsIgnoredPropertyPath(propertyState.Path, componentType))
+                    {
+                        continue;
+                    }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property != null)
-                {
-                    ApplyProperty(property, propertyState);
+                    if (propertyState.Kind == UnitySyncSerializedValueKind.ArraySize ||
+                        propertyState.Kind == UnitySyncSerializedValueKind.ManagedReference ||
+                        IsObjectReferenceKind(propertyState.Kind))
+                    {
+                        continue;
+                    }
+
+                    if (propertyLookup.TryGetValue(
+                            propertyState.Path,
+                            out SerializedProperty property))
+                    {
+                        ApplyProperty(property, propertyState, objectReferencePaths);
+                    }
                 }
             }
 
             using (AtomicReferencesMarker.Auto())
-            foreach (UnitySyncSerializedPropertyState propertyState in
-                     state.Properties ?? new UnitySyncSerializedPropertyState[0])
+            foreach (UnitySyncSerializedPropertyState propertyState in properties)
             {
                 if (propertyState == null ||
-                    IsIgnoredPropertyPath(propertyState.Path, component.GetType()) ||
+                    IsIgnoredPropertyPath(propertyState.Path, componentType) ||
                     !IsObjectReferenceKind(propertyState.Kind))
                 {
                     continue;
                 }
 
-                SerializedProperty property = serializedObject.FindProperty(propertyState.Path);
-                if (property == null ||
+                if (!propertyLookup.TryGetValue(
+                        propertyState.Path,
+                        out SerializedProperty property) ||
                     !IsSerializedPropertyKindCompatible(property, propertyState.Kind) ||
                     !CanApplyObjectReference(property, propertyState.ObjectReference))
                 {
                     error = "Object reference " + propertyState.Path +
                             " does not match the local serialized layout on " +
-                            component.GetType().Name + ".";
+                            componentType.Name + ".";
                     return false;
                 }
 
@@ -3397,7 +3413,7 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + propertyState.Path +
                             " could not be matched safely for local field type " +
-                            property.type + " on " + component.GetType().Name + ". " +
+                            property.type + " on " + componentType.Name + ". " +
                             DescribeObjectReference(propertyState.ObjectReference);
                     return false;
                 }
@@ -3437,7 +3453,7 @@ namespace Glasspage.UnitySync
                 {
                     error = "Object reference " + assignment.Path +
                             " disappeared from the staged serialized layout on " +
-                            component.GetType().Name + ".";
+                            componentType.Name + ".";
                     return false;
                 }
 
@@ -3447,7 +3463,7 @@ namespace Glasspage.UnitySync
                 if (appliedValue != assignment.Value)
                 {
                     error = "Object reference " + assignment.Path + " on staged " +
-                            component.GetType().Name +
+                            componentType.Name +
                             " did not retain the resolved local object.";
                     return false;
                 }
@@ -3579,8 +3595,19 @@ namespace Glasspage.UnitySync
         private static Dictionary<string, SerializedProperty> BuildSerializedPropertyLookup(
             SerializedObject serializedObject)
         {
+            HashSet<string> unusedObjectReferencePaths;
+            return BuildSerializedPropertyLookup(
+                serializedObject,
+                out unusedObjectReferencePaths);
+        }
+
+        private static Dictionary<string, SerializedProperty> BuildSerializedPropertyLookup(
+            SerializedObject serializedObject,
+            out HashSet<string> objectReferencePaths)
+        {
             Dictionary<string, SerializedProperty> lookup =
                 new Dictionary<string, SerializedProperty>(StringComparer.Ordinal);
+            objectReferencePaths = new HashSet<string>(StringComparer.Ordinal);
             if (serializedObject == null)
             {
                 return lookup;
@@ -3591,7 +3618,13 @@ namespace Glasspage.UnitySync
             while (iterator.Next(enterChildren))
             {
                 enterChildren = true;
-                lookup[iterator.propertyPath] = iterator.Copy();
+                string propertyPath = iterator.propertyPath;
+                lookup[propertyPath] = iterator.Copy();
+                if (iterator.propertyType == SerializedPropertyType.ObjectReference ||
+                    iterator.propertyType == SerializedPropertyType.ExposedReference)
+                {
+                    objectReferencePaths.Add(propertyPath);
+                }
             }
 
             return lookup;
@@ -3896,19 +3929,31 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool IsObjectReferenceChild(SerializedProperty property)
+        private static bool IsObjectReferenceChild(
+            SerializedProperty property,
+            HashSet<string> objectReferencePaths)
         {
             string path = property.propertyPath;
             int separator = path.LastIndexOf('.');
             while (separator >= 0)
             {
                 path = path.Substring(0, separator);
-                SerializedProperty ancestor = property.serializedObject.FindProperty(path);
-                if (ancestor != null &&
-                    (ancestor.propertyType == SerializedPropertyType.ObjectReference ||
-                     ancestor.propertyType == SerializedPropertyType.ExposedReference))
+                if (objectReferencePaths != null)
                 {
-                    return true;
+                    if (objectReferencePaths.Contains(path))
+                    {
+                        return true;
+                    }
+                }
+                else
+                {
+                    SerializedProperty ancestor = property.serializedObject.FindProperty(path);
+                    if (ancestor != null &&
+                        (ancestor.propertyType == SerializedPropertyType.ObjectReference ||
+                         ancestor.propertyType == SerializedPropertyType.ExposedReference))
+                    {
+                        return true;
+                    }
                 }
 
                 separator = path.LastIndexOf('.');
@@ -3919,11 +3964,14 @@ namespace Glasspage.UnitySync
 
         private static bool ApplyProperty(
             SerializedProperty property,
-            UnitySyncSerializedPropertyState state)
+            UnitySyncSerializedPropertyState state,
+            HashSet<string> objectReferencePaths = null)
         {
             // Also reject pointer children sent by older hosts. Check the local layout,
             // not field-name suffixes, so unrelated user fields remain synchronizable.
-            if (IsObjectReferenceChild(property))
+            // Hot paths can supply the precomputed reference-root set to avoid repeated
+            // SerializedObject.FindProperty calls for every ancestor of every value.
+            if (IsObjectReferenceChild(property, objectReferencePaths))
             {
                 return false;
             }
