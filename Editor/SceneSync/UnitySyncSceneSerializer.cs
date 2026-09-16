@@ -322,7 +322,17 @@ namespace Glasspage.UnitySync
                     return FloatValuesEqual(expected.FloatValues, color.r, color.g, color.b, color.a);
 
                 case SerializedPropertyType.ObjectReference:
+                    return SnapshotObjectReferencePropertyMatchesState(
+                        property,
+                        expected,
+                        UnitySyncSerializedValueKind.ObjectReference);
+
                 case SerializedPropertyType.ExposedReference:
+                    return SnapshotObjectReferencePropertyMatchesState(
+                        property,
+                        expected,
+                        UnitySyncSerializedValueKind.ExposedReference);
+
                 case SerializedPropertyType.Gradient:
                     if (!TryCaptureProperty(property, out UnitySyncSerializedPropertyState captured))
                     {
@@ -507,6 +517,112 @@ namespace Glasspage.UnitySync
             }
         }
 
+        private static bool SnapshotObjectReferencePropertyMatchesState(
+            SerializedProperty property,
+            UnitySyncSerializedPropertyState expected,
+            UnitySyncSerializedValueKind kind)
+        {
+            if (!PropertyHeaderMatches(property, expected, kind) ||
+                expected.ObjectReference == null)
+            {
+                return false;
+            }
+
+            Object value;
+            if (kind == UnitySyncSerializedValueKind.ObjectReference)
+            {
+                int instanceId = property.objectReferenceInstanceIDValue;
+                value = instanceId == 0 ? null : EditorUtility.InstanceIDToObject(instanceId);
+                if (instanceId != 0 && value == null)
+                {
+                    // Match the normal capture path: missing Mesh/Material references are
+                    // intentionally represented as null, while other unresolved PPtrs are unsafe.
+                    bool supportedMissingReference =
+                        property.type == "PPtr<Mesh>" ||
+                        property.type == "PPtr<$Mesh>" ||
+                        property.type == "PPtr<Material>" ||
+                        property.type == "PPtr<$Material>";
+                    if (!supportedMissingReference)
+                    {
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                value = property.exposedReferenceValue;
+            }
+
+            UnitySyncObjectReferenceState localReference = new UnitySyncObjectReferenceState
+            {
+                SerializedPropertyTypeName = property.type
+            };
+
+            if (value == null)
+            {
+                localReference.Kind = UnitySyncObjectReferenceKind.Null;
+                return ObjectReferencesEqual(localReference, expected.ObjectReference);
+            }
+
+            localReference.ObjectTypeName = GetStableTypeName(value.GetType());
+            string assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty;
+            if (EditorUtility.IsPersistent(value) || IsBuiltinAssetPath(assetPath))
+            {
+                bool hasFileIdentifier = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(
+                    value,
+                    out string guid,
+                    out long localFileId);
+                if ((!hasFileIdentifier || string.IsNullOrEmpty(guid)) &&
+                    !IsBuiltinAssetPath(assetPath))
+                {
+                    return false;
+                }
+
+                localReference.Kind = UnitySyncObjectReferenceKind.Asset;
+                localReference.AssetGuid = guid ?? string.Empty;
+                localReference.AssetPath = assetPath;
+                localReference.LocalFileId = localFileId;
+                return ObjectReferencesEqual(localReference, expected.ObjectReference);
+            }
+
+            GameObject referencedGameObject;
+            int componentIndex;
+            if (value is GameObject gameObject)
+            {
+                referencedGameObject = gameObject;
+                componentIndex = -1;
+            }
+            else if (value is Component component)
+            {
+                referencedGameObject = component.gameObject;
+                componentIndex = GetComponentIndex(component.gameObject, component);
+                if (componentIndex < 0)
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            if (!UnitySyncSceneObjectRegistry.TryGetId(
+                    referencedGameObject,
+                    out string objectId) ||
+                string.IsNullOrEmpty(objectId))
+            {
+                return false;
+            }
+
+            localReference.Kind = UnitySyncObjectReferenceKind.SceneObject;
+            localReference.ComponentIndex = componentIndex;
+            localReference.SceneObject = new UnitySyncSceneObjectAddress
+            {
+                ObjectId = objectId
+            };
+            return ObjectReferencesEqual(localReference, expected.ObjectReference);
+        }
+
         private static bool PropertyHeaderMatches(
             SerializedProperty property,
             UnitySyncSerializedPropertyState expected,
@@ -608,20 +724,43 @@ namespace Glasspage.UnitySync
                     return true;
 
                 case UnitySyncObjectReferenceKind.Asset:
-                    return left.LocalFileId == right.LocalFileId &&
-                           string.Equals(left.ObjectTypeName, right.ObjectTypeName, StringComparison.Ordinal) &&
-                           string.Equals(left.AssetGuid, right.AssetGuid, StringComparison.Ordinal) &&
-                           string.Equals(left.AssetPath, right.AssetPath, StringComparison.Ordinal) &&
-                           string.Equals(left.AssetName, right.AssetName, StringComparison.Ordinal) &&
-                           string.Equals(
-                               left.AssetContentHash,
-                               right.AssetContentHash,
-                               StringComparison.Ordinal);
+                    if (left.LocalFileId != right.LocalFileId ||
+                        !string.Equals(
+                            left.ObjectTypeName,
+                            right.ObjectTypeName,
+                            StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    // GUID + local file ID identify normal project assets. Built-in resources can
+                    // lack a GUID, so retain their engine-owned path as the fallback identity.
+                    if (!string.IsNullOrEmpty(left.AssetGuid) ||
+                        !string.IsNullOrEmpty(right.AssetGuid))
+                    {
+                        return string.Equals(
+                            left.AssetGuid,
+                            right.AssetGuid,
+                            StringComparison.Ordinal);
+                    }
+
+                    return string.Equals(
+                        left.AssetPath,
+                        right.AssetPath,
+                        StringComparison.Ordinal);
 
                 case UnitySyncObjectReferenceKind.SceneObject:
                     return left.ComponentIndex == right.ComponentIndex &&
-                           string.Equals(left.ObjectTypeName, right.ObjectTypeName, StringComparison.Ordinal) &&
-                           SceneAddressesEqual(left.SceneObject, right.SceneObject);
+                           string.Equals(
+                               left.ObjectTypeName,
+                               right.ObjectTypeName,
+                               StringComparison.Ordinal) &&
+                           left.SceneObject != null &&
+                           right.SceneObject != null &&
+                           string.Equals(
+                               left.SceneObject.ObjectId,
+                               right.SceneObject.ObjectId,
+                               StringComparison.Ordinal);
 
                 default:
                     return false;
