@@ -87,6 +87,14 @@ namespace Glasspage.UnitySync
             internal readonly HashSet<int> PendingComponentIndices = new HashSet<int>();
         }
 
+        private sealed class DeferredRemoteChange
+        {
+            internal UnitySyncSceneObjectChange Change;
+            internal string StateHash = string.Empty;
+            internal string LastError = string.Empty;
+            internal double NextRetryTime;
+        }
+
         private const double FlushIntervalSeconds = 0.05;
         private const double TransformSyncIntervalSeconds = 0.1;
         private const double OtherSyncIntervalSeconds = 1.0;
@@ -94,6 +102,8 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const double RemoteInitializationTimeoutSeconds = 2.0;
+        private const double DeferredRemoteAssetRetryDelaySeconds = 2.0;
+        private const int MaximumDeferredRemoteRetriesPerUpdate = 8;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
         private const int SnapshotObjectsPerUpdate = 16;
@@ -134,6 +144,8 @@ namespace Glasspage.UnitySync
             new Dictionary<string, RemoteInitializationState>(StringComparer.Ordinal);
         private static readonly HashSet<string> CompletedRemoteInitializations =
             new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, DeferredRemoteChange> DeferredRemoteChanges =
+            new Dictionary<string, DeferredRemoteChange>(StringComparer.Ordinal);
         private static readonly Queue<HierarchyBatch> HierarchyBatches =
             new Queue<HierarchyBatch>();
         private static readonly HashSet<int> BatchedObjectInstanceIds =
@@ -162,6 +174,7 @@ namespace Glasspage.UnitySync
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
             EditorSceneManager.sceneSaved += OnSceneSaved;
             EditorApplication.update += UpdateRemoteTransformInterpolations;
+            EditorApplication.update += UpdateDeferredRemoteChanges;
         }
 
         internal static string DebugBackgroundWork
@@ -176,6 +189,11 @@ namespace Glasspage.UnitySync
                 if (HierarchyBatches.Count > 0)
                 {
                     return "sending scene snapshot";
+                }
+
+                if (DeferredRemoteChanges.Count > 0)
+                {
+                    return "waiting for synchronized asset";
                 }
 
                 if (Pending.Count > 0)
@@ -206,6 +224,7 @@ namespace Glasspage.UnitySync
             RemoteTransformInterpolations.Clear();
             RemoteInitializations.Clear();
             CompletedRemoteInitializations.Clear();
+            DeferredRemoteChanges.Clear();
             EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
@@ -233,6 +252,7 @@ namespace Glasspage.UnitySync
             RemoteTransformInterpolations.Clear();
             RemoteInitializations.Clear();
             CompletedRemoteInitializations.Clear();
+            DeferredRemoteChanges.Clear();
             EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
@@ -686,6 +706,14 @@ namespace Glasspage.UnitySync
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
         {
+            return ApplyRemoteChangeInternal(change, true, out error);
+        }
+
+        private static bool ApplyRemoteChangeInternal(
+            UnitySyncSceneObjectChange change,
+            bool allowAssetReferenceDeferral,
+            out string error)
+        {
             error = string.Empty;
             if (change == null)
             {
@@ -760,6 +788,14 @@ namespace Glasspage.UnitySync
                 {
                     if (!UnitySyncSceneSerializer.Apply(change, out error))
                     {
+                        if (allowAssetReferenceDeferral &&
+                            IsRetryableProjectAssetResolutionFailure(change, error))
+                        {
+                            QueueDeferredRemoteChange(change, error);
+                            error = string.Empty;
+                            return true;
+                        }
+
                         if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
                         {
                             _remoteSnapshot.HasApplyFailure = true;
@@ -767,6 +803,11 @@ namespace Glasspage.UnitySync
 
                         return false;
                     }
+                }
+
+                if (change.SnapshotId == Guid.Empty)
+                {
+                    DeferredRemoteChanges.Remove(GetStateKey(change));
                 }
 
                 UpdateSnapshotComponentCacheAfterApply(change);
@@ -841,6 +882,147 @@ namespace Glasspage.UnitySync
             {
                 _applyingRemoteChange = false;
             }
+        }
+
+        private static void QueueDeferredRemoteChange(
+            UnitySyncSceneObjectChange change,
+            string error)
+        {
+            string stateKey = GetStateKey(change);
+            string stateHash = TryGetHash(change, out string capturedHash)
+                ? capturedHash
+                : string.Empty;
+            double now = EditorApplication.timeSinceStartup;
+
+            if (DeferredRemoteChanges.TryGetValue(
+                    stateKey,
+                    out DeferredRemoteChange existing) &&
+                !string.IsNullOrEmpty(stateHash) &&
+                string.Equals(existing.StateHash, stateHash, StringComparison.Ordinal))
+            {
+                existing.Change = change;
+                existing.LastError = error;
+                existing.NextRetryTime = now + DeferredRemoteAssetRetryDelaySeconds;
+                return;
+            }
+
+            DeferredRemoteChanges[stateKey] = new DeferredRemoteChange
+            {
+                Change = change,
+                StateHash = stateHash,
+                LastError = error,
+                NextRetryTime = now + DeferredRemoteAssetRetryDelaySeconds
+            };
+        }
+
+        private static void UpdateDeferredRemoteChanges()
+        {
+            if (!_active ||
+                _applyingRemoteChange ||
+                DeferredRemoteChanges.Count == 0 ||
+                EditorApplication.isCompiling ||
+                EditorApplication.isUpdating ||
+                EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            List<string> readyKeys = null;
+            foreach (KeyValuePair<string, DeferredRemoteChange> pair in DeferredRemoteChanges)
+            {
+                if (pair.Value != null && pair.Value.NextRetryTime <= now)
+                {
+                    if (readyKeys == null)
+                    {
+                        readyKeys = new List<string>();
+                    }
+
+                    readyKeys.Add(pair.Key);
+                    if (readyKeys.Count >= MaximumDeferredRemoteRetriesPerUpdate)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (readyKeys == null)
+            {
+                return;
+            }
+
+            foreach (string stateKey in readyKeys)
+            {
+                if (!DeferredRemoteChanges.TryGetValue(
+                        stateKey,
+                        out DeferredRemoteChange deferred) ||
+                    deferred == null ||
+                    deferred.Change == null)
+                {
+                    DeferredRemoteChanges.Remove(stateKey);
+                    continue;
+                }
+
+                if (ApplyRemoteChangeInternal(
+                        deferred.Change,
+                        false,
+                        out string retryError))
+                {
+                    DeferredRemoteChanges.Remove(stateKey);
+                    continue;
+                }
+
+                DeferredRemoteChanges.Remove(stateKey);
+                UnitySyncSession.ReportDeferredSceneSyncFailure(
+                    string.IsNullOrEmpty(retryError) ? deferred.LastError : retryError);
+            }
+        }
+
+        private static bool IsRetryableProjectAssetResolutionFailure(
+            UnitySyncSceneObjectChange change,
+            string error)
+        {
+            if (change == null ||
+                change.SnapshotId != Guid.Empty ||
+                string.IsNullOrEmpty(error))
+            {
+                return false;
+            }
+
+            foreach (UnitySyncComponentState component in
+                     change.Components ?? new UnitySyncComponentState[0])
+            {
+                if (component == null)
+                {
+                    continue;
+                }
+
+                foreach (UnitySyncSerializedPropertyState property in
+                         component.Properties ?? new UnitySyncSerializedPropertyState[0])
+                {
+                    UnitySyncObjectReferenceState reference =
+                        property != null ? property.ObjectReference : null;
+                    if (reference == null ||
+                        reference.Kind != UnitySyncObjectReferenceKind.Asset ||
+                        string.IsNullOrEmpty(reference.AssetPath) ||
+                        !reference.AssetPath.StartsWith(
+                            "Assets/",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    string expectedErrorPrefix =
+                        "Object reference " + property.Path +
+                        " could not be matched safely for local field type ";
+                    if (error.StartsWith(expectedErrorPrefix, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static bool IsSnapshotComponentState(UnitySyncSceneObjectChange change)
@@ -1911,6 +2093,19 @@ namespace Glasspage.UnitySync
                     KnownHashes.TryGetValue(stateKey, out string knownHash) &&
                     knownHash == hash)
                 {
+                    continue;
+                }
+
+                // Asset references are a cross-pipeline dependency: the referenced project
+                // files must be queued before the scene packet that points at them. If the
+                // asset is not ready on disk yet, keep this scene change pending locally
+                // instead of sending an update the receiver cannot possibly resolve.
+                if (!UnitySyncProjectSynchronizer.EnsureSceneAssetReferencesQueued(
+                        transport,
+                        localPlayerId,
+                        change))
+                {
+                    SetPending(pendingKey, pending);
                     continue;
                 }
 

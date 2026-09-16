@@ -1740,6 +1740,19 @@ namespace Glasspage.UnitySync
             return Color.HSVToRGB(hue, 0.72f, 1f);
         }
 
+        internal static void ReportDeferredSceneSyncFailure(string error)
+        {
+            if (string.IsNullOrEmpty(error))
+            {
+                return;
+            }
+
+            AddFailure(
+                "Scene sync skipped an update after waiting for a synchronized asset: " +
+                error);
+            Changed?.Invoke();
+        }
+
         private static void AddFailure(string message)
         {
             if (string.IsNullOrEmpty(message))
