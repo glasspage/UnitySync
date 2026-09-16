@@ -20,7 +20,7 @@ After installation, a **UnitySync** menu is added to the top bar of the Unity Ed
 ## Network setup
 
 UnitySync connects collaborators directly to the host over IPv4.
-[Radmin VPN](https://www.radmin-vpn.com/) is the simplest way to connect users together, but other direct network setups work as well.
+[Hamachi](https://www.vpn.net/) is the most reliable way to connect users together, but other direct network setups work as well.
 
 The default port is **47832**.
 
