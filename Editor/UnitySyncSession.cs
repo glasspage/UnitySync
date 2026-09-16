@@ -612,6 +612,7 @@ namespace Glasspage.UnitySync
                         UnitySyncPresenceRoot.Remove(transportEvent.PlayerId);
                         UnitySyncSelectionPresence.Remove(transportEvent.PlayerId);
                         UnitySyncFileSynchronizer.RemoveHostPlayer(transportEvent.PlayerId);
+                        UnitySyncSceneSynchronizer.CancelSnapshotsForPlayer(transportEvent.PlayerId);
                         UnitySyncPresenceRoot.RequestSceneRepaint();
                         Changed?.Invoke();
                         break;
