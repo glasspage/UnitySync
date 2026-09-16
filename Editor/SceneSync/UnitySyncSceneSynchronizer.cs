@@ -2098,6 +2098,19 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
+                // Asset references are a cross-pipeline dependency: the referenced project
+                // files must be queued before the scene packet that points at them. If the
+                // asset is not ready on disk yet, keep this scene change pending locally
+                // instead of sending an update the receiver cannot possibly resolve.
+                if (!UnitySyncProjectSynchronizer.EnsureSceneAssetReferencesQueued(
+                        transport,
+                        localPlayerId,
+                        change))
+                {
+                    SetPending(pendingKey, pending);
+                    continue;
+                }
+
                 if (hasHash)
                 {
                     // Full structural packets contain GameObject and component state together.
