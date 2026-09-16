@@ -34,7 +34,7 @@ The default port is **47832**.
 6. Select **Start Hosting**.
 7. Share the generated join code with your collaborators.
 
-When using Radmin VPN, the host address should be the host's Radmin VPN IPv4 address.
+When using Hamachi or other VPN, the host address should be the host's VPN-provided IPv4 address.
 
 ## Join a session
 
@@ -77,7 +77,9 @@ If someone cannot connect:
 
 - Confirm they can reach the host's chosen IPv4 address.
 - Confirm TCP port **47832** is available, or choose another port.
-- If using a VPN, confirm everyone is connected to the same VPN network.
+- If using a VPN:
+  - Confirm everyone is connected to the same VPN network.
+  - Ensure your firewall isn't blocking VPN connections.
 
 If synchronization appears incomplete, let any initial asset import or script compilation finish, check the **Activity Log** in **UnitySync > Session**, and confirm everyone has the required packages and dependencies installed.
 
