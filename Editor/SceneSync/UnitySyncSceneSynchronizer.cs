@@ -739,9 +739,10 @@ namespace Glasspage.UnitySync
             bool suppressTransformInterpolation =
                 change.Address != null &&
                 IsRemoteInitializationSuppressed(change.Address.ObjectId);
+            Transform transform = null;
             bool interpolateTransform =
                 !suppressTransformInterpolation &&
-                TryGetLiveTransform(change, out Transform transform);
+                TryGetLiveTransform(change, out transform);
             Vector3 fromPosition = default;
             Quaternion fromRotation = default;
             Vector3 fromScale = default;
