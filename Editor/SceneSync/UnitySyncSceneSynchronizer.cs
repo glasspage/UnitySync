@@ -80,12 +80,20 @@ namespace Glasspage.UnitySync
             internal UnitySyncComponentState State;
         }
 
+        private sealed class RemoteInitializationState
+        {
+            internal int GameObjectInstanceId;
+            internal double LastUpdateTime;
+            internal readonly HashSet<int> PendingComponentIndices = new HashSet<int>();
+        }
+
         private const double FlushIntervalSeconds = 0.05;
         private const double TransformSyncIntervalSeconds = 0.1;
         private const double OtherSyncIntervalSeconds = 1.0;
         private const double TransformInterpolationSeconds = 0.1;
         private const double SceneSettingsCheckIntervalSeconds = 0.1;
         private const double SceneSettingsSyncDelaySeconds = 1.0;
+        private const double RemoteInitializationTimeoutSeconds = 2.0;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
         private const int SnapshotObjectsPerUpdate = 16;
@@ -122,6 +130,10 @@ namespace Glasspage.UnitySync
             new Dictionary<string, double>();
         private static readonly Dictionary<string, RemoteTransformInterpolation> RemoteTransformInterpolations =
             new Dictionary<string, RemoteTransformInterpolation>();
+        private static readonly Dictionary<string, RemoteInitializationState> RemoteInitializations =
+            new Dictionary<string, RemoteInitializationState>(StringComparer.Ordinal);
+        private static readonly HashSet<string> CompletedRemoteInitializations =
+            new HashSet<string>(StringComparer.Ordinal);
         private static readonly Queue<HierarchyBatch> HierarchyBatches =
             new Queue<HierarchyBatch>();
         private static readonly HashSet<int> BatchedObjectInstanceIds =
@@ -192,6 +204,9 @@ namespace Glasspage.UnitySync
             LastIncomingLiveHashes.Clear();
             NextAllowedSendTimes.Clear();
             RemoteTransformInterpolations.Clear();
+            RemoteInitializations.Clear();
+            CompletedRemoteInitializations.Clear();
+            EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             SnapshotComponentStates.Clear();
@@ -216,6 +231,9 @@ namespace Glasspage.UnitySync
             LastIncomingLiveHashes.Clear();
             NextAllowedSendTimes.Clear();
             RemoteTransformInterpolations.Clear();
+            RemoteInitializations.Clear();
+            CompletedRemoteInitializations.Clear();
+            EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
             SnapshotComponentStates.Clear();
@@ -384,6 +402,9 @@ namespace Glasspage.UnitySync
                 PendingOrder.Clear();
                 PendingKeysByInstanceId.Clear();
                 LastIncomingLiveHashes.Clear();
+                RemoteInitializations.Clear();
+                CompletedRemoteInitializations.Clear();
+                EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
                 UnitySyncSceneObjectRegistry.Clear();
                 PruneSnapshotComponentStates();
             }
@@ -708,7 +729,20 @@ namespace Glasspage.UnitySync
                 }
             }
 
-            bool interpolateTransform = TryGetLiveTransform(change, out Transform transform);
+            bool beginsRemoteInitialization =
+                change.SnapshotId == Guid.Empty &&
+                change.Kind == UnitySyncSceneChangeKind.Upsert &&
+                change.HierarchyOnly &&
+                change.Address != null &&
+                !string.IsNullOrEmpty(change.Address.ObjectId) &&
+                UnitySyncSceneSerializer.ResolveAddress(change.Address) == null;
+            bool suppressTransformInterpolation =
+                change.Address != null &&
+                IsRemoteInitializationSuppressed(change.Address.ObjectId);
+            Transform transform = null;
+            bool interpolateTransform =
+                !suppressTransformInterpolation &&
+                TryGetLiveTransform(change, out transform);
             Vector3 fromPosition = default;
             Quaternion fromRotation = default;
             Vector3 fromScale = default;
@@ -736,6 +770,22 @@ namespace Glasspage.UnitySync
                 }
 
                 UpdateSnapshotComponentCacheAfterApply(change);
+
+                if (beginsRemoteInitialization)
+                {
+                    BeginRemoteInitialization(change);
+                }
+                else if (change.SnapshotId == Guid.Empty)
+                {
+                    AdvanceRemoteInitialization(change);
+                }
+
+                if (change.Kind == UnitySyncSceneChangeKind.Destroy &&
+                    change.Address != null &&
+                    !string.IsNullOrEmpty(change.Address.ObjectId))
+                {
+                    CancelRemoteInitialization(change.Address.ObjectId);
+                }
 
                 if (change.SnapshotId != Guid.Empty &&
                     change.HierarchyOnly &&
@@ -985,6 +1035,142 @@ namespace Glasspage.UnitySync
                 // Explicit invalidation prevents a later snapshot from trusting stale state.
                 InvalidateSnapshotComponentState(component);
             }
+        }
+
+        private static void BeginRemoteInitialization(UnitySyncSceneObjectChange change)
+        {
+            if (change == null ||
+                change.Address == null ||
+                string.IsNullOrEmpty(change.Address.ObjectId))
+            {
+                return;
+            }
+
+            GameObject gameObject = UnitySyncSceneSerializer.ResolveAddress(change.Address);
+            if (gameObject == null)
+            {
+                return;
+            }
+
+            RemoteInitializationState state = new RemoteInitializationState
+            {
+                GameObjectInstanceId = gameObject.GetInstanceID(),
+                LastUpdateTime = EditorApplication.timeSinceStartup
+            };
+
+            foreach (UnitySyncComponentState componentState in
+                     change.Components ?? new UnitySyncComponentState[0])
+            {
+                // Missing-script slots have no component object to serialize in the live
+                // full-state phase, so they must not keep initialization suppressed forever.
+                if (componentState != null &&
+                    !string.IsNullOrEmpty(componentState.TypeName))
+                {
+                    state.PendingComponentIndices.Add(componentState.ComponentIndex);
+                }
+            }
+
+            if (state.PendingComponentIndices.Count == 0)
+            {
+                return;
+            }
+
+            RemoteInitializations[change.Address.ObjectId] = state;
+        }
+
+        private static void AdvanceRemoteInitialization(UnitySyncSceneObjectChange change)
+        {
+            if (change == null ||
+                change.Address == null ||
+                string.IsNullOrEmpty(change.Address.ObjectId) ||
+                !RemoteInitializations.TryGetValue(
+                    change.Address.ObjectId,
+                    out RemoteInitializationState state))
+            {
+                return;
+            }
+
+            state.LastUpdateTime = EditorApplication.timeSinceStartup;
+            foreach (UnitySyncComponentState componentState in
+                     change.Components ?? new UnitySyncComponentState[0])
+            {
+                if (componentState != null)
+                {
+                    state.PendingComponentIndices.Remove(componentState.ComponentIndex);
+                }
+            }
+
+            if (state.PendingComponentIndices.Count == 0)
+            {
+                CompletedRemoteInitializations.Add(change.Address.ObjectId);
+                EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
+                EditorApplication.delayCall += ReleaseCompletedRemoteInitializations;
+            }
+        }
+
+        private static bool IsRemoteInitializationSuppressed(string objectId)
+        {
+            if (string.IsNullOrEmpty(objectId) ||
+                !RemoteInitializations.TryGetValue(
+                    objectId,
+                    out RemoteInitializationState state))
+            {
+                return false;
+            }
+
+            if (EditorApplication.timeSinceStartup - state.LastUpdateTime <=
+                RemoteInitializationTimeoutSeconds)
+            {
+                return true;
+            }
+
+            CancelRemoteInitialization(objectId);
+            return false;
+        }
+
+        private static bool IsRemoteInitializationSuppressed(GameObject gameObject)
+        {
+            return gameObject != null &&
+                   UnitySyncSceneObjectRegistry.TryGetId(gameObject, out string objectId) &&
+                   IsRemoteInitializationSuppressed(objectId);
+        }
+
+        private static void CancelRemoteInitialization(string objectId)
+        {
+            if (string.IsNullOrEmpty(objectId))
+            {
+                return;
+            }
+
+            RemoteInitializations.Remove(objectId);
+            CompletedRemoteInitializations.Remove(objectId);
+        }
+
+        private static void ReleaseCompletedRemoteInitializations()
+        {
+            EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
+            if (CompletedRemoteInitializations.Count == 0)
+            {
+                return;
+            }
+
+            foreach (string objectId in CompletedRemoteInitializations)
+            {
+                if (!RemoteInitializations.TryGetValue(
+                        objectId,
+                        out RemoteInitializationState state) ||
+                    state.PendingComponentIndices.Count != 0)
+                {
+                    continue;
+                }
+
+                // Drop delayed Unity notifications produced by constructing/applying the
+                // remote object before allowing genuine local edits to publish again.
+                RemovePendingForInstanceId(state.GameObjectInstanceId);
+                RemoteInitializations.Remove(objectId);
+            }
+
+            CompletedRemoteInitializations.Clear();
         }
 
         private static bool TryGetLiveTransform(
@@ -1246,11 +1432,19 @@ namespace Glasspage.UnitySync
         {
             if (changedObject is GameObject gameObject)
             {
-                AddPending(gameObject, PendingKind.GameObject, -1);
+                if (!IsRemoteInitializationSuppressed(gameObject))
+                {
+                    AddPending(gameObject, PendingKind.GameObject, -1);
+                }
                 return;
             }
 
             if (!(changedObject is Component component) || component == null)
+            {
+                return;
+            }
+
+            if (IsRemoteInitializationSuppressed(component.gameObject))
             {
                 return;
             }
@@ -1275,7 +1469,10 @@ namespace Glasspage.UnitySync
 
         private static void MarkStructureChanged(GameObject gameObject)
         {
-            AddPending(gameObject, PendingKind.Structure, -1);
+            if (!IsRemoteInitializationSuppressed(gameObject))
+            {
+                AddPending(gameObject, PendingKind.Structure, -1);
+            }
         }
 
         private static void MarkHierarchyStructureChanged(GameObject gameObject)
@@ -1294,6 +1491,11 @@ namespace Glasspage.UnitySync
 
         private static void QueueCreatedHierarchy(GameObject root)
         {
+            if (IsRemoteInitializationSuppressed(root))
+            {
+                return;
+            }
+
             List<GameObject> objects = UnitySyncSceneSerializer.GetHierarchyObjects(root);
             if (objects.Count == 0)
             {
@@ -1527,7 +1729,12 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                if (!batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
+                // Snapshot batches can rely on the synchronized saved-scene baseline and
+                // selectively replay only dirty component state. A live-created hierarchy has
+                // no receiver-side baseline, so every current component must follow its
+                // hierarchy shell.
+                if (batch.Snapshot != null &&
+                    !batch.FullStateSceneHandles.Contains(gameObject.scene.handle))
                 {
                     batch.Index++;
                     batch.ComponentIndex = 0;
@@ -1539,7 +1746,8 @@ namespace Glasspage.UnitySync
                 {
                     Component candidate = components[batch.ComponentIndex];
                     if (candidate != null &&
-                        batch.FullStateComponentInstanceIds.Contains(candidate.GetInstanceID()))
+                        (batch.Snapshot == null ||
+                         batch.FullStateComponentInstanceIds.Contains(candidate.GetInstanceID())))
                     {
                         break;
                     }
