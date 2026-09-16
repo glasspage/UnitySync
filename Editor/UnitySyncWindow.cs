@@ -448,7 +448,7 @@ namespace Glasspage.UnitySync
 
                 EditorGUI.BeginChangeCheck();
                 _hostAddress = EditorGUILayout.TextField(
-                    new GUIContent("Host address", "The reachable IPv4 address placed in the join code. For Radmin VPN this is normally the host's 26.x.x.x address."),
+                    new GUIContent("Host address", "The reachable IPv4 address placed in the join code. For Hamachi this is normally the host's 25.x.x.x address."),
                     _hostAddress);
                 _port = EditorGUILayout.IntField(new GUIContent("Port", "TCP port used by UnitySync."), _port);
                 if (EditorGUI.EndChangeCheck())
