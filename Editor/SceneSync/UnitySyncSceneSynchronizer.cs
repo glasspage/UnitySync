@@ -84,7 +84,10 @@ namespace Glasspage.UnitySync
         private const double SceneSettingsSyncDelaySeconds = 1.0;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
-        private const int SnapshotObjectsPerUpdate = 8;
+        // The elapsed-time budget is the primary snapshot throttle. Keep the count ceiling
+        // aligned with the receiver's per-update event ceiling so cheap component captures do not
+        // stretch a large dirty-scene snapshot across tens of seconds.
+        private const int SnapshotObjectsPerUpdate = 64;
         private const double CaptureBudgetSeconds = 0.008;
 
         private static readonly ProfilerMarker SceneSettingsFlushMarker =
@@ -139,6 +142,7 @@ namespace Glasspage.UnitySync
         private static string _knownSceneSettingsSignature = string.Empty;
         private static string _pendingSceneSettingsSignature = string.Empty;
         private static RemoteSnapshot _remoteSnapshot;
+        private static int _outgoingSnapshotCount;
 
         static UnitySyncSceneSynchronizer()
         {
@@ -168,6 +172,7 @@ namespace Glasspage.UnitySync
             BatchedObjectInstanceIds.Clear();
             SnapshotComponentStates.Clear();
             _remoteSnapshot = null;
+            _outgoingSnapshotCount = 0;
             _suppressPublishedSnapshotChanges = false;
             EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             UnitySyncSceneObjectRegistry.Clear();
@@ -192,6 +197,7 @@ namespace Glasspage.UnitySync
             BatchedObjectInstanceIds.Clear();
             SnapshotComponentStates.Clear();
             _remoteSnapshot = null;
+            _outgoingSnapshotCount = 0;
             _suppressPublishedSnapshotChanges = false;
             EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             UnitySyncSceneObjectRegistry.Clear();
@@ -271,6 +277,7 @@ namespace Glasspage.UnitySync
             }
 
             HierarchyBatches.Enqueue(batch);
+            _outgoingSnapshotCount++;
         }
 
         internal static bool BeginRemoteSnapshot(
@@ -433,9 +440,16 @@ namespace Glasspage.UnitySync
                 FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
             }
 
+            // A full snapshot must remain ordered: live scene edits are sent after its End packet
+            // so the receiver cannot have them overwritten by later snapshot state. Ordinary
+            // created-hierarchy batches have no snapshot boundary, so unrelated live edits may
+            // continue alongside them instead of being starved.
+            bool snapshotBatchBlocksLiveChanges =
+                HierarchyBatches.Count > 0 && HierarchyBatches.Peek().Snapshot != null;
             using (HierarchyFlushMarker.Auto())
             {
-                if (FlushHierarchyBatch(transport, localPlayerId))
+                if (FlushHierarchyBatch(transport, localPlayerId) &&
+                    snapshotBatchBlocksLiveChanges)
                 {
                     return;
                 }
@@ -492,6 +506,17 @@ namespace Glasspage.UnitySync
             {
                 _pendingSceneSettingsSignature = string.Empty;
                 _sceneSettingsSendAfterTime = 0d;
+                return;
+            }
+
+            // The snapshot boundary contains the scene settings captured when the snapshot was
+            // queued. Sending newer settings before that snapshot ends would let its stale
+            // boundary overwrite them on the receiver. Remember the newest signature and make it
+            // immediately eligible once all queued snapshots have ended.
+            if (_outgoingSnapshotCount > 0)
+            {
+                _pendingSceneSettingsSignature = signature;
+                _sceneSettingsSendAfterTime = now;
                 return;
             }
 
@@ -1332,6 +1357,10 @@ namespace Glasspage.UnitySync
                     !batch.HasCaptureFailure,
                     batch.TargetPlayerId);
                 HierarchyBatches.Dequeue();
+                _outgoingSnapshotCount = Math.Max(0, _outgoingSnapshotCount - 1);
+                // Let coalesced live edits that accumulated behind the snapshot run on the next
+                // Editor update instead of waiting for another 50 ms scene-flush interval.
+                _nextFlushTime = 0d;
                 RemoveBatchTracking(batch);
                 return true;
             }
