@@ -105,6 +105,42 @@ namespace Glasspage.UnitySync
                 out length);
         }
 
+        internal static bool TryGetCachedHash(
+            string projectRoot,
+            string projectPath,
+            string fullPath,
+            out long length,
+            out ulong hash)
+        {
+            length = 0;
+            hash = 0UL;
+
+            FileInfo info = new FileInfo(fullPath);
+            info.Refresh();
+            if (!info.Exists)
+            {
+                return false;
+            }
+
+            length = info.Length;
+            long lastWriteTicks = info.LastWriteTimeUtc.Ticks;
+            string key = NormalizeProjectPath(projectPath);
+
+            lock (CacheLock)
+            {
+                EnsureLoadedLocked(projectRoot);
+                if (!Entries.TryGetValue(key, out CacheEntry cached) ||
+                    cached.Length != length ||
+                    cached.LastWriteTicks != lastWriteTicks)
+                {
+                    return false;
+                }
+
+                hash = cached.Hash;
+                return true;
+            }
+        }
+
         internal static bool MatchesFile(
             string projectRoot,
             string projectPath,
@@ -279,7 +315,8 @@ namespace Glasspage.UnitySync
                 exception is IOException ||
                 exception is UnauthorizedAccessException ||
                 exception is EndOfStreamException ||
-                exception is InvalidDataException)
+                exception is InvalidDataException ||
+                exception is FormatException)
             {
                 Entries.Clear();
                 try
