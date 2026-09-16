@@ -224,6 +224,7 @@ namespace Glasspage.UnitySync
         private const float BottomRightStatusRightMargin = 12f;
         private const float BottomRightStatusBottomMargin = 12f;
         private const float BottomRightStatusSpacing = 4f;
+        private const float BottomRightStatusOpacity = 0.8f;
         private const float SceneUpdateStatusBottomMargin = 12f;
         private const float SceneUpdateStatusOpacity = 0.8f;
         private const int DiscSegmentCount = 48;
@@ -663,6 +664,7 @@ namespace Glasspage.UnitySync
             }
 
             DrawSceneUpdateStatus(sceneView);
+            DrawBottomRightStatuses(sceneView, BottomRightStatusOpacity);
 
             float opacity = UnitySyncVisualSettings.ViewportOpacity;
             if (opacity <= 0f)
@@ -750,7 +752,6 @@ namespace Glasspage.UnitySync
                 localPlayerId,
                 spectatingPlayerId,
                 opacity);
-            DrawBottomRightStatuses(sceneView, opacity);
         }
 
         private static void DrawDisplayName(
