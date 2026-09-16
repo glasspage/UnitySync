@@ -688,6 +688,8 @@ namespace Glasspage.UnitySync
                     };
                 }
 
+                UnitySyncFileHashCache.SaveIfDirty(GetProjectRoot());
+
                 if (result == null || !string.IsNullOrEmpty(result.Error))
                 {
                     string message = result == null
@@ -1291,6 +1293,7 @@ namespace Glasspage.UnitySync
         private static void UpdateGuestComparison(UnitySyncTransport transport)
         {
             int processed = 0;
+            string projectRoot = GetProjectRoot();
             try
             {
                 while (processed < CompareFilesPerUpdate &&
@@ -1305,7 +1308,9 @@ namespace Glasspage.UnitySync
                         TryGetFullSyncPath(entry.Path, out string fullPath) &&
                         File.Exists(fullPath))
                     {
-                        matches = UnitySyncXxHash64.MatchesFile(
+                        matches = UnitySyncFileHashCache.MatchesFile(
+                            projectRoot,
+                            entry.Path,
                             fullPath,
                             entry.Length,
                             entry.Hash);
@@ -1362,6 +1367,8 @@ namespace Glasspage.UnitySync
             {
                 return;
             }
+
+            UnitySyncFileHashCache.SaveIfDirty(projectRoot);
 
             if (GuestMismatches.Count == 0 && GuestObsoletePaths.Count == 0)
             {
@@ -2825,6 +2832,7 @@ namespace Glasspage.UnitySync
                             projectRoot,
                             out string fullPath) ||
                         !TryBuildFileEntry(
+                            projectRoot,
                             projectPath,
                             fullPath,
                             cancellationToken,
@@ -2856,6 +2864,7 @@ namespace Glasspage.UnitySync
         }
 
         private static bool TryBuildFileEntry(
+            string projectRoot,
             string projectPath,
             string fullPath,
             CancellationToken cancellationToken,
@@ -2867,7 +2876,9 @@ namespace Glasspage.UnitySync
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    ulong hash = UnitySyncXxHash64.ComputeFile(
+                    ulong hash = UnitySyncFileHashCache.GetOrCompute(
+                        projectRoot,
+                        projectPath,
                         fullPath,
                         cancellationToken,
                         out long length);
