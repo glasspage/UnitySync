@@ -634,6 +634,11 @@ namespace Glasspage.UnitySync
                     ProjectFileNeedsSend(metaPath, fullMetaPath))
                 {
                     TrySendLocalChange(transport, localPlayerId, metaPath);
+                    if (ProjectFileNeedsSend(metaPath, fullMetaPath))
+                    {
+                        Requeue(path);
+                        return;
+                    }
                 }
             }
 
