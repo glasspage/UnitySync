@@ -183,7 +183,8 @@ namespace Glasspage.UnitySync
         }
 
         private const string ExcludedFolderName = "SerializedUdonPrograms";
-        private const int CompareFilesPerUpdate = 12;
+        private const int UncachedCompareFilesPerUpdate = 12;
+        private const int CachedCompareFilesPerUpdate = 512;
         private const int ManifestMessagesPerUpdate = 64;
         private const int FileRequestsPerUpdate = 512;
         private const long MaximumQueuedFileTransferBytes = 128L * 1024L * 1024L;
@@ -688,6 +689,8 @@ namespace Glasspage.UnitySync
                     };
                 }
 
+                UnitySyncFileHashCache.SaveIfDirty(GetProjectRoot());
+
                 if (result == null || !string.IsNullOrEmpty(result.Error))
                 {
                     string message = result == null
@@ -1002,7 +1005,7 @@ namespace Glasspage.UnitySync
                             continue;
                         }
 
-                        // The manifest already contains a SHA-256 for this file. Avoid hashing it
+                        // The manifest already contains an XXH64 for this file. Avoid hashing it
                         // a second time before transfer; the guest verifies against the manifest.
                         transfer.Stream = new FileStream(
                             fullPath,
@@ -1291,25 +1294,51 @@ namespace Glasspage.UnitySync
         private static void UpdateGuestComparison(UnitySyncTransport transport)
         {
             int processed = 0;
+            int uncachedHashes = 0;
+            string projectRoot = GetProjectRoot();
             try
             {
-                while (processed < CompareFilesPerUpdate &&
+                while (processed < CachedCompareFilesPerUpdate &&
                        _guestCompareIndex < GuestManifest.Count)
                 {
-                    FileEntry entry = GuestManifest[_guestCompareIndex++];
+                    FileEntry entry = GuestManifest[_guestCompareIndex];
                     bool matches = false;
                     bool replaceWholePackage =
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
                         IsUnderPackageRootToReplace(entry.Path);
                     if (!_guestForceRestore && !replaceWholePackage &&
-                        TryGetFullSyncPath(entry.Path, out string fullPath) &&
-                        File.Exists(fullPath))
+                        TryGetFullSyncPath(entry.Path, out string fullPath))
                     {
-                        matches = UnitySyncXxHash64.MatchesFile(
+                        bool cached = UnitySyncFileHashCache.TryGetCachedHash(
+                            projectRoot,
+                            entry.Path,
                             fullPath,
-                            entry.Length,
-                            entry.Hash);
+                            out long localLength,
+                            out ulong localHash);
+                        if (cached)
+                        {
+                            matches =
+                                localLength == entry.Length &&
+                                localHash == entry.Hash;
+                        }
+                        else if (localLength == entry.Length)
+                        {
+                            if (uncachedHashes >= UncachedCompareFilesPerUpdate)
+                            {
+                                break;
+                            }
+
+                            matches = UnitySyncFileHashCache.MatchesFile(
+                                projectRoot,
+                                entry.Path,
+                                fullPath,
+                                entry.Length,
+                                entry.Hash);
+                            uncachedHashes++;
+                        }
                     }
+
+                    _guestCompareIndex++;
 
                     if (!matches &&
                         _guestRequestedScope == UnitySyncFileSyncScope.Packages &&
@@ -1362,6 +1391,8 @@ namespace Glasspage.UnitySync
             {
                 return;
             }
+
+            UnitySyncFileHashCache.SaveIfDirty(projectRoot);
 
             if (GuestMismatches.Count == 0 && GuestObsoletePaths.Count == 0)
             {
@@ -2411,9 +2442,10 @@ namespace Glasspage.UnitySync
         private static bool ApplyStagedFiles(out string error)
         {
             error = string.Empty;
+            string projectRoot = GetProjectRoot();
             List<string> replacements = new List<string>();
             HashSet<string> obsolete = new HashSet<string>(GuestObsoletePaths, StringComparer.Ordinal);
-            string backupRoot = Path.Combine(GetProjectRoot(), "Library", "UnitySyncFileBackup",
+            string backupRoot = Path.Combine(projectRoot, "Library", "UnitySyncFileBackup",
                 _guestSyncId.ToString("N"));
             List<string> backedUp = new List<string>();
             List<string> installed = new List<string>();
@@ -2440,7 +2472,12 @@ namespace Glasspage.UnitySync
                     // Native plugins may be mapped into the Editor even when the surrounding
                     // package metadata changes. An identical file needs no write or deletion.
                     if (File.Exists(target) &&
-                        UnitySyncXxHash64.MatchesFile(target, entry.Length, entry.Hash))
+                        UnitySyncFileHashCache.MatchesFile(
+                            projectRoot,
+                            entry.Path,
+                            target,
+                            entry.Length,
+                            entry.Hash))
                     {
                         continue;
                     }
@@ -2512,6 +2549,28 @@ namespace Glasspage.UnitySync
                     File.Move(GetGuestStagedFilePath(path), target);
                     installed.Add(path);
                 }
+
+                foreach (string path in obsolete)
+                {
+                    UnitySyncFileHashCache.Invalidate(projectRoot, path);
+                }
+
+                foreach (string path in replacements)
+                {
+                    if (!GuestManifestByPath.TryGetValue(path, out FileEntry entry) ||
+                        !TryGetFullSyncPath(path, out string target))
+                    {
+                        continue;
+                    }
+
+                    UnitySyncFileHashCache.RecordVerifiedFile(
+                        projectRoot,
+                        path,
+                        target,
+                        entry.Length,
+                        entry.Hash);
+                }
+                UnitySyncFileHashCache.SaveIfDirty(projectRoot);
             }
             catch (Exception exception) when (
                 exception is IOException || exception is UnauthorizedAccessException)
@@ -2825,6 +2884,7 @@ namespace Glasspage.UnitySync
                             projectRoot,
                             out string fullPath) ||
                         !TryBuildFileEntry(
+                            projectRoot,
                             projectPath,
                             fullPath,
                             cancellationToken,
@@ -2856,6 +2916,7 @@ namespace Glasspage.UnitySync
         }
 
         private static bool TryBuildFileEntry(
+            string projectRoot,
             string projectPath,
             string fullPath,
             CancellationToken cancellationToken,
@@ -2867,7 +2928,9 @@ namespace Glasspage.UnitySync
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    ulong hash = UnitySyncXxHash64.ComputeFile(
+                    ulong hash = UnitySyncFileHashCache.GetOrCompute(
+                        projectRoot,
+                        projectPath,
                         fullPath,
                         cancellationToken,
                         out long length);

@@ -51,6 +51,7 @@ namespace Glasspage.UnitySync
         private const int MaximumMaterialsPerUpdate = 32;
         private const int MaximumDirtyAssetSavesPerUpdate = 4;
         private const double RemoteEchoSuppressionSeconds = 2.0d;
+        private const double HashCacheSaveIntervalSeconds = 5.0d;
 
         private static readonly ProfilerMarker MaterialScanMarker =
             new ProfilerMarker("UnitySync.ScanDirtyMaterials");
@@ -80,6 +81,7 @@ namespace Glasspage.UnitySync
         private static FileSystemWatcher _projectSettingsWatcher;
         private static double _nextDirtyMaterialScanTime;
         private static double _nextLoadedMaterialDiscoveryTime;
+        private static double _nextHashCacheSaveTime;
         private static Material[] _loadedMaterials = new Material[0];
         private static int _dirtyMaterialScanIndex;
 
@@ -90,6 +92,8 @@ namespace Glasspage.UnitySync
             _projectRoot = GetProjectRoot();
             _active = true;
             _nextDirtyMaterialScanTime = 0d;
+            _nextHashCacheSaveTime =
+                GetMonotonicSeconds() + HashCacheSaveIntervalSeconds;
             Undo.postprocessModifications += OnPostprocessModifications;
             Undo.undoRedoPerformed += OnUndoRedoPerformed;
             StartWatcher(
@@ -107,6 +111,7 @@ namespace Glasspage.UnitySync
             Undo.undoRedoPerformed -= OnUndoRedoPerformed;
             DisposeWatcher(ref _assetsWatcher);
             DisposeWatcher(ref _projectSettingsWatcher);
+            UnitySyncFileHashCache.SaveIfDirty(_projectRoot);
 
             lock (PendingLock)
             {
@@ -122,6 +127,7 @@ namespace Glasspage.UnitySync
             _dirtyMaterialScanIndex = 0;
             _nextLoadedMaterialDiscoveryTime = 0d;
             _nextDirtyMaterialScanTime = 0d;
+            _nextHashCacheSaveTime = 0d;
             foreach (RemoteTransfer transfer in RemoteTransfers.Values)
             {
                 CleanupTransfer(transfer);
@@ -140,6 +146,12 @@ namespace Glasspage.UnitySync
             }
 
             double now = GetMonotonicSeconds();
+            if (now >= _nextHashCacheSaveTime)
+            {
+                UnitySyncFileHashCache.SaveIfDirty(_projectRoot);
+                _nextHashCacheSaveTime = now + HashCacheSaveIntervalSeconds;
+            }
+
             using (MaterialScanMarker.Auto())
             {
                 ScanLoadedDirtyMaterials(now);
@@ -566,7 +578,10 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            double due = GetMonotonicSeconds() + ChangeDebounceSeconds;
+            double now = GetMonotonicSeconds();
+            UnitySyncFileHashCache.Invalidate(_projectRoot, path);
+
+            double due = now + ChangeDebounceSeconds;
             lock (PendingLock)
             {
                 PendingLocalChanges[path] = due;
@@ -600,7 +615,11 @@ namespace Glasspage.UnitySync
 
             try
             {
-                ulong hash = UnitySyncXxHash64.ComputeFile(fullPath, out long length);
+                ulong hash = UnitySyncFileHashCache.GetOrCompute(
+                    _projectRoot,
+                    path,
+                    fullPath,
+                    out long length);
                 if (KnownFiles.TryGetValue(path, out FileFingerprint known) &&
                     known.Length == length &&
                     known.Hash == hash)
@@ -847,6 +866,12 @@ namespace Glasspage.UnitySync
             }
 
             File.Copy(transfer.TempPath, targetPath, true);
+            UnitySyncFileHashCache.RecordVerifiedFile(
+                _projectRoot,
+                transfer.Path,
+                targetPath,
+                transfer.Length,
+                transfer.Hash);
             KnownFiles[transfer.Path] =
                 new FileFingerprint(transfer.Length, transfer.Hash);
             RefreshUnityForPath(transfer.Path);
@@ -881,6 +906,7 @@ namespace Glasspage.UnitySync
                 }
 
                 KnownFiles.Remove(message.Path);
+                UnitySyncFileHashCache.Invalidate(_projectRoot, message.Path);
                 RefreshUnityForPath(message.Path);
                 return true;
             }
