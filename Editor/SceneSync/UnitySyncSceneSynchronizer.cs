@@ -92,7 +92,6 @@ namespace Glasspage.UnitySync
             internal UnitySyncSceneObjectChange Change;
             internal string StateHash = string.Empty;
             internal string LastError = string.Empty;
-            internal double FirstDeferredTime;
             internal double NextRetryTime;
         }
 
@@ -912,7 +911,6 @@ namespace Glasspage.UnitySync
                 Change = change,
                 StateHash = stateHash,
                 LastError = error,
-                FirstDeferredTime = now,
                 NextRetryTime = now + DeferredRemoteAssetRetryDelaySeconds
             };
         }
