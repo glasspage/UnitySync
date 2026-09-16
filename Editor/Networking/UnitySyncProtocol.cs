@@ -156,7 +156,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 19;
+        internal const int Version = 20;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -1510,6 +1510,12 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            if (snapshot.TotalChangeCount < 0)
+            {
+                throw new InvalidDataException("A scene snapshot has an invalid change count.");
+            }
+
+            writer.Write(snapshot.TotalChangeCount);
             UnitySyncSceneDescriptor[] scenes = snapshot.Scenes ?? new UnitySyncSceneDescriptor[0];
             if (scenes.Length > MaximumScenesPerSnapshot)
             {
@@ -1572,6 +1578,12 @@ namespace Glasspage.UnitySync
             if (snapshot.SnapshotId == Guid.Empty)
             {
                 throw new InvalidDataException("A scene snapshot ID is required.");
+            }
+
+            snapshot.TotalChangeCount = reader.ReadInt32();
+            if (snapshot.TotalChangeCount < 0)
+            {
+                throw new InvalidDataException("A scene snapshot has an invalid change count.");
             }
 
             int count = reader.ReadUInt16();
