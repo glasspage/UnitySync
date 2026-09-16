@@ -475,6 +475,84 @@ namespace Glasspage.UnitySync
             }
         }
 
+        internal static bool EnsureSceneAssetReferencesQueued(
+            UnitySyncTransport transport,
+            Guid localPlayerId,
+            UnitySyncSceneObjectChange change)
+        {
+            if (!_active || transport == null || change == null)
+            {
+                return true;
+            }
+
+            HashSet<string> referencedPaths =
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (UnitySyncComponentState component in
+                     change.Components ?? new UnitySyncComponentState[0])
+            {
+                if (component == null)
+                {
+                    continue;
+                }
+
+                foreach (UnitySyncSerializedPropertyState property in
+                         component.Properties ?? new UnitySyncSerializedPropertyState[0])
+                {
+                    UnitySyncObjectReferenceState reference =
+                        property != null ? property.ObjectReference : null;
+                    if (reference == null ||
+                        reference.Kind != UnitySyncObjectReferenceKind.Asset ||
+                        string.IsNullOrEmpty(reference.AssetPath))
+                    {
+                        continue;
+                    }
+
+                    string assetPath = reference.AssetPath.Replace('\\', '/');
+                    if (assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        referencedPaths.Add(assetPath);
+                    }
+                }
+            }
+
+            foreach (string assetPath in referencedPaths)
+            {
+                Object asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
+                if (asset != null && EditorUtility.IsDirty(asset))
+                {
+                    AssetDatabase.SaveAssetIfDirty(asset);
+                    UnitySyncFileHashCache.Invalidate(_projectRoot, assetPath);
+                }
+
+                if (!TryGetFullProjectPath(assetPath, out string fullAssetPath) ||
+                    !File.Exists(fullAssetPath))
+                {
+                    return false;
+                }
+
+                string metaPath = assetPath + ".meta";
+                if (!TryGetFullProjectPath(metaPath, out string fullMetaPath) ||
+                    !File.Exists(fullMetaPath))
+                {
+                    return false;
+                }
+
+                // Queue the source meta and asset on the same transport before the scene
+                // packet. QueueMessage is FIFO across these non-coalesced project-file
+                // messages, so the receiver can establish/import the asset before it sees
+                // the component reference.
+                TrySendLocalChange(transport, localPlayerId, assetPath);
+
+                if (ProjectFileNeedsSend(metaPath, fullMetaPath) ||
+                    ProjectFileNeedsSend(assetPath, fullAssetPath))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         internal static bool HandleMessage(
             UnitySyncMessageType messageType,
             Guid playerId,
