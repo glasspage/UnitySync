@@ -487,6 +487,19 @@ namespace Glasspage.UnitySync
 
             HashSet<string> referencedPaths =
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            UnitySyncObjectReferenceState prefabSource = change.PrefabSource;
+            if (prefabSource != null &&
+                prefabSource.Kind == UnitySyncObjectReferenceKind.Asset &&
+                !string.IsNullOrEmpty(prefabSource.AssetPath))
+            {
+                string prefabPath = prefabSource.AssetPath.Replace('\\', '/');
+                if (prefabPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                {
+                    referencedPaths.Add(prefabPath);
+                }
+            }
+
             foreach (UnitySyncComponentState component in
                      change.Components ?? new UnitySyncComponentState[0])
             {
