@@ -179,6 +179,11 @@ namespace Glasspage.UnitySync
         internal UnitySyncSceneObjectAddress Address;
         internal bool HierarchyOnly;
         internal bool ReconcileComponents;
+        // For prefab-backed hierarchy packets, identify the corresponding prefab asset object.
+        // Roots use the prefab asset root so receivers can instantiate the same prefab; children
+        // use their corresponding source object so the instantiated hierarchy can be adopted.
+        internal UnitySyncObjectReferenceState PrefabSource;
+        internal bool PrefabInstanceRoot;
         internal UnitySyncGameObjectState GameObject;
         internal UnitySyncComponentState[] Components = new UnitySyncComponentState[0];
     }

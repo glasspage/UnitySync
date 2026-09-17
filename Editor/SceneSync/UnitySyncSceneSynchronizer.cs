@@ -1929,6 +1929,7 @@ namespace Glasspage.UnitySync
 
                     if (!UnitySyncSceneSerializer.TryCaptureHierarchy(
                             gameObject,
+                            batch.Snapshot == null,
                             out UnitySyncSceneObjectChange change))
                     {
                         batch.HasCaptureFailure = true;
@@ -1942,7 +1943,31 @@ namespace Glasspage.UnitySync
 
                     if (batch.Snapshot != null)
                     {
+                        // Initial snapshots must preserve the synchronized scene file as the
+                        // receiver's baseline. Prefab-aware creation is only for genuinely new
+                        // live hierarchies; applying it here can re-instantiate/adopt preexisting
+                        // prefab instances and disturb their scene overrides (materials,
+                        // transforms, removed children, etc.).
+                        change.PrefabSource = null;
+                        change.PrefabInstanceRoot = false;
                         change.SnapshotId = batch.Snapshot.SnapshotId;
+                    }
+
+                    // Live hierarchy packets can carry prefab asset identity. Make sure a newly
+                    // created/edited prefab asset is present on peers before the packet asks them
+                    // to instantiate or adopt it.
+                    if (!UnitySyncProjectSynchronizer.EnsureSceneAssetReferencesQueued(
+                            transport,
+                            localPlayerId,
+                            change))
+                    {
+                        batch.Index--;
+                        if (batch.Snapshot != null)
+                        {
+                            batch.ProcessedSnapshotChangeCount =
+                                Math.Max(0, batch.ProcessedSnapshotChangeCount - 1);
+                        }
+                        return true;
                     }
 
                     transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
