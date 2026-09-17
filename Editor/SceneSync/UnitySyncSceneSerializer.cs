@@ -4593,6 +4593,63 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static bool TryReconcileTransformType(
+            GameObject gameObject,
+            UnitySyncComponentState desiredTransformState,
+            out string error)
+        {
+            error = string.Empty;
+            if (gameObject == null ||
+                desiredTransformState == null ||
+                desiredTransformState.ComponentIndex != 0 ||
+                string.IsNullOrEmpty(desiredTransformState.TypeName))
+            {
+                error = "The Transform type differs on " +
+                        (gameObject != null ? gameObject.name : "the synchronized object") + ".";
+                return false;
+            }
+
+            Type desiredTransformType = ResolveType(desiredTransformState.TypeName);
+            if (desiredTransformType != typeof(Transform) &&
+                desiredTransformType != typeof(RectTransform))
+            {
+                error = "The Transform type differs on " + gameObject.name + ".";
+                return false;
+            }
+
+            Type currentTransformType = gameObject.transform.GetType();
+            if (currentTransformType == desiredTransformType)
+            {
+                return true;
+            }
+
+            // Unity replaces a normal Transform with RectTransform when UI structure is added
+            // to an existing GameObject. Mirror that native conversion before reconciling the
+            // rest of the component layout instead of rejecting the incoming structure packet.
+            // The following component-state packet then applies the exact RectTransform values.
+            if (currentTransformType == typeof(Transform) &&
+                desiredTransformType == typeof(RectTransform))
+            {
+                try
+                {
+                    Component converted = Undo.AddComponent(gameObject, typeof(RectTransform));
+                    if (converted is RectTransform && gameObject.transform is RectTransform)
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    error = "Could not convert Transform to RectTransform on " +
+                            gameObject.name + ": " + exception.Message;
+                    return false;
+                }
+            }
+
+            error = "The Transform type differs on " + gameObject.name + ".";
+            return false;
+        }
+
         private static bool ReconcileComponents(
             GameObject gameObject,
             UnitySyncComponentState[] desiredStates,
@@ -4612,10 +4669,14 @@ namespace Glasspage.UnitySync
 
             if (desiredStates.Length == 0 ||
                 desiredStates[0] == null ||
-                desiredStates[0].ComponentIndex != 0 ||
-                !TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
+                desiredStates[0].ComponentIndex != 0)
             {
                 error = "The Transform type differs on " + gameObject.name + ".";
+                return false;
+            }
+
+            if (!TryReconcileTransformType(gameObject, desiredStates[0], out error))
+            {
                 return false;
             }
 
