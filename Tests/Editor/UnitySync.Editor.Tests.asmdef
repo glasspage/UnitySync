@@ -1,0 +1,7 @@
+{
+    "name": "Glasspage.UnitySync.Editor.Tests",
+    "references": ["Glasspage.UnitySync.Editor"],
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"],
+    "autoReferenced": false
+}
