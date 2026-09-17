@@ -4612,8 +4612,44 @@ namespace Glasspage.UnitySync
 
             if (desiredStates.Length == 0 ||
                 desiredStates[0] == null ||
-                desiredStates[0].ComponentIndex != 0 ||
-                !TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
+                desiredStates[0].ComponentIndex != 0)
+            {
+                error = "The Transform type differs on " + gameObject.name + ".";
+                return false;
+            }
+
+            // Unity can legitimately replace the built-in Transform with a RectTransform when
+            // UI components are added. Mirror that conversion before validating component 0 so
+            // a live Canvas/UI structural edit can continue through normal reconciliation.
+            if (!TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
+            {
+                Type desiredTransformType = ResolveType(desiredStates[0].TypeName);
+                if (gameObject.transform.GetType() == typeof(Transform) &&
+                    desiredTransformType == typeof(RectTransform))
+                {
+                    Component convertedTransform;
+                    try
+                    {
+                        convertedTransform = Undo.AddComponent(gameObject, typeof(RectTransform));
+                    }
+                    catch (Exception exception)
+                    {
+                        error = "Could not convert Transform to RectTransform on " +
+                                gameObject.name + ": " + exception.Message;
+                        return false;
+                    }
+
+                    if (convertedTransform == null ||
+                        gameObject.transform.GetType() != typeof(RectTransform))
+                    {
+                        error = "Could not convert Transform to RectTransform on " +
+                                gameObject.name + ".";
+                        return false;
+                    }
+                }
+            }
+
+            if (!TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
             {
                 error = "The Transform type differs on " + gameObject.name + ".";
                 return false;
