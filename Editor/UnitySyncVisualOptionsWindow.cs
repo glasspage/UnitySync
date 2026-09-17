@@ -12,6 +12,20 @@ namespace Glasspage.UnitySync
             "Long"
         };
 
+        private static readonly string[] StatusLogVisibilityLabels =
+        {
+            "Full",
+            "Log only",
+            "Pill only",
+            "Disabled"
+        };
+
+        private static readonly string[] StatusLogPositionLabels =
+        {
+            "Left",
+            "Right"
+        };
+
         [MenuItem("UnitySync/Visual Options", false, 20)]
         internal static void Open()
         {
@@ -60,6 +74,38 @@ namespace Glasspage.UnitySync
                 0f,
                 1f);
             UnitySyncVisualSettings.ContrastIntensity = contrastIntensity;
+
+            EditorGUILayout.Space(10f);
+            EditorGUILayout.LabelField("Status Log", EditorStyles.boldLabel);
+            EditorGUILayout.Space(2f);
+
+            UnitySyncStatusLogVisibility statusLogVisibility =
+                UnitySyncVisualSettings.StatusLogVisibility;
+            int selectedStatusLogVisibility = EditorGUILayout.Popup(
+                new GUIContent(
+                    "Status Log Visibility",
+                    "Controls whether the Scene view shows the activity log, UnitySync session pill, both, or neither."),
+                (int)statusLogVisibility,
+                StatusLogVisibilityLabels);
+            if (selectedStatusLogVisibility != (int)statusLogVisibility)
+            {
+                UnitySyncVisualSettings.StatusLogVisibility =
+                    (UnitySyncStatusLogVisibility)selectedStatusLogVisibility;
+            }
+
+            UnitySyncStatusLogPosition statusLogPosition =
+                UnitySyncVisualSettings.StatusLogPosition;
+            int selectedStatusLogPosition = EditorGUILayout.Popup(
+                new GUIContent(
+                    "Status Log Position",
+                    "Aligns the enabled status log elements to the bottom-left or bottom-right of the Scene view."),
+                (int)statusLogPosition,
+                StatusLogPositionLabels);
+            if (selectedStatusLogPosition != (int)statusLogPosition)
+            {
+                UnitySyncVisualSettings.StatusLogPosition =
+                    (UnitySyncStatusLogPosition)selectedStatusLogPosition;
+            }
 
             EditorGUILayout.Space(10f);
             EditorGUILayout.LabelField("Scene Selection", EditorStyles.boldLabel);
