@@ -221,10 +221,13 @@ namespace Glasspage.UnitySync
         private const float SpectateStatusLeftMargin = 12f;
         private const float SpectateStatusBottomMargin = 12f;
         private const float SpectateStatusSpacing = 4f;
-        private const float BottomRightStatusRightMargin = 12f;
-        private const float BottomRightStatusBottomMargin = 12f;
-        private const float BottomRightStatusSpacing = 4f;
-        private const float BottomRightStatusOpacity = 0.8f;
+        private const float StatusLogHorizontalMargin = 12f;
+        private const float StatusLogBottomMargin = 12f;
+        private const float StatusLogSpacing = 4f;
+        private const float StatusLogOpacity = 0.8f;
+        private const float StatusPillHeight = 19f;
+        private const float StatusPillMinimumWidth = 82f;
+        private const float StatusPillOpacity = 0.6f;
         private const float SceneUpdateStatusBottomMargin = 12f;
         private const float SceneUpdateStatusOpacity = 0.8f;
         private const int DiscSegmentCount = 48;
@@ -255,6 +258,10 @@ namespace Glasspage.UnitySync
         private static GameObject _collaboratorsRoot;
         private static GUIStyle _labelStyle;
         private static GUIStyle _labelOutlineStyle;
+        private static GUIStyle _statusPillStyle;
+        private static Texture2D _statusPillBackground;
+        private static Texture2D _statusPillHoverBackground;
+        private static Texture2D _statusPillActiveBackground;
 
         static UnitySyncPresenceRoot()
         {
@@ -658,100 +665,122 @@ namespace Glasspage.UnitySync
 
         private static void OnSceneGUI(SceneView sceneView)
         {
-            if (Event.current == null || Event.current.type != EventType.Repaint)
+            if (Event.current == null)
             {
+                return;
+            }
+
+            if (Event.current.type != EventType.Repaint)
+            {
+                DrawStatusLog(sceneView, StatusLogOpacity);
                 return;
             }
 
             DrawSceneUpdateStatus(sceneView);
-            DrawBottomRightStatuses(sceneView, BottomRightStatusOpacity);
 
             float opacity = UnitySyncVisualSettings.ViewportOpacity;
-            if (opacity <= 0f)
+            if (opacity > 0f)
             {
-                return;
-            }
+                Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
+                Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
+                float directionLineDistance =
+                    UnitySyncVisualSettings.LineDistance * ViewportScale;
+                Matrix4x4 previousMatrix = Handles.matrix;
+                Color previousColor = Handles.color;
 
-            Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
-            Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
-            float directionLineDistance = UnitySyncVisualSettings.LineDistance * ViewportScale;
-            Matrix4x4 previousMatrix = Handles.matrix;
-            Color previousColor = Handles.color;
-
-            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
-            {
-                ViewportMarker marker = pair.Value;
-                if (marker.GameObject == null)
+                foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
                 {
-                    continue;
-                }
+                    ViewportMarker marker = pair.Value;
+                    if (marker.GameObject == null)
+                    {
+                        continue;
+                    }
 
-                bool isSpectatingRelation =
-                    !marker.IsDebug &&
-                    (pair.Key == spectatingPlayerId ||
-                     marker.SpectatingPlayerId == localPlayerId);
-                if (isSpectatingRelation)
-                {
-                    continue;
-                }
+                    bool isSpectatingRelation =
+                        !marker.IsDebug &&
+                        (pair.Key == spectatingPlayerId ||
+                         marker.SpectatingPlayerId == localPlayerId);
+                    if (isSpectatingRelation)
+                    {
+                        continue;
+                    }
 
-                Transform markerTransform = marker.GameObject.transform;
-                Color foregroundColor = WithAlpha(marker.Color, opacity);
-                Color outlineColor = CalculateOutlineColor(marker.Color, opacity);
-                Handles.matrix = Matrix4x4.TRS(
-                    markerTransform.position,
-                    markerTransform.rotation,
-                    Vector3.one);
+                    Transform markerTransform = marker.GameObject.transform;
+                    Color foregroundColor = WithAlpha(marker.Color, opacity);
+                    Color outlineColor = CalculateOutlineColor(marker.Color, opacity);
+                    Handles.matrix = Matrix4x4.TRS(
+                        markerTransform.position,
+                        markerTransform.rotation,
+                        Vector3.one);
 
-                if (marker.Orthographic)
-                {
-                    float height = Mathf.Clamp(marker.OrthographicSize * 0.12f, 0.15f, 1.5f) * ViewportScale;
-                    float width = height * marker.Aspect;
-                    DrawWireCube(
-                        Vector3.forward * (0.08f * ViewportScale),
-                        new Vector3(width, height, 0.16f * ViewportScale),
-                        outlineColor,
-                        foregroundColor);
-                }
-                else
-                {
-                    DrawPerspectiveFrustum(
-                        marker.FieldOfView,
-                        marker.Aspect,
-                        outlineColor,
-                        foregroundColor);
-                }
+                    if (marker.Orthographic)
+                    {
+                        float height = Mathf.Clamp(
+                            marker.OrthographicSize * 0.12f,
+                            0.15f,
+                            1.5f) * ViewportScale;
+                        float width = height * marker.Aspect;
+                        DrawWireCube(
+                            Vector3.forward * (0.08f * ViewportScale),
+                            new Vector3(
+                                width,
+                                height,
+                                0.16f * ViewportScale),
+                            outlineColor,
+                            foregroundColor);
+                    }
+                    else
+                    {
+                        DrawPerspectiveFrustum(
+                            marker.FieldOfView,
+                            marker.Aspect,
+                            outlineColor,
+                            foregroundColor);
+                    }
 
-                if (directionLineDistance > 0f)
-                {
-                    float directionLineOpacity = opacity * DirectionLineOpacityMultiplier;
-                    Color directionLineColor = WithAlpha(marker.Color, directionLineOpacity);
-                    Color directionLineOutlineColor = CalculateOutlineColor(
-                        marker.Color,
-                        directionLineOpacity);
-                    DrawOutlinedLine(
-                        Vector3.zero,
-                        Vector3.forward * directionLineDistance,
-                        directionLineOutlineColor,
-                        directionLineColor);
-                    DrawOutlinedDisc(
-                        Vector3.forward * directionLineDistance,
-                        0.04f * ViewportScale,
-                        directionLineOutlineColor,
-                        directionLineColor);
+                    if (directionLineDistance > 0f)
+                    {
+                        float directionLineOpacity =
+                            opacity * DirectionLineOpacityMultiplier;
+                        Color directionLineColor = WithAlpha(
+                            marker.Color,
+                            directionLineOpacity);
+                        Color directionLineOutlineColor =
+                            CalculateOutlineColor(
+                                marker.Color,
+                                directionLineOpacity);
+                        DrawOutlinedLine(
+                            Vector3.zero,
+                            Vector3.forward * directionLineDistance,
+                            directionLineOutlineColor,
+                            directionLineColor);
+                        DrawOutlinedDisc(
+                            Vector3.forward * directionLineDistance,
+                            0.04f * ViewportScale,
+                            directionLineOutlineColor,
+                            directionLineColor);
+                    }
+
+                    Handles.matrix = previousMatrix;
+                    DrawDisplayName(
+                        sceneView,
+                        marker,
+                        markerTransform,
+                        opacity);
                 }
 
                 Handles.matrix = previousMatrix;
-                DrawDisplayName(sceneView, marker, markerTransform, opacity);
+                Handles.color = previousColor;
+                DrawSpectatingStatuses(
+                    sceneView,
+                    localPlayerId,
+                    spectatingPlayerId,
+                    opacity);
             }
 
-            Handles.matrix = previousMatrix;
-            Handles.color = previousColor;
-            DrawSpectatingStatuses(
-                sceneView,
-                localPlayerId,
-                spectatingPlayerId,
-                opacity);
+            // Draw the status log after every viewport/name overlay so the pill and
+            // its text remain visually in front of collaborator presence graphics.
+            DrawStatusLog(sceneView, StatusLogOpacity);
         }
 
         private static void DrawDisplayName(
@@ -866,130 +895,303 @@ namespace Glasspage.UnitySync
             Handles.EndGUI();
         }
 
-        private static void DrawBottomRightStatuses(
+        private static void DrawStatusLog(
             SceneView sceneView,
             float opacity)
         {
-            PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
+            UnitySyncStatusLogVisibility visibility =
+                UnitySyncVisualSettings.StatusLogVisibility;
+            bool showLog =
+                visibility == UnitySyncStatusLogVisibility.Full ||
+                visibility == UnitySyncStatusLogVisibility.LogOnly;
+            bool showPill =
+                visibility == UnitySyncStatusLogVisibility.Full ||
+                visibility == UnitySyncStatusLogVisibility.PillOnly;
 
-            List<StatusDisplay> statuses = new List<StatusDisplay>(
-                TimedStatusEvents.Count + ImportingAssetsStartedAt.Count + 4);
-            foreach (TimedStatusEvent statusEvent in TimedStatusEvents)
-            {
-                statuses.Add(new StatusDisplay(
-                    statusEvent.Text,
-                    statusEvent.Color,
-                    statusEvent.Priority,
-                    statusEvent.CreatedAtSeconds,
-                    statusEvent.Sequence));
-            }
-
-            foreach (KeyValuePair<Guid, double> importing in ImportingAssetsStartedAt)
-            {
-                if (!Markers.TryGetValue(importing.Key, out ViewportMarker marker) ||
-                    marker.GameObject == null ||
-                    marker.IsDebug)
-                {
-                    continue;
-                }
-
-                statuses.Add(new StatusDisplay(
-                    marker.DisplayName + " is importing assets...",
-                    marker.Color,
-                    UnitySyncSceneStatusPriority.Ongoing,
-                    importing.Value,
-                    0));
-            }
-
-            UnitySyncHostDownloadProgress[] progress =
-                UnitySyncFileSynchronizer.GetHostDownloadProgresses();
-            foreach (UnitySyncHostDownloadProgress item in progress)
-            {
-                if (ImportingAssetsStartedAt.ContainsKey(item.PlayerId) ||
-                    !Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
-                    marker.GameObject == null ||
-                    marker.IsDebug)
-                {
-                    continue;
-                }
-
-                string noun;
-                switch (item.Scope)
-                {
-                    case UnitySyncFileSyncScope.Packages:
-                        noun = "packages";
-                        break;
-                    case UnitySyncFileSyncScope.Project:
-                        noun = "project files";
-                        break;
-                    default:
-                        noun = "assets";
-                        break;
-                }
-
-                int percent = Mathf.Clamp(
-                    Mathf.RoundToInt(item.Progress01 * 100f),
-                    0,
-                    100);
-                statuses.Add(new StatusDisplay(
-                    marker.DisplayName + " is receiving " + noun + " (" + percent + "%)...",
-                    marker.Color,
-                    UnitySyncSceneStatusPriority.Ongoing,
-                    item.StartedAtSeconds,
-                    0));
-            }
-
-            if (statuses.Count == 0)
+            if (!showLog && !showPill)
             {
                 return;
             }
 
-            statuses.Sort((left, right) =>
-            {
-                int priorityComparison = ((int)right.Priority).CompareTo((int)left.Priority);
-                if (priorityComparison != 0)
-                {
-                    return priorityComparison;
-                }
-
-                int timeComparison = right.SortTime.CompareTo(left.SortTime);
-                if (timeComparison != 0)
-                {
-                    return timeComparison;
-                }
-
-                int sequenceComparison = right.Sequence.CompareTo(left.Sequence);
-                if (sequenceComparison != 0)
-                {
-                    return sequenceComparison;
-                }
-
-                return StringComparer.OrdinalIgnoreCase.Compare(left.Text, right.Text);
-            });
-
-            EnsureLabelStyles();
-            float bottom = sceneView.position.height - BottomRightStatusBottomMargin;
+            float bottom = sceneView.position.height - StatusLogBottomMargin;
             Handles.BeginGUI();
+            int previousGuiDepth = GUI.depth;
+            GUI.depth = -1000;
 
-            foreach (StatusDisplay status in statuses)
+            if (showPill && UnitySyncSession.IsActive)
             {
-                GUIContent content = new GUIContent(status.Text);
-                Vector2 labelSize = _labelStyle.CalcSize(content);
-                float y = bottom - labelSize.y;
-                Rect labelRect = new Rect(
-                    sceneView.position.width - BottomRightStatusRightMargin - labelSize.x,
-                    y,
-                    labelSize.x,
-                    labelSize.y);
-                DrawOutlinedGuiLabel(
-                    labelRect,
-                    content,
-                    status.Color,
-                    opacity);
-                bottom = y - BottomRightStatusSpacing;
+                EnsureStatusPillStyle();
+
+                GUIContent pillContent = new GUIContent(
+                    "UnitySync (" + GetConnectedUserCount() + ")");
+                Vector2 pillSize = _statusPillStyle.CalcSize(pillContent);
+                pillSize.x = Mathf.Max(StatusPillMinimumWidth, pillSize.x);
+                pillSize.y = StatusPillHeight;
+
+                Rect pillRect = new Rect(
+                    GetStatusLogX(sceneView, pillSize.x),
+                    bottom - pillSize.y,
+                    pillSize.x,
+                    pillSize.y);
+                if (GUI.Button(pillRect, pillContent, _statusPillStyle))
+                {
+                    UnitySyncWindow.Open();
+                }
+
+                bottom = pillRect.y - StatusLogSpacing;
             }
 
+            if (showLog && Event.current.type == EventType.Repaint)
+            {
+                PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
+
+                List<StatusDisplay> statuses = new List<StatusDisplay>(
+                    TimedStatusEvents.Count + ImportingAssetsStartedAt.Count + 4);
+                foreach (TimedStatusEvent statusEvent in TimedStatusEvents)
+                {
+                    statuses.Add(new StatusDisplay(
+                        statusEvent.Text,
+                        statusEvent.Color,
+                        statusEvent.Priority,
+                        statusEvent.CreatedAtSeconds,
+                        statusEvent.Sequence));
+                }
+
+                foreach (KeyValuePair<Guid, double> importing in ImportingAssetsStartedAt)
+                {
+                    if (!Markers.TryGetValue(importing.Key, out ViewportMarker marker) ||
+                        marker.GameObject == null ||
+                        marker.IsDebug)
+                    {
+                        continue;
+                    }
+
+                    statuses.Add(new StatusDisplay(
+                        marker.DisplayName + " is importing assets...",
+                        marker.Color,
+                        UnitySyncSceneStatusPriority.Ongoing,
+                        importing.Value,
+                        0));
+                }
+
+                UnitySyncHostDownloadProgress[] progress =
+                    UnitySyncFileSynchronizer.GetHostDownloadProgresses();
+                foreach (UnitySyncHostDownloadProgress item in progress)
+                {
+                    if (ImportingAssetsStartedAt.ContainsKey(item.PlayerId) ||
+                        !Markers.TryGetValue(item.PlayerId, out ViewportMarker marker) ||
+                        marker.GameObject == null ||
+                        marker.IsDebug)
+                    {
+                        continue;
+                    }
+
+                    string noun;
+                    switch (item.Scope)
+                    {
+                        case UnitySyncFileSyncScope.Packages:
+                            noun = "packages";
+                            break;
+                        case UnitySyncFileSyncScope.Project:
+                            noun = "project files";
+                            break;
+                        default:
+                            noun = "assets";
+                            break;
+                    }
+
+                    int percent = Mathf.Clamp(
+                        Mathf.RoundToInt(item.Progress01 * 100f),
+                        0,
+                        100);
+                    statuses.Add(new StatusDisplay(
+                        marker.DisplayName + " is receiving " + noun + " (" + percent + "%)...",
+                        marker.Color,
+                        UnitySyncSceneStatusPriority.Ongoing,
+                        item.StartedAtSeconds,
+                        0));
+                }
+
+                statuses.Sort((left, right) =>
+                {
+                    int priorityComparison = ((int)right.Priority).CompareTo((int)left.Priority);
+                    if (priorityComparison != 0)
+                    {
+                        return priorityComparison;
+                    }
+
+                    int timeComparison = right.SortTime.CompareTo(left.SortTime);
+                    if (timeComparison != 0)
+                    {
+                        return timeComparison;
+                    }
+
+                    int sequenceComparison = right.Sequence.CompareTo(left.Sequence);
+                    if (sequenceComparison != 0)
+                    {
+                        return sequenceComparison;
+                    }
+
+                    return StringComparer.OrdinalIgnoreCase.Compare(left.Text, right.Text);
+                });
+
+                EnsureLabelStyles();
+                foreach (StatusDisplay status in statuses)
+                {
+                    GUIContent content = new GUIContent(status.Text);
+                    Vector2 labelSize = _labelStyle.CalcSize(content);
+                    float y = bottom - labelSize.y;
+                    Rect labelRect = new Rect(
+                        GetStatusLogX(sceneView, labelSize.x),
+                        y,
+                        labelSize.x,
+                        labelSize.y);
+                    DrawOutlinedGuiLabel(
+                        labelRect,
+                        content,
+                        status.Color,
+                        opacity);
+                    bottom = y - StatusLogSpacing;
+                }
+            }
+
+            GUI.depth = previousGuiDepth;
             Handles.EndGUI();
+        }
+
+        private static float GetStatusLogX(
+            SceneView sceneView,
+            float width)
+        {
+            return UnitySyncVisualSettings.StatusLogPosition ==
+                   UnitySyncStatusLogPosition.Left
+                ? StatusLogHorizontalMargin
+                : sceneView.position.width - StatusLogHorizontalMargin - width;
+        }
+
+        private static int GetConnectedUserCount()
+        {
+            int count = 1;
+            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
+            {
+                ViewportMarker marker = pair.Value;
+                if (marker.GameObject != null && !marker.IsDebug)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static void EnsureStatusPillStyle()
+        {
+            if (_statusPillStyle != null)
+            {
+                return;
+            }
+
+            _statusPillBackground = CreateStatusPillTexture(
+                new Color(0.47f, 0.25f, 0.76f, StatusPillOpacity));
+            _statusPillHoverBackground = CreateStatusPillTexture(
+                new Color(0.56f, 0.32f, 0.86f, StatusPillOpacity));
+            _statusPillActiveBackground = CreateStatusPillTexture(
+                new Color(0.39f, 0.18f, 0.66f, StatusPillOpacity));
+
+            int inheritedFontSize = EditorStyles.miniButton.fontSize;
+            if (inheritedFontSize <= 0)
+            {
+                inheritedFontSize = EditorStyles.label.fontSize;
+            }
+            if (inheritedFontSize <= 0)
+            {
+                inheritedFontSize = 12;
+            }
+
+            _statusPillStyle = new GUIStyle(EditorStyles.miniButton)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontStyle = FontStyle.Bold,
+                fontSize = Mathf.Max(8, inheritedFontSize - 1),
+                padding = new RectOffset(8, 8, 1, 1),
+                border = new RectOffset(9, 9, 9, 9)
+            };
+
+            _statusPillStyle.normal.background = _statusPillBackground;
+            _statusPillStyle.hover.background = _statusPillHoverBackground;
+            _statusPillStyle.active.background = _statusPillActiveBackground;
+            _statusPillStyle.focused.background = _statusPillHoverBackground;
+            _statusPillStyle.onNormal.background = _statusPillBackground;
+            _statusPillStyle.onHover.background = _statusPillHoverBackground;
+            _statusPillStyle.onActive.background = _statusPillActiveBackground;
+            _statusPillStyle.onFocused.background = _statusPillHoverBackground;
+
+            Color textColor = Color.white;
+            SetLabelTextColor(_statusPillStyle, textColor);
+        }
+
+        private static Texture2D CreateStatusPillTexture(Color color)
+        {
+            const int width = 48;
+            const int height = 24;
+            const int samplesPerAxis = 4;
+            const float radius = height * 0.5f;
+            const float inverseSampleCount =
+                1f / (samplesPerAxis * samplesPerAxis);
+
+            Texture2D texture = new Texture2D(
+                width,
+                height,
+                TextureFormat.RGBA32,
+                false)
+            {
+                name = "UnitySync Status Pill",
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+
+            Color[] pixels = new Color[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int insideSamples = 0;
+                    for (int sampleY = 0; sampleY < samplesPerAxis; sampleY++)
+                    {
+                        float py = y + (sampleY + 0.5f) / samplesPerAxis;
+                        for (int sampleX = 0; sampleX < samplesPerAxis; sampleX++)
+                        {
+                            float px = x + (sampleX + 0.5f) / samplesPerAxis;
+                            float nearestX = Mathf.Clamp(
+                                px,
+                                radius,
+                                width - radius);
+                            float nearestY = Mathf.Clamp(
+                                py,
+                                radius,
+                                height - radius);
+                            float dx = px - nearestX;
+                            float dy = py - nearestY;
+                            if (dx * dx + dy * dy <= radius * radius)
+                            {
+                                insideSamples++;
+                            }
+                        }
+                    }
+
+                    float coverage = insideSamples * inverseSampleCount;
+                    pixels[y * width + x] = new Color(
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a * coverage);
+                }
+            }
+
+            texture.SetPixels(pixels);
+            texture.Apply(false, true);
+            return texture;
         }
 
         private static void DrawSpectatingStatus(

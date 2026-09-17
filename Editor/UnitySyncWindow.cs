@@ -52,12 +52,13 @@ namespace Glasspage.UnitySync
         private static GUIStyle _richWarningHelpBoxStyle;
 
         [MenuItem("UnitySync/Session", false, 0)]
-        private static void Open()
+        internal static void Open()
         {
             UnitySyncWindow window = GetWindow<UnitySyncWindow>();
             window.titleContent = new GUIContent("UnitySync");
             window.minSize = new Vector2(360f, 420f);
             window.Show();
+            window.Focus();
         }
 
         private void OnEnable()
