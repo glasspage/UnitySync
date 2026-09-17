@@ -122,7 +122,10 @@ namespace Glasspage.UnitySync
             return true;
         }
 
-        internal static bool TryCaptureHierarchy(GameObject gameObject, out UnitySyncSceneObjectChange change)
+        internal static bool TryCaptureHierarchy(
+            GameObject gameObject,
+            bool includePrefabIdentity,
+            out UnitySyncSceneObjectChange change)
         {
             change = null;
             if (!TryCreateAddress(gameObject, out UnitySyncSceneObjectAddress address))
@@ -143,10 +146,15 @@ namespace Glasspage.UnitySync
                 };
             }
 
-            CapturePrefabIdentity(
-                gameObject,
-                out UnitySyncObjectReferenceState prefabSource,
-                out bool prefabInstanceRoot);
+            UnitySyncObjectReferenceState prefabSource = null;
+            bool prefabInstanceRoot = false;
+            if (includePrefabIdentity)
+            {
+                CapturePrefabIdentity(
+                    gameObject,
+                    out prefabSource,
+                    out prefabInstanceRoot);
+            }
 
             change = new UnitySyncSceneObjectChange
             {
