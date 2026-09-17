@@ -20,6 +20,7 @@ namespace Glasspage.UnitySync
 
         private static Type _failedRemoteChangeType;
         private static FieldInfo _changeField;
+        private static FieldInfo _errorField;
 
         static UnitySyncUnsyncedRecoveryTargetTracker()
         {
@@ -72,10 +73,20 @@ namespace Glasspage.UnitySync
                     continue;
                 }
 
-                if (TrackedTargets.TryGetValue(
+                bool targetWasDeleted =
+                    TrackedTargets.TryGetValue(
                         stateKey,
                         out GameObject trackedTarget) &&
-                    trackedTarget == null)
+                    trackedTarget == null;
+                bool targetNeverExistedLocally =
+                    !TrackedTargets.ContainsKey(stateKey) &&
+                    IsMissingTargetFailure(GetLastError(entry.Value));
+
+                // A failed property/component packet cannot reconstruct an object that does not
+                // exist locally. Keeping that packet as a recovery item only makes Force Sync
+                // replay an update that is guaranteed to fail with the same missing-object error.
+                // Drop it just like a target that existed and was subsequently deleted.
+                if (targetWasDeleted || targetNeverExistedLocally)
                 {
                     if (staleKeys == null)
                     {
@@ -135,21 +146,44 @@ namespace Glasspage.UnitySync
 
         private static UnitySyncSceneObjectChange GetChange(object failedRemoteChange)
         {
+            EnsureFailedRemoteChangeFields(failedRemoteChange);
+            return _changeField?.GetValue(failedRemoteChange) as UnitySyncSceneObjectChange;
+        }
+
+        private static string GetLastError(object failedRemoteChange)
+        {
+            EnsureFailedRemoteChangeFields(failedRemoteChange);
+            return _errorField?.GetValue(failedRemoteChange) as string ?? string.Empty;
+        }
+
+        private static void EnsureFailedRemoteChangeFields(object failedRemoteChange)
+        {
             if (failedRemoteChange == null)
             {
-                return null;
+                return;
             }
 
             Type failedType = failedRemoteChange.GetType();
-            if (_failedRemoteChangeType != failedType)
+            if (_failedRemoteChangeType == failedType)
             {
-                _failedRemoteChangeType = failedType;
-                _changeField = failedType.GetField(
-                    "Change",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return;
             }
 
-            return _changeField?.GetValue(failedRemoteChange) as UnitySyncSceneObjectChange;
+            _failedRemoteChangeType = failedType;
+            _changeField = failedType.GetField(
+                "Change",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            _errorField = failedType.GetField(
+                "LastError",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        private static bool IsMissingTargetFailure(string error)
+        {
+            return !string.IsNullOrEmpty(error) &&
+                   error.IndexOf(
+                       "No matching scene object exists",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
         }
     }
 }
