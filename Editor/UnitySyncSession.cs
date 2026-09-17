@@ -93,6 +93,7 @@ namespace Glasspage.UnitySync
         private static BuildTarget _suppressedBuildTarget = BuildTarget.NoTarget;
         private static bool _hostProjectSyncActive;
         private static bool _hostSceneSyncActive;
+        private static bool _unsyncedSceneRecoveryFailed;
 
         internal static event Action Changed;
 
@@ -113,6 +114,12 @@ namespace Glasspage.UnitySync
         internal static Color DefaultColor => ColorFor(LocalPlayerId);
         internal static Guid CurrentPlayerId => LocalPlayerId;
         internal static Guid SpectatingPlayerId => _spectatingPlayerId;
+        internal static bool HasUnsyncedSceneObjects =>
+            UnitySyncSceneSynchronizer.HasUnsyncedRemoteChanges;
+        internal static int UnsyncedSceneObjectCount =>
+            UnitySyncSceneSynchronizer.UnsyncedObjectCount;
+        internal static bool UnsyncedSceneRecoveryFailed =>
+            _unsyncedSceneRecoveryFailed;
 
         static UnitySyncSession()
         {
@@ -209,6 +216,7 @@ namespace Glasspage.UnitySync
                 HostSceneSyncPlayers.Clear();
                 _hostProjectSyncActive = false;
                 _hostSceneSyncActive = false;
+                _unsyncedSceneRecoveryFailed = false;
                 UnitySyncPresenceRoot.AddTimedStatus(
                     "Session started",
                     Color.white,
@@ -268,6 +276,7 @@ namespace Glasspage.UnitySync
                 _hasLastSelectionState = false;
                 _lastSelectionSignature = string.Empty;
                 ResetLocalAssetImportStatusTracking();
+                _unsyncedSceneRecoveryFailed = false;
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -293,6 +302,50 @@ namespace Glasspage.UnitySync
         internal static void Stop()
         {
             StopInternal(true, true);
+        }
+
+        internal static void RetryUnsyncedSceneObjects()
+        {
+            if (_transport == null ||
+                !UnitySyncSceneSynchronizer.HasUnsyncedRemoteChanges)
+            {
+                _unsyncedSceneRecoveryFailed = false;
+                Changed?.Invoke();
+                return;
+            }
+
+            int objectCount = UnitySyncSceneSynchronizer.UnsyncedObjectCount;
+            if (UnitySyncSceneSynchronizer.RetryUnsyncedRemoteChanges(
+                    out string recoveryError))
+            {
+                _unsyncedSceneRecoveryFailed = false;
+                AddLog(
+                    "Recovered " + objectCount + " previously unsynced scene " +
+                    (objectCount == 1 ? "object." : "objects."));
+            }
+            else
+            {
+                _unsyncedSceneRecoveryFailed = true;
+                AddFailure(
+                    "Scene recovery failed: " +
+                    (string.IsNullOrEmpty(recoveryError)
+                        ? "one or more scene objects could not be synchronized."
+                        : recoveryError));
+            }
+
+            UnitySyncPresenceRoot.RequestSceneRepaint();
+            Changed?.Invoke();
+        }
+
+        internal static void NotifyUnsyncedSceneStateChanged()
+        {
+            if (!UnitySyncSceneSynchronizer.HasUnsyncedRemoteChanges)
+            {
+                _unsyncedSceneRecoveryFailed = false;
+            }
+
+            UnitySyncPresenceRoot.RequestSceneRepaint();
+            Changed?.Invoke();
         }
 
         internal static bool ContinueFileSync(out string error)
@@ -1540,6 +1593,7 @@ namespace Glasspage.UnitySync
             HostSceneSyncPlayers.Clear();
             _hostProjectSyncActive = false;
             _hostSceneSyncActive = false;
+            _unsyncedSceneRecoveryFailed = false;
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();
             _hasLastViewportState = false;
