@@ -1003,10 +1003,20 @@ namespace Glasspage.UnitySync
                             break;
 
                         case UnitySyncMessageType.SceneObjectChange:
-                            EnqueueSceneChange(message.PlayerId, message.SceneChange);
-                            Broadcast(
-                                UnitySyncProtocol.CreateSceneObjectChange(message.PlayerId, message.SceneChange),
-                                peer);
+                            // Multiple guest receive loops can race here. Serialize host ingestion
+                            // with the event queue so the host's apply order and the authoritative
+                            // relay order use the same last-write-wins sequence.
+                            lock (_eventsLock)
+                            {
+                                EnqueueSceneChange(message.PlayerId, message.SceneChange);
+                                if (HasMultipleAuthenticatedGuests())
+                                {
+                                    // In 3+ user sessions, rebroadcast through the host outbound
+                                    // queue to every guest, including the originator. This gives all
+                                    // guests the same host-observed final packet for a shared path.
+                                    SendSceneObjectChange(message.PlayerId, message.SceneChange);
+                                }
+                            }
                             break;
 
                         case UnitySyncMessageType.SceneSettingsChange:
@@ -1369,6 +1379,29 @@ namespace Glasspage.UnitySync
                     ref _totalBytesSent,
                     lengthBytes.LongLength + envelope.LongLength);
             }
+        }
+
+        private bool HasMultipleAuthenticatedGuests()
+        {
+            int authenticatedGuestCount = 0;
+            lock (_peersLock)
+            {
+                foreach (Peer peer in _peers)
+                {
+                    if (peer.PlayerId == Guid.Empty || peer.Superseded)
+                    {
+                        continue;
+                    }
+
+                    authenticatedGuestCount++;
+                    if (authenticatedGuestCount >= 2)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private void Broadcast(byte[] payload, Peer except)
@@ -1821,7 +1854,10 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
-            coalesceKey = transportEvent.PlayerId.ToString("N") + "|" + stateKey;
+            // The transport stream defines last-write-wins order for shared live state.
+            // Do not split the same path by originating player, otherwise an A/B/A burst
+            // can leave a stale B event behind after A's newer packet replaced A's old node.
+            coalesceKey = stateKey;
             return true;
         }
 
