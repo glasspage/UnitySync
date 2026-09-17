@@ -1,0 +1,98 @@
+name: Apply RectTransform live-create fix
+
+on:
+  push:
+    branches:
+      - fix/recttransform-canvas-live-create
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/recttransform-canvas-live-create
+          fetch-depth: 0
+
+      - name: Patch UnitySyncSceneSynchronizer
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("Editor/SceneSync/UnitySyncSceneSynchronizer.cs")
+          text = path.read_text(encoding="utf-8")
+
+          old = '''            int instanceId = gameObject.GetInstanceID();
+            string structureKey = instanceId + ":s";
+'''
+          new = '''            int instanceId = gameObject.GetInstanceID();
+            if (IsAwaitingInitialHierarchyShell(gameObject, instanceId))
+            {
+                // Unity can publish follow-up property/structure events while a newly created
+                // hierarchy is still being assembled (notably while UI objects settle on a
+                // RectTransform). The pending live hierarchy shell is captured later from the
+                // final object state, so sending these intermediate events can race ahead with
+                // a stale Transform layout and make the receiver reject reconciliation.
+                return;
+            }
+
+            string structureKey = instanceId + ":s";
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f"Expected AddPending anchor exactly once, found {text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          anchor = '''        private static void SetPending(string key, PendingChange change)
+        {
+'''
+          helper = '''        private static bool IsAwaitingInitialHierarchyShell(
+            GameObject gameObject,
+            int instanceId)
+        {
+            if (gameObject == null || !BatchedObjectInstanceIds.Contains(instanceId))
+            {
+                return false;
+            }
+
+            if (!UnitySyncSceneObjectRegistry.TryGetId(gameObject, out string objectId) ||
+                string.IsNullOrEmpty(objectId))
+            {
+                // QueueCreatedHierarchy marks the instance as batched before the first hierarchy
+                // capture assigns its synchronized object ID. In that window the shell is
+                // necessarily still pending.
+                return true;
+            }
+
+            foreach (HierarchyBatch batch in HierarchyBatches)
+            {
+                if (batch == null || batch.Snapshot != null)
+                {
+                    continue;
+                }
+
+                if (batch.SentHierarchyObjectIds.Contains(objectId))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+'''
+          if text.count(anchor) != 1:
+              raise SystemExit(f"Expected SetPending anchor exactly once, found {text.count(anchor)}")
+          text = text.replace(anchor, helper + anchor, 1)
+          path.write_text(text, encoding="utf-8")
+
+      - name: Remove temporary workflow and commit fix
+        run: |
+          git rm .github/workflows/unitysync-recttransform-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Editor/SceneSync/UnitySyncSceneSynchronizer.cs
+          git commit -m "Fix RectTransform live hierarchy creation race"
+          git push origin HEAD:fix/recttransform-canvas-live-create
