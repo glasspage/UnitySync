@@ -1094,7 +1094,7 @@ namespace Glasspage.UnitySync
                 fontStyle = FontStyle.Bold,
                 fontSize = Mathf.Max(8, inheritedFontSize - 1),
                 padding = new RectOffset(8, 8, 1, 1),
-                border = new RectOffset(10, 10, 10, 10)
+                border = new RectOffset(9, 9, 9, 9)
             };
 
             _statusPillStyle.normal.background = _statusPillBackground;
