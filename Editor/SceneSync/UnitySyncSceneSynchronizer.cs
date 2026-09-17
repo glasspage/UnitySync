@@ -1945,6 +1945,23 @@ namespace Glasspage.UnitySync
                         change.SnapshotId = batch.Snapshot.SnapshotId;
                     }
 
+                    // Hierarchy packets can now carry prefab asset identity. Make sure a newly
+                    // created/edited prefab asset is present on peers before the packet asks them
+                    // to instantiate or adopt it.
+                    if (!UnitySyncProjectSynchronizer.EnsureSceneAssetReferencesQueued(
+                            transport,
+                            localPlayerId,
+                            change))
+                    {
+                        batch.Index--;
+                        if (batch.Snapshot != null)
+                        {
+                            batch.ProcessedSnapshotChangeCount =
+                                Math.Max(0, batch.ProcessedSnapshotChangeCount - 1);
+                        }
+                        return true;
+                    }
+
                     transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
                     if (change.Address != null &&
                         !string.IsNullOrEmpty(change.Address.ObjectId))
