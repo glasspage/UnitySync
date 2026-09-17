@@ -390,17 +390,37 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            bool removedSnapshot = false;
             int batchCount = HierarchyBatches.Count;
             for (int index = 0; index < batchCount; index++)
             {
                 HierarchyBatch batch = HierarchyBatches.Dequeue();
                 if (batch.Snapshot != null && batch.TargetPlayerId == targetPlayerId)
                 {
+                    removedSnapshot = true;
                     continue;
                 }
 
                 HierarchyBatches.Enqueue(batch);
             }
+
+            if (removedSnapshot && !HasQueuedSnapshot())
+            {
+                ClearSnapshotProgressBar();
+            }
+        }
+
+        private static bool HasQueuedSnapshot()
+        {
+            foreach (HierarchyBatch batch in HierarchyBatches)
+            {
+                if (batch != null && batch.Snapshot != null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         internal static bool BeginRemoteSnapshot(
