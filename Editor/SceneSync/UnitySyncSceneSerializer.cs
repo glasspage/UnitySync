@@ -143,12 +143,19 @@ namespace Glasspage.UnitySync
                 };
             }
 
+            CapturePrefabIdentity(
+                gameObject,
+                out UnitySyncObjectReferenceState prefabSource,
+                out bool prefabInstanceRoot);
+
             change = new UnitySyncSceneObjectChange
             {
                 Kind = UnitySyncSceneChangeKind.Upsert,
                 Address = address,
                 HierarchyOnly = true,
                 ReconcileComponents = true,
+                PrefabSource = prefabSource,
+                PrefabInstanceRoot = prefabInstanceRoot,
                 GameObject = CaptureGameObjectSettings(gameObject),
                 Components = componentStates
             };
@@ -2408,6 +2415,8 @@ namespace Glasspage.UnitySync
                             expectedTransformType,
                             change.GameObject != null ? change.GameObject.Name : string.Empty,
                             allowSnapshotAdoption,
+                            change.PrefabSource,
+                            change.PrefabInstanceRoot,
                             out gameObject,
                             out error))
                     {
@@ -2629,6 +2638,8 @@ namespace Glasspage.UnitySync
             Type expectedTransformType,
             string expectedName,
             bool allowSnapshotAdoption,
+            UnitySyncObjectReferenceState prefabSource,
+            bool prefabInstanceRoot,
             out GameObject gameObject,
             out string error)
         {
@@ -2652,7 +2663,60 @@ namespace Glasspage.UnitySync
                 }
             }
 
-            if (gameObject == null && allowSnapshotAdoption)
+            if (gameObject == null && prefabSource != null)
+            {
+                if (!TryResolveObjectReference(prefabSource, out Object resolvedPrefabSource) ||
+                    !(resolvedPrefabSource is GameObject prefabSourceObject))
+                {
+                    error = "Prefab source could not be resolved for " + Describe(address) + ". " +
+                            DescribeObjectReference(prefabSource);
+                    return false;
+                }
+
+                gameObject = TryAdoptPrefabObject(
+                    address,
+                    targetScene,
+                    parentObject,
+                    expectedTransformType,
+                    expectedName,
+                    prefabSourceObject);
+
+                if (gameObject == null && prefabInstanceRoot)
+                {
+                    Object instance;
+                    try
+                    {
+                        instance = PrefabUtility.InstantiatePrefab(prefabSourceObject, targetScene);
+                    }
+                    catch (Exception exception)
+                    {
+                        error = "Could not instantiate prefab " + prefabSource.AssetPath + " for " +
+                                Describe(address) + ": " + exception.Message;
+                        return false;
+                    }
+
+                    gameObject = instance as GameObject;
+                    if (gameObject == null)
+                    {
+                        error = "Prefab source " + prefabSource.AssetPath +
+                                " did not create a GameObject for " + Describe(address) + ".";
+                        return false;
+                    }
+
+                    Undo.RegisterCreatedObjectUndo(gameObject, "Create UnitySync prefab instance");
+                }
+                else if (gameObject == null)
+                {
+                    // A non-root prefab object should already exist because its prefab root was
+                    // instantiated by an earlier parent-first hierarchy packet. Creating a loose
+                    // replacement here would silently destroy prefab identity.
+                    error = "Prefab child from " + prefabSource.AssetPath +
+                            " is missing under its synchronized parent for " + Describe(address) + ".";
+                    return false;
+                }
+            }
+
+            if (gameObject == null && prefabSource == null && allowSnapshotAdoption)
             {
                 gameObject = TryAdoptSnapshotObject(
                     address,
@@ -2673,13 +2737,9 @@ namespace Glasspage.UnitySync
                 {
                     SceneManager.MoveGameObjectToScene(gameObject, targetScene);
                 }
+            }
 
-                UnitySyncSceneObjectRegistry.Assign(gameObject, address.ObjectId);
-            }
-            else
-            {
-                UnitySyncSceneObjectRegistry.Assign(gameObject, address.ObjectId);
-            }
+            UnitySyncSceneObjectRegistry.Assign(gameObject, address.ObjectId);
 
             if (parentObject == null)
             {
@@ -2717,6 +2777,106 @@ namespace Glasspage.UnitySync
             SetFilteredSiblingIndex(gameObject.transform, address.SiblingIndex);
             UnitySyncSceneObjectRegistry.SetParent(address.ObjectId, address.ParentObjectId);
             return true;
+        }
+
+        private static GameObject TryAdoptPrefabObject(
+            UnitySyncSceneObjectAddress address,
+            Scene targetScene,
+            GameObject parentObject,
+            Type expectedTransformType,
+            string expectedName,
+            GameObject prefabSourceObject)
+        {
+            if (address == null ||
+                prefabSourceObject == null ||
+                address.SiblingIndex < 0)
+            {
+                return null;
+            }
+
+            GameObject candidate;
+            if (parentObject == null)
+            {
+                candidate = GetFilteredRoot(targetScene, address.SiblingIndex);
+            }
+            else
+            {
+                Transform child = GetFilteredChild(parentObject.transform, address.SiblingIndex);
+                candidate = child != null ? child.gameObject : null;
+            }
+
+            if (PrefabCandidateMatches(
+                    candidate,
+                    address,
+                    expectedTransformType,
+                    expectedName,
+                    prefabSourceObject))
+            {
+                UnitySyncSceneObjectRegistry.Assign(candidate, address.ObjectId);
+                return candidate;
+            }
+
+            // Removed/reordered prefab overrides can shift sibling indices. Within one prefab
+            // parent, the corresponding source object is a stable and unique identity, so find
+            // that child directly rather than creating a duplicate loose GameObject.
+            if (parentObject == null)
+            {
+                return null;
+            }
+
+            GameObject match = null;
+            for (int childIndex = 0; childIndex < parentObject.transform.childCount; childIndex++)
+            {
+                GameObject childObject = parentObject.transform.GetChild(childIndex).gameObject;
+                if (!PrefabCandidateMatches(
+                        childObject,
+                        address,
+                        expectedTransformType,
+                        expectedName,
+                        prefabSourceObject))
+                {
+                    continue;
+                }
+
+                if (match != null)
+                {
+                    return null;
+                }
+
+                match = childObject;
+            }
+
+            if (match != null)
+            {
+                UnitySyncSceneObjectRegistry.Assign(match, address.ObjectId);
+            }
+
+            return match;
+        }
+
+        private static bool PrefabCandidateMatches(
+            GameObject candidate,
+            UnitySyncSceneObjectAddress address,
+            Type expectedTransformType,
+            string expectedName,
+            GameObject prefabSourceObject)
+        {
+            if (!IsEligibleSceneObject(candidate) ||
+                candidate.transform.GetType() != expectedTransformType ||
+                (!string.IsNullOrEmpty(expectedName) &&
+                 !string.Equals(candidate.name, expectedName, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            if (UnitySyncSceneObjectRegistry.TryGetId(candidate, out string existingId) &&
+                !string.Equals(existingId, address.ObjectId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            GameObject candidateSource = PrefabUtility.GetCorrespondingObjectFromSource(candidate);
+            return candidateSource == prefabSourceObject;
         }
 
         private static GameObject TryAdoptSnapshotObject(
@@ -3216,6 +3376,48 @@ namespace Glasspage.UnitySync
             }
 
             return true;
+        }
+
+        private static void CapturePrefabIdentity(
+            GameObject gameObject,
+            out UnitySyncObjectReferenceState prefabSource,
+            out bool prefabInstanceRoot)
+        {
+            prefabSource = null;
+            prefabInstanceRoot = false;
+            if (gameObject == null || !PrefabUtility.IsPartOfPrefabInstance(gameObject))
+            {
+                return;
+            }
+
+            prefabInstanceRoot = PrefabUtility.IsAnyPrefabInstanceRoot(gameObject);
+            GameObject sourceObject = null;
+            if (prefabInstanceRoot)
+            {
+                // Use the nearest prefab asset root rather than an original/base source so
+                // variants and nested prefab instances keep the exact asset identity the user
+                // instantiated.
+                string prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(gameObject);
+                if (!string.IsNullOrEmpty(prefabPath))
+                {
+                    sourceObject = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+                }
+            }
+
+            if (sourceObject == null)
+            {
+                sourceObject = PrefabUtility.GetCorrespondingObjectFromSource(gameObject);
+            }
+
+            if (sourceObject == null ||
+                !TryCaptureObjectReference(sourceObject, out UnitySyncObjectReferenceState reference) ||
+                reference.Kind != UnitySyncObjectReferenceKind.Asset)
+            {
+                prefabInstanceRoot = false;
+                return;
+            }
+
+            prefabSource = reference;
         }
 
         private static bool TryCaptureObjectReference(
