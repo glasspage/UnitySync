@@ -2829,7 +2829,6 @@ namespace Glasspage.UnitySync
                         childObject,
                         address,
                         expectedTransformType,
-                        expectedName,
                         prefabSourceObject))
                 {
                     continue;
