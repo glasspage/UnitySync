@@ -31,7 +31,7 @@ namespace Glasspage.UnitySync
         {
             UnitySyncVisualOptionsWindow window = GetWindow<UnitySyncVisualOptionsWindow>();
             window.titleContent = new GUIContent("UnitySync Visuals");
-            window.minSize = new Vector2(320f, 220f);
+            window.minSize = new Vector2(320f, 280f);
             window.Show();
         }
 
