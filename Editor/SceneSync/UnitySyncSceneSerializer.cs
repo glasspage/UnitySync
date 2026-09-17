@@ -5127,6 +5127,37 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            if (string.Equals(reference.AssetName, "Font Material", StringComparison.Ordinal))
+            {
+                // TextMesh's default material belongs to the built-in font in
+                // unity default resources. Its display name is not a .mat resource
+                // in unity_builtin_extra; probing there logs native Unity errors.
+                // Resolve through the owning font, independently of component order.
+#if UNITY_2022_2_OR_NEWER
+                const string fontResourceName = "LegacyRuntime.ttf";
+#else
+                const string fontResourceName = "Arial.ttf";
+#endif
+                try
+                {
+                    Font font = Resources.GetBuiltinResource<Font>(fontResourceName);
+                    Material fontMaterial = font != null ? font.material : null;
+                    if (BuiltinAssetCandidateMatches(fontMaterial, reference) &&
+                        ExactAssetIdentityMatches(fontMaterial, reference))
+                    {
+                        material = fontMaterial;
+                        return true;
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // Leave unavailable resources unresolved instead of substituting
+                    // a different material or falling through to a guessed filename.
+                }
+
+                return false;
+            }
+
             string resourceName = reference.AssetName.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)
                 ? reference.AssetName
                 : reference.AssetName + ".mat";
