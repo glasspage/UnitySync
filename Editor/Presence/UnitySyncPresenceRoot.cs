@@ -225,8 +225,9 @@ namespace Glasspage.UnitySync
         private const float StatusLogBottomMargin = 12f;
         private const float StatusLogSpacing = 4f;
         private const float StatusLogOpacity = 0.8f;
-        private const float StatusPillHeight = 22f;
-        private const float StatusPillMinimumWidth = 92f;
+        private const float StatusPillHeight = 19f;
+        private const float StatusPillMinimumWidth = 82f;
+        private const float StatusPillOpacity = 0.6f;
         private const float SceneUpdateStatusBottomMargin = 12f;
         private const float SceneUpdateStatusOpacity = 0.8f;
         private const int DiscSegmentCount = 48;
@@ -1071,18 +1072,29 @@ namespace Glasspage.UnitySync
             }
 
             _statusPillBackground = CreateStatusPillTexture(
-                new Color(0.47f, 0.25f, 0.76f, 0.96f));
+                new Color(0.47f, 0.25f, 0.76f, StatusPillOpacity));
             _statusPillHoverBackground = CreateStatusPillTexture(
-                new Color(0.56f, 0.32f, 0.86f, 1f));
+                new Color(0.56f, 0.32f, 0.86f, StatusPillOpacity));
             _statusPillActiveBackground = CreateStatusPillTexture(
-                new Color(0.39f, 0.18f, 0.66f, 1f));
+                new Color(0.39f, 0.18f, 0.66f, StatusPillOpacity));
+
+            int inheritedFontSize = EditorStyles.miniButton.fontSize;
+            if (inheritedFontSize <= 0)
+            {
+                inheritedFontSize = EditorStyles.label.fontSize;
+            }
+            if (inheritedFontSize <= 0)
+            {
+                inheritedFontSize = 12;
+            }
 
             _statusPillStyle = new GUIStyle(EditorStyles.miniButton)
             {
                 alignment = TextAnchor.MiddleCenter,
                 fontStyle = FontStyle.Bold,
-                padding = new RectOffset(10, 10, 2, 2),
-                border = new RectOffset(12, 12, 12, 12)
+                fontSize = Mathf.Max(8, inheritedFontSize - 1),
+                padding = new RectOffset(8, 8, 1, 1),
+                border = new RectOffset(10, 10, 10, 10)
             };
 
             _statusPillStyle.normal.background = _statusPillBackground;
@@ -1102,7 +1114,10 @@ namespace Glasspage.UnitySync
         {
             const int width = 48;
             const int height = 24;
+            const int samplesPerAxis = 4;
             const float radius = height * 0.5f;
+            const float inverseSampleCount =
+                1f / (samplesPerAxis * samplesPerAxis);
 
             Texture2D texture = new Texture2D(
                 width,
@@ -1119,16 +1134,38 @@ namespace Glasspage.UnitySync
             Color[] pixels = new Color[width * height];
             for (int y = 0; y < height; y++)
             {
-                float py = y + 0.5f;
                 for (int x = 0; x < width; x++)
                 {
-                    float px = x + 0.5f;
-                    float nearestX = Mathf.Clamp(px, radius, width - radius);
-                    float nearestY = Mathf.Clamp(py, radius, height - radius);
-                    float dx = px - nearestX;
-                    float dy = py - nearestY;
-                    bool inside = dx * dx + dy * dy <= radius * radius;
-                    pixels[y * width + x] = inside ? color : Color.clear;
+                    int insideSamples = 0;
+                    for (int sampleY = 0; sampleY < samplesPerAxis; sampleY++)
+                    {
+                        float py = y + (sampleY + 0.5f) / samplesPerAxis;
+                        for (int sampleX = 0; sampleX < samplesPerAxis; sampleX++)
+                        {
+                            float px = x + (sampleX + 0.5f) / samplesPerAxis;
+                            float nearestX = Mathf.Clamp(
+                                px,
+                                radius,
+                                width - radius);
+                            float nearestY = Mathf.Clamp(
+                                py,
+                                radius,
+                                height - radius);
+                            float dx = px - nearestX;
+                            float dy = py - nearestY;
+                            if (dx * dx + dy * dy <= radius * radius)
+                            {
+                                insideSamples++;
+                            }
+                        }
+                    }
+
+                    float coverage = insideSamples * inverseSampleCount;
+                    pixels[y * width + x] = new Color(
+                        color.r,
+                        color.g,
+                        color.b,
+                        color.a * coverage);
                 }
             }
 
