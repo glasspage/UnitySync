@@ -4612,15 +4612,23 @@ namespace Glasspage.UnitySync
 
             if (desiredStates.Length == 0 ||
                 desiredStates[0] == null ||
-                desiredStates[0].ComponentIndex != 0 ||
-                !TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
+                desiredStates[0].ComponentIndex != 0)
             {
                 error = "The Transform type differs on " + gameObject.name + ".";
                 return false;
             }
 
             Type[] desiredTypes = new Type[desiredStates.Length];
-            desiredTypes[0] = gameObject.transform.GetType();
+            desiredTypes[0] = ResolveType(desiredStates[0].TypeName);
+            Type currentTransformType = gameObject.transform.GetType();
+            bool upgradeToRectTransform = currentTransformType == typeof(Transform) &&
+                                          desiredTypes[0] == typeof(RectTransform);
+            if (desiredTypes[0] != currentTransformType && !upgradeToRectTransform)
+            {
+                error = "The Transform type differs on " + gameObject.name + ".";
+                return false;
+            }
+
             for (int index = 1; index < desiredStates.Length; index++)
             {
                 UnitySyncComponentState state = desiredStates[index];
@@ -4646,6 +4654,29 @@ namespace Glasspage.UnitySync
                 if (desiredTypes[index] == null || !typeof(Component).IsAssignableFrom(desiredTypes[index]))
                 {
                     error = "Component type " + state.TypeName + " is not installed locally.";
+                    return false;
+                }
+            }
+
+            if (upgradeToRectTransform)
+            {
+                // Unity can replace an ordinary Transform in place when UI is added after
+                // this object has already synchronized. Keep the GameObject (and its session
+                // identity, children and other components) instead of recreating its hierarchy.
+                // Reconcile this before adding UI components or applying RectTransform fields.
+                try
+                {
+                    Undo.AddComponent(gameObject, typeof(RectTransform));
+                }
+                catch (Exception exception)
+                {
+                    error = "Could not add RectTransform to " + gameObject.name + ": " + exception.Message;
+                    return false;
+                }
+
+                if (!(gameObject.transform is RectTransform))
+                {
+                    error = "Could not add RectTransform to " + gameObject.name + ".";
                     return false;
                 }
             }
