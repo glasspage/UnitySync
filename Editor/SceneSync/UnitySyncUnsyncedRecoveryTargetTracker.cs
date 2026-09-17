@@ -10,13 +10,20 @@ namespace Glasspage.UnitySync
     [InitializeOnLoad]
     internal static class UnitySyncUnsyncedRecoveryTargetTracker
     {
+        private sealed class TrackedTarget
+        {
+            internal GameObject GameObject;
+            internal readonly HashSet<int> TargetAndAncestorInstanceIds =
+                new HashSet<int>();
+        }
+
         private static readonly FieldInfo FailedRemoteChangesField =
             typeof(UnitySyncSceneSynchronizer).GetField(
                 "FailedRemoteChanges",
                 BindingFlags.Static | BindingFlags.NonPublic);
 
-        private static readonly Dictionary<string, GameObject> TrackedTargets =
-            new Dictionary<string, GameObject>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, TrackedTarget> TrackedTargets =
+            new Dictionary<string, TrackedTarget>(StringComparer.Ordinal);
 
         private static Type _failedRemoteChangeType;
         private static FieldInfo _changeField;
@@ -25,6 +32,7 @@ namespace Glasspage.UnitySync
         static UnitySyncUnsyncedRecoveryTargetTracker()
         {
             EditorApplication.update += Update;
+            ObjectChangeEvents.changesPublished += OnChangesPublished;
         }
 
         private static void Update()
@@ -36,8 +44,7 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            IDictionary failedChanges =
-                FailedRemoteChangesField?.GetValue(null) as IDictionary;
+            IDictionary failedChanges = GetFailedChanges();
             if (failedChanges == null || failedChanges.Count == 0)
             {
                 TrackedTargets.Clear();
@@ -66,18 +73,15 @@ namespace Glasspage.UnitySync
                     UnitySyncSceneSerializer.ResolveAddress(change.Address);
                 if (currentTarget != null)
                 {
-                    // Hold the actual Unity object reference, not only its instance ID. Unity's
-                    // destroyed-object null semantics then let us distinguish a target that was
-                    // genuinely deleted from a temporarily unresolved address.
-                    TrackedTargets[stateKey] = currentTarget;
+                    TrackedTargets[stateKey] = CreateTrackedTarget(currentTarget);
                     continue;
                 }
 
                 bool targetWasDeleted =
                     TrackedTargets.TryGetValue(
                         stateKey,
-                        out GameObject trackedTarget) &&
-                    trackedTarget == null;
+                        out TrackedTarget trackedTarget) &&
+                    trackedTarget.GameObject == null;
                 bool targetNeverExistedLocally =
                     !TrackedTargets.ContainsKey(stateKey) &&
                     IsMissingTargetFailure(GetLastError(entry.Value));
@@ -121,7 +125,105 @@ namespace Glasspage.UnitySync
                 }
             }
 
-            if (staleKeys == null)
+            RemoveFailedEntries(failedChanges, staleKeys);
+        }
+
+        private static void OnChangesPublished(ref ObjectChangeEventStream stream)
+        {
+            if (!UnitySyncSession.IsActive ||
+                !UnitySyncSession.HasUnsyncedSceneObjects ||
+                TrackedTargets.Count == 0)
+            {
+                return;
+            }
+
+            HashSet<int> destroyedHierarchyRoots = null;
+            for (int eventIndex = 0; eventIndex < stream.length; eventIndex++)
+            {
+                if (stream.GetEventType(eventIndex) !=
+                    ObjectChangeKind.DestroyGameObjectHierarchy)
+                {
+                    continue;
+                }
+
+                stream.GetDestroyGameObjectHierarchyEvent(
+                    eventIndex,
+                    out DestroyGameObjectHierarchyEventArgs destroyEvent);
+                if (destroyedHierarchyRoots == null)
+                {
+                    destroyedHierarchyRoots = new HashSet<int>();
+                }
+
+                destroyedHierarchyRoots.Add(destroyEvent.instanceId);
+            }
+
+            if (destroyedHierarchyRoots == null || destroyedHierarchyRoots.Count == 0)
+            {
+                return;
+            }
+
+            List<string> staleKeys = null;
+            foreach (KeyValuePair<string, TrackedTarget> pair in TrackedTargets)
+            {
+                TrackedTarget trackedTarget = pair.Value;
+                if (trackedTarget == null)
+                {
+                    continue;
+                }
+
+                bool hierarchyDeleted = false;
+                foreach (int destroyedRoot in destroyedHierarchyRoots)
+                {
+                    if (trackedTarget.TargetAndAncestorInstanceIds.Contains(destroyedRoot))
+                    {
+                        hierarchyDeleted = true;
+                        break;
+                    }
+                }
+
+                if (!hierarchyDeleted)
+                {
+                    continue;
+                }
+
+                if (staleKeys == null)
+                {
+                    staleKeys = new List<string>();
+                }
+
+                staleKeys.Add(pair.Key);
+            }
+
+            RemoveFailedEntries(GetFailedChanges(), staleKeys);
+        }
+
+        private static TrackedTarget CreateTrackedTarget(GameObject target)
+        {
+            TrackedTarget tracked = new TrackedTarget
+            {
+                GameObject = target
+            };
+
+            Transform current = target != null ? target.transform : null;
+            while (current != null)
+            {
+                tracked.TargetAndAncestorInstanceIds.Add(current.gameObject.GetInstanceID());
+                current = current.parent;
+            }
+
+            return tracked;
+        }
+
+        private static IDictionary GetFailedChanges()
+        {
+            return FailedRemoteChangesField?.GetValue(null) as IDictionary;
+        }
+
+        private static void RemoveFailedEntries(
+            IDictionary failedChanges,
+            List<string> staleKeys)
+        {
+            if (failedChanges == null || staleKeys == null || staleKeys.Count == 0)
             {
                 return;
             }
