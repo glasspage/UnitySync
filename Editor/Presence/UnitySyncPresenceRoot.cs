@@ -1321,6 +1321,7 @@ namespace Glasspage.UnitySync
             Vector3 nearBottomRight = new Vector3(nearHalfWidth, -nearHalfHeight, nearDistance);
             Vector3 nearTopRight = new Vector3(nearHalfWidth, nearHalfHeight, nearDistance);
             Vector3 nearTopLeft = new Vector3(-nearHalfWidth, nearHalfHeight, nearDistance);
+
             Vector3 farBottomLeft = new Vector3(-farHalfWidth, -farHalfHeight, farDistance);
             Vector3 farBottomRight = new Vector3(farHalfWidth, -farHalfHeight, farDistance);
             Vector3 farTopRight = new Vector3(farHalfWidth, farHalfHeight, farDistance);
@@ -1346,8 +1347,39 @@ namespace Glasspage.UnitySync
                 farBottomRight,
                 farTopRight,
                 farTopLeft,
-                outlineColor,
+                foregroundColor,
                 ForegroundStrokeWidth);
+        }
+
+        private static void DrawPerspectiveFrustumStroke(
+            Vector3 nearBottomLeft,
+            Vector3 nearBottomRight,
+            Vector3 nearTopRight,
+            Vector3 nearTopLeft,
+            Vector3 farBottomLeft,
+            Vector3 farBottomRight,
+            Vector3 farTopRight,
+            Vector3 farTopLeft,
+            Color color,
+            float strokeWidth)
+        {
+            Handles.color = color;
+            DrawRectangleStroke(
+                nearBottomLeft,
+                nearBottomRight,
+                nearTopRight,
+                nearTopLeft,
+                strokeWidth);
+            DrawRectangleStroke(
+                farBottomLeft,
+                farBottomRight,
+                farTopRight,
+                farTopLeft,
+                strokeWidth);
+            Handles.DrawAAPolyLine(strokeWidth, nearBottomLeft, farBottomLeft);
+            Handles.DrawAAPolyLine(strokeWidth, nearBottomRight, farBottomRight);
+            Handles.DrawAAPolyLine(strokeWidth, nearTopRight, farTopRight);
+            Handles.DrawAAPolyLine(strokeWidth, nearTopLeft, farTopLeft);
         }
 
         private static void DrawWireCube(
