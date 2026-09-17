@@ -921,7 +921,7 @@ namespace Glasspage.UnitySync
                 bottom = pillRect.y - StatusLogSpacing;
             }
 
-            if (showLog)
+            if (showLog && Event.current.type == EventType.Repaint)
             {
                 PruneExpiredTimedStatuses(EditorApplication.timeSinceStartup);
 
