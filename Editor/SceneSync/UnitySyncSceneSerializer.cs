@@ -4612,15 +4612,26 @@ namespace Glasspage.UnitySync
 
             if (desiredStates.Length == 0 ||
                 desiredStates[0] == null ||
-                desiredStates[0].ComponentIndex != 0 ||
-                !TypeMatches(gameObject.transform.GetType(), desiredStates[0].TypeName))
+                desiredStates[0].ComponentIndex != 0)
             {
                 error = "The Transform type differs on " + gameObject.name + ".";
                 return false;
             }
 
             Type[] desiredTypes = new Type[desiredStates.Length];
-            desiredTypes[0] = gameObject.transform.GetType();
+            desiredTypes[0] = ResolveType(desiredStates[0].TypeName);
+            Type currentTransformType = gameObject.transform.GetType();
+            bool upgradeToRectTransform = currentTransformType == typeof(Transform) &&
+                                          desiredTypes[0] == typeof(RectTransform);
+            bool removeRectTransform = currentTransformType == typeof(RectTransform) &&
+                                       desiredTypes[0] == typeof(Transform);
+            if (desiredTypes[0] != currentTransformType &&
+                !upgradeToRectTransform && !removeRectTransform)
+            {
+                error = "The Transform type differs on " + gameObject.name + ".";
+                return false;
+            }
+
             for (int index = 1; index < desiredStates.Length; index++)
             {
                 UnitySyncComponentState state = desiredStates[index];
@@ -4646,6 +4657,29 @@ namespace Glasspage.UnitySync
                 if (desiredTypes[index] == null || !typeof(Component).IsAssignableFrom(desiredTypes[index]))
                 {
                     error = "Component type " + state.TypeName + " is not installed locally.";
+                    return false;
+                }
+            }
+
+            if (upgradeToRectTransform)
+            {
+                // Unity can replace an ordinary Transform in place when UI is added after
+                // this object has already synchronized. Keep the GameObject (and its session
+                // identity, children and other components) instead of recreating its hierarchy.
+                // Reconcile this before adding UI components or applying RectTransform fields.
+                try
+                {
+                    Undo.AddComponent(gameObject, typeof(RectTransform));
+                }
+                catch (Exception exception)
+                {
+                    error = "Could not add RectTransform to " + gameObject.name + ": " + exception.Message;
+                    return false;
+                }
+
+                if (!(gameObject.transform is RectTransform))
+                {
+                    error = "Could not add RectTransform to " + gameObject.name + ".";
                     return false;
                 }
             }
@@ -4709,8 +4743,40 @@ namespace Glasspage.UnitySync
                 Undo.DestroyObjectImmediate(extra);
             }
 
+            if (removeRectTransform)
+            {
+                // Remove obsolete UI components first: they may require the RectTransform.
+                // Unity replaces a removed RectTransform with a regular Transform in place.
+                // Keep the local pose until the following property packet supplies its values.
+                Transform previousTransform = gameObject.transform;
+                Vector3 localPosition = previousTransform.localPosition;
+                Quaternion localRotation = previousTransform.localRotation;
+                Vector3 localScale = previousTransform.localScale;
+                try
+                {
+                    Undo.DestroyObjectImmediate(previousTransform);
+                }
+                catch (Exception exception)
+                {
+                    error = "Could not remove RectTransform from " + gameObject.name + ": " + exception.Message;
+                    return false;
+                }
+
+                Transform replacement = gameObject.transform;
+                if (replacement == null || replacement.GetType() != typeof(Transform))
+                {
+                    error = "Could not remove RectTransform from " + gameObject.name + ".";
+                    return false;
+                }
+
+                Undo.RecordObject(replacement, "Sync UnitySync Transform");
+                replacement.localPosition = localPosition;
+                replacement.localRotation = localRotation;
+                replacement.localScale = localScale;
+            }
+
             finalComponents = gameObject.GetComponents<Component>();
-            if (finalComponents.Length != desiredTypes.Length)
+            if (!ComponentLayoutMatches(finalComponents, desiredStates))
             {
                 error = "Could not reconcile components on " + gameObject.name + ".";
                 return false;
