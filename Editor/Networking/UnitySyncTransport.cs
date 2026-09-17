@@ -973,32 +973,36 @@ namespace Glasspage.UnitySync
                                     "A collaborator sent an invalid project file update.");
                             }
 
-                            EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
-                            switch (message.Type)
+                            // Project-file transfers can arrive concurrently from multiple guests.
+                            // Establish one host-observed packet order for both local application and
+                            // relay, then send that exact order back through the host outbound queue
+                            // to every guest (including the originator) in multi-guest sessions.
+                            lock (_eventsLock)
                             {
-                                case UnitySyncMessageType.ProjectFileBegin:
-                                    Broadcast(
-                                        UnitySyncProtocol.CreateProjectFileBegin(
-                                            message.PlayerId,
-                                            message.FileSync),
-                                        peer);
-                                    break;
+                                EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
+                                if (HasMultipleAuthenticatedGuests())
+                                {
+                                    switch (message.Type)
+                                    {
+                                        case UnitySyncMessageType.ProjectFileBegin:
+                                            SendProjectFileBegin(
+                                                message.PlayerId,
+                                                message.FileSync);
+                                            break;
 
-                                case UnitySyncMessageType.ProjectFileChunk:
-                                    Broadcast(
-                                        UnitySyncProtocol.CreateProjectFileChunk(
-                                            message.PlayerId,
-                                            message.FileSync),
-                                        peer);
-                                    break;
+                                        case UnitySyncMessageType.ProjectFileChunk:
+                                            SendProjectFileChunk(
+                                                message.PlayerId,
+                                                message.FileSync);
+                                            break;
 
-                                case UnitySyncMessageType.ProjectFileDelete:
-                                    Broadcast(
-                                        UnitySyncProtocol.CreateProjectFileDelete(
-                                            message.PlayerId,
-                                            message.FileSync.Path),
-                                        peer);
-                                    break;
+                                        case UnitySyncMessageType.ProjectFileDelete:
+                                            SendProjectFileDelete(
+                                                message.PlayerId,
+                                                message.FileSync.Path);
+                                            break;
+                                    }
+                                }
                             }
                             break;
 
@@ -1026,12 +1030,21 @@ namespace Glasspage.UnitySync
                                     "A collaborator sent invalid scene settings.");
                             }
 
-                            EnqueueSceneSettingsChange(message.PlayerId, message.SceneSnapshot);
-                            Broadcast(
-                                UnitySyncProtocol.CreateSceneSettingsChange(
+                            // Use the same host-authoritative ordering as live scene objects.
+                            // Multiple guest receive loops can race, so serialize ingestion and
+                            // relay through the host queue and include the originator in the echo.
+                            lock (_eventsLock)
+                            {
+                                EnqueueSceneSettingsChange(
                                     message.PlayerId,
-                                    message.SceneSnapshot),
-                                peer);
+                                    message.SceneSnapshot);
+                                if (HasMultipleAuthenticatedGuests())
+                                {
+                                    SendSceneSettingsChange(
+                                        message.PlayerId,
+                                        message.SceneSnapshot);
+                                }
+                            }
                             break;
 
                         case UnitySyncMessageType.SceneSnapshotBegin:
