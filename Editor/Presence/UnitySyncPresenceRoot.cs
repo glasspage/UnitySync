@@ -922,6 +922,11 @@ namespace Glasspage.UnitySync
             {
                 EnsureStatusPillStyle();
 
+                SetLabelTextColor(
+                    _statusPillStyle,
+                    UnitySyncSession.HasUnsyncedSceneObjects
+                        ? new Color(1f, 0.72f, 0.42f, 1f)
+                        : Color.white);
                 GUIContent pillContent = new GUIContent(
                     "UnitySync (" + GetConnectedUserCount() + ")");
                 Vector2 pillSize = _statusPillStyle.CalcSize(pillContent);
