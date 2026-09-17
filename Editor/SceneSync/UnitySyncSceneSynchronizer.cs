@@ -1929,6 +1929,7 @@ namespace Glasspage.UnitySync
 
                     if (!UnitySyncSceneSerializer.TryCaptureHierarchy(
                             gameObject,
+                            batch.Snapshot == null,
                             out UnitySyncSceneObjectChange change))
                     {
                         batch.HasCaptureFailure = true;
