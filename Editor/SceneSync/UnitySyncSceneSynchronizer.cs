@@ -1942,10 +1942,17 @@ namespace Glasspage.UnitySync
 
                     if (batch.Snapshot != null)
                     {
+                        // Initial snapshots must preserve the synchronized scene file as the
+                        // receiver's baseline. Prefab-aware creation is only for genuinely new
+                        // live hierarchies; applying it here can re-instantiate/adopt preexisting
+                        // prefab instances and disturb their scene overrides (materials,
+                        // transforms, removed children, etc.).
+                        change.PrefabSource = null;
+                        change.PrefabInstanceRoot = false;
                         change.SnapshotId = batch.Snapshot.SnapshotId;
                     }
 
-                    // Hierarchy packets can now carry prefab asset identity. Make sure a newly
+                    // Live hierarchy packets can carry prefab asset identity. Make sure a newly
                     // created/edited prefab asset is present on peers before the packet asks them
                     // to instantiate or adopt it.
                     if (!UnitySyncProjectSynchronizer.EnsureSceneAssetReferencesQueued(
