@@ -925,7 +925,7 @@ namespace Glasspage.UnitySync
                 SetLabelTextColor(
                     _statusPillStyle,
                     UnitySyncSession.HasUnsyncedSceneObjects
-                        ? new Color(1f, 0.72f, 0.42f, 1f)
+                        ? new Color(1f, 0.38f, 0.12f, 1f)
                         : Color.white);
                 GUIContent pillContent = new GUIContent(
                     "UnitySync (" + GetConnectedUserCount() + ")");
