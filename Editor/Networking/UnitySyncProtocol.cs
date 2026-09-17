@@ -156,7 +156,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 20;
+        internal const int Version = 21;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -1291,6 +1291,29 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            bool hasPrefabSource = change.PrefabSource != null;
+            writer.Write(hasPrefabSource);
+            if (hasPrefabSource)
+            {
+                UnitySyncObjectReferenceState prefabSource = change.PrefabSource;
+                if (!change.HierarchyOnly ||
+                    prefabSource.Kind != UnitySyncObjectReferenceKind.Asset ||
+                    string.IsNullOrEmpty(prefabSource.ObjectTypeName) ||
+                    string.IsNullOrEmpty(prefabSource.AssetGuid) ||
+                    string.IsNullOrEmpty(prefabSource.AssetPath))
+                {
+                    throw new InvalidDataException("Invalid prefab source identity.");
+                }
+
+                writer.Write(change.PrefabInstanceRoot);
+                WriteLimitedString(writer, prefabSource.ObjectTypeName);
+                WriteLimitedString(writer, prefabSource.AssetGuid);
+                WriteLimitedString(writer, prefabSource.AssetPath);
+                WriteLimitedString(writer, prefabSource.AssetName);
+                WriteLimitedString(writer, prefabSource.AssetContentHash);
+                writer.Write(prefabSource.LocalFileId);
+            }
+
             writer.Write(change.GameObject != null);
             if (change.GameObject != null)
             {
@@ -1357,6 +1380,29 @@ namespace Glasspage.UnitySync
                 }
 
                 return change;
+            }
+
+            if (reader.ReadBoolean())
+            {
+                change.PrefabInstanceRoot = reader.ReadBoolean();
+                change.PrefabSource = new UnitySyncObjectReferenceState
+                {
+                    Kind = UnitySyncObjectReferenceKind.Asset,
+                    ObjectTypeName = ReadLimitedString(reader),
+                    AssetGuid = ReadLimitedString(reader),
+                    AssetPath = ReadLimitedString(reader),
+                    AssetName = ReadLimitedString(reader),
+                    AssetContentHash = ReadLimitedString(reader),
+                    LocalFileId = reader.ReadInt64()
+                };
+
+                if (!change.HierarchyOnly ||
+                    string.IsNullOrEmpty(change.PrefabSource.ObjectTypeName) ||
+                    string.IsNullOrEmpty(change.PrefabSource.AssetGuid) ||
+                    string.IsNullOrEmpty(change.PrefabSource.AssetPath))
+                {
+                    throw new InvalidDataException("Invalid prefab source identity.");
+                }
             }
 
             if (reader.ReadBoolean())
