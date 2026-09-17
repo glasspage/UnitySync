@@ -18,8 +18,8 @@ jobs:
           fetch-depth: 0
 
       - name: Patch UnitySyncSceneSynchronizer
-        shell: python
         run: |
+          python3 - <<'PY'
           from pathlib import Path
 
           path = Path("Editor/SceneSync/UnitySyncSceneSynchronizer.cs")
@@ -87,6 +87,7 @@ jobs:
               raise SystemExit(f"Expected SetPending anchor exactly once, found {text.count(anchor)}")
           text = text.replace(anchor, helper + anchor, 1)
           path.write_text(text, encoding="utf-8")
+          PY
 
       - name: Remove temporary workflow and commit fix
         run: |
