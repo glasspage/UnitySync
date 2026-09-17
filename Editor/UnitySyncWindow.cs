@@ -610,6 +610,35 @@ namespace Glasspage.UnitySync
                 return;
             }
 
+            if (UnitySyncSession.HasUnsyncedSceneObjects)
+            {
+                int unsyncedCount = UnitySyncSession.UnsyncedSceneObjectCount;
+                EditorGUILayout.Space(4f);
+                if (GUILayout.Button(
+                        "Force Sync Unsynced " +
+                        (unsyncedCount == 1 ? "Object" : "Objects") +
+                        " (" + unsyncedCount + ")"))
+                {
+                    UnitySyncSession.RetryUnsyncedSceneObjects();
+                }
+
+                if (UnitySyncSession.UnsyncedSceneRecoveryFailed)
+                {
+                    GUIStyle recoveryWarningStyle =
+                        new GUIStyle(EditorStyles.wordWrappedMiniLabel);
+                    recoveryWarningStyle.normal.textColor =
+                        EditorGUIUtility.isProSkin
+                            ? new Color(1f, 0.69f, 0.38f)
+                            : new Color(0.65f, 0.32f, 0.08f);
+                    EditorGUILayout.LabelField(
+                        "An error occurred while recovering unsynced objects. " +
+                        "Try re-establishing the connection.",
+                        recoveryWarningStyle);
+                }
+
+                EditorGUILayout.Space(4f);
+            }
+
             if (GUILayout.Button("Stop Session"))
             {
                 _error = string.Empty;

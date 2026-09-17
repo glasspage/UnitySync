@@ -96,6 +96,13 @@ namespace Glasspage.UnitySync
             internal double NextRetryTime;
         }
 
+        private sealed class FailedRemoteChange
+        {
+            internal UnitySyncSceneObjectChange Change;
+            internal string LastError = string.Empty;
+            internal long Sequence;
+        }
+
         private const double FlushIntervalSeconds = 0.05;
         private const double TransformSyncIntervalSeconds = 0.1;
         private const double OtherSyncIntervalSeconds = 1.0;
@@ -150,6 +157,8 @@ namespace Glasspage.UnitySync
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, DeferredRemoteChange> DeferredRemoteChanges =
             new Dictionary<string, DeferredRemoteChange>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, FailedRemoteChange> FailedRemoteChanges =
+            new Dictionary<string, FailedRemoteChange>(StringComparer.Ordinal);
         private static readonly Queue<HierarchyBatch> HierarchyBatches =
             new Queue<HierarchyBatch>();
         private static readonly HashSet<int> BatchedObjectInstanceIds =
@@ -173,6 +182,7 @@ namespace Glasspage.UnitySync
         private static RemoteSnapshot _remoteSnapshot;
         private static bool _snapshotProgressBarVisible;
         private static int _lastSnapshotProgressCount = -1;
+        private static long _failedRemoteChangeSequence;
 
         static UnitySyncSceneSynchronizer()
         {
@@ -184,6 +194,8 @@ namespace Glasspage.UnitySync
         }
 
         internal static bool IsApplyingRemoteSnapshot => _remoteSnapshot != null;
+        internal static bool HasUnsyncedRemoteChanges => FailedRemoteChanges.Count > 0;
+        internal static int UnsyncedObjectCount => GetUnsyncedObjectCount();
 
         internal static string DebugBackgroundWork
         {
@@ -234,6 +246,8 @@ namespace Glasspage.UnitySync
             RemoteInitializations.Clear();
             CompletedRemoteInitializations.Clear();
             DeferredRemoteChanges.Clear();
+            FailedRemoteChanges.Clear();
+            _failedRemoteChangeSequence = 0L;
             EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
@@ -263,6 +277,8 @@ namespace Glasspage.UnitySync
             RemoteInitializations.Clear();
             CompletedRemoteInitializations.Clear();
             DeferredRemoteChanges.Clear();
+            FailedRemoteChanges.Clear();
+            _failedRemoteChangeSequence = 0L;
             EditorApplication.delayCall -= ReleaseCompletedRemoteInitializations;
             HierarchyBatches.Clear();
             BatchedObjectInstanceIds.Clear();
@@ -760,7 +776,94 @@ namespace Glasspage.UnitySync
 
         internal static bool ApplyRemoteChange(UnitySyncSceneObjectChange change, out string error)
         {
-            return ApplyRemoteChangeInternal(change, true, out error);
+            if (change == null || change.SnapshotId != Guid.Empty || change.Address == null)
+            {
+                return ApplyRemoteChangeInternal(change, true, out error);
+            }
+
+            bool recoveryStateChanged = RemoveSupersededFailedRemoteChanges(change);
+            string stateKey = GetStateKey(change);
+            bool applied = ApplyRemoteChangeInternal(change, true, out error);
+            if (applied)
+            {
+                recoveryStateChanged |= FailedRemoteChanges.Remove(stateKey);
+            }
+            else
+            {
+                recoveryStateChanged |= TrackFailedRemoteChange(stateKey, change, error);
+            }
+
+            if (recoveryStateChanged)
+            {
+                UnitySyncSession.NotifyUnsyncedSceneStateChanged();
+            }
+
+            return applied;
+        }
+
+        internal static bool RetryUnsyncedRemoteChanges(out string error)
+        {
+            error = string.Empty;
+            if (!_active)
+            {
+                error = "Scene synchronization is not active.";
+                return false;
+            }
+
+            if (FailedRemoteChanges.Count == 0)
+            {
+                return true;
+            }
+
+            List<KeyValuePair<string, FailedRemoteChange>> retryEntries =
+                new List<KeyValuePair<string, FailedRemoteChange>>(FailedRemoteChanges);
+            retryEntries.Sort(CompareFailedRemoteChangesForRecovery);
+
+            bool failed = false;
+            string firstError = string.Empty;
+            foreach (KeyValuePair<string, FailedRemoteChange> pair in retryEntries)
+            {
+                if (!FailedRemoteChanges.TryGetValue(
+                        pair.Key,
+                        out FailedRemoteChange current) ||
+                    !ReferenceEquals(current, pair.Value) ||
+                    current.Change == null)
+                {
+                    continue;
+                }
+
+                // Recovery is explicitly forceful. A previous partial apply may have populated
+                // the live dedup cache before a later step failed, so never let that cache turn
+                // this retry into a no-op.
+                LastIncomingLiveHashes.Remove(pair.Key);
+                if (ApplyRemoteChangeInternal(
+                        current.Change,
+                        false,
+                        out string retryError))
+                {
+                    FailedRemoteChanges.Remove(pair.Key);
+                    continue;
+                }
+
+                failed = true;
+                current.LastError = retryError ?? string.Empty;
+                if (string.IsNullOrEmpty(firstError))
+                {
+                    firstError = string.IsNullOrEmpty(retryError)
+                        ? current.LastError
+                        : retryError;
+                }
+            }
+
+            if (failed)
+            {
+                error = string.IsNullOrEmpty(firstError)
+                    ? "One or more scene objects still could not be synchronized."
+                    : firstError;
+                return false;
+            }
+
+            return FailedRemoteChanges.Count == 0;
         }
 
         private static bool ApplyRemoteChangeInternal(
@@ -1027,9 +1130,171 @@ namespace Glasspage.UnitySync
                 }
 
                 DeferredRemoteChanges.Remove(stateKey);
-                UnitySyncSession.ReportDeferredSceneSyncFailure(
-                    string.IsNullOrEmpty(retryError) ? deferred.LastError : retryError);
+                string failure = string.IsNullOrEmpty(retryError)
+                    ? deferred.LastError
+                    : retryError;
+                bool recoveryStateChanged =
+                    RemoveSupersededFailedRemoteChanges(deferred.Change);
+                recoveryStateChanged |=
+                    TrackFailedRemoteChange(stateKey, deferred.Change, failure);
+                if (recoveryStateChanged)
+                {
+                    UnitySyncSession.NotifyUnsyncedSceneStateChanged();
+                }
+
+                UnitySyncSession.ReportDeferredSceneSyncFailure(failure);
             }
+        }
+
+        private static bool TrackFailedRemoteChange(
+            string stateKey,
+            UnitySyncSceneObjectChange change,
+            string error)
+        {
+            if (change == null ||
+                change.SnapshotId != Guid.Empty ||
+                change.Address == null ||
+                string.IsNullOrEmpty(stateKey))
+            {
+                return false;
+            }
+
+            FailedRemoteChanges[stateKey] = new FailedRemoteChange
+            {
+                Change = change,
+                LastError = error ?? string.Empty,
+                Sequence = ++_failedRemoteChangeSequence
+            };
+            return true;
+        }
+
+        private static bool RemoveSupersededFailedRemoteChanges(
+            UnitySyncSceneObjectChange incoming)
+        {
+            if (incoming == null || incoming.Address == null)
+            {
+                return false;
+            }
+
+            string objectKey = incoming.Address.Key;
+            if (string.IsNullOrEmpty(objectKey))
+            {
+                return false;
+            }
+
+            bool changed = false;
+            if (incoming.Kind != UnitySyncSceneChangeKind.Destroy)
+            {
+                return FailedRemoteChanges.Remove(objectKey + "|d");
+            }
+
+            List<string> staleKeys = null;
+            foreach (KeyValuePair<string, FailedRemoteChange> pair in FailedRemoteChanges)
+            {
+                UnitySyncSceneObjectChange failed =
+                    pair.Value != null ? pair.Value.Change : null;
+                if (failed == null ||
+                    failed.Address == null ||
+                    !string.Equals(
+                        failed.Address.Key,
+                        objectKey,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (staleKeys == null)
+                {
+                    staleKeys = new List<string>();
+                }
+
+                staleKeys.Add(pair.Key);
+            }
+
+            if (staleKeys == null)
+            {
+                return false;
+            }
+
+            foreach (string staleKey in staleKeys)
+            {
+                changed |= FailedRemoteChanges.Remove(staleKey);
+            }
+
+            return changed;
+        }
+
+        private static int GetUnsyncedObjectCount()
+        {
+            if (FailedRemoteChanges.Count == 0)
+            {
+                return 0;
+            }
+
+            HashSet<string> objectKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (FailedRemoteChange failed in FailedRemoteChanges.Values)
+            {
+                if (failed == null ||
+                    failed.Change == null ||
+                    failed.Change.Address == null)
+                {
+                    continue;
+                }
+
+                string objectKey = failed.Change.Address.Key;
+                if (!string.IsNullOrEmpty(objectKey))
+                {
+                    objectKeys.Add(objectKey);
+                }
+            }
+
+            return objectKeys.Count;
+        }
+
+        private static int CompareFailedRemoteChangesForRecovery(
+            KeyValuePair<string, FailedRemoteChange> left,
+            KeyValuePair<string, FailedRemoteChange> right)
+        {
+            int priorityCompare = GetRecoveryPriority(left.Value?.Change).CompareTo(
+                GetRecoveryPriority(right.Value?.Change));
+            if (priorityCompare != 0)
+            {
+                return priorityCompare;
+            }
+
+            long leftSequence = left.Value != null ? left.Value.Sequence : long.MaxValue;
+            long rightSequence = right.Value != null ? right.Value.Sequence : long.MaxValue;
+            return leftSequence.CompareTo(rightSequence);
+        }
+
+        private static int GetRecoveryPriority(UnitySyncSceneObjectChange change)
+        {
+            if (change == null)
+            {
+                return 5;
+            }
+
+            if (change.Kind == UnitySyncSceneChangeKind.Destroy)
+            {
+                return 4;
+            }
+
+            if (change.HierarchyOnly)
+            {
+                return 0;
+            }
+
+            if (change.GameObject != null)
+            {
+                return 1;
+            }
+
+            if (change.ReconcileComponents)
+            {
+                return 2;
+            }
+
+            return 3;
         }
 
         private static bool IsRetryableProjectAssetResolutionFailure(
