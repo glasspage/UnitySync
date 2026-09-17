@@ -2,7 +2,9 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using Process = System.Diagnostics.Process;
 using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 #if UNITY_EDITOR_WIN
@@ -18,7 +20,7 @@ namespace Glasspage.UnitySync
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
         // Keep this in sync with package.json when releasing a new UnitySync version.
-        private const string Version = "0.8.1";
+        private const string Version = "0.8.2";
         private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
         private const double DebugRefreshIntervalSeconds = 0.5d;
@@ -477,7 +479,27 @@ namespace Glasspage.UnitySync
                     if (GUILayout.Button("Start Hosting"))
                     {
                         _error = string.Empty;
-                        if (!UnitySyncSession.StartHost(_hostAddress, _port, _displayName, _color, out _error))
+                        UnitySyncSceneBackup.BeginHostBackupCapture();
+                        bool started = UnitySyncSession.StartHost(
+                            _hostAddress,
+                            _port,
+                            _displayName,
+                            _color,
+                            out _error);
+                        if (!UnitySyncSceneBackup.EndHostBackupCapture(
+                                started,
+                                out string backupError))
+                        {
+                            if (started)
+                            {
+                                UnitySyncSession.Stop();
+                            }
+
+                            _error = backupError;
+                            started = false;
+                        }
+
+                        if (!started)
                         {
                             Repaint();
                         }
@@ -508,7 +530,14 @@ namespace Glasspage.UnitySync
                     if (GUILayout.Button("Connect"))
                     {
                         _error = string.Empty;
-                        if (!UnitySyncSession.Connect(_joinCodeInput, _displayName, _color, out _error))
+                        if (!UnitySyncSceneBackup.TryCreateActiveSceneBackup(
+                                true,
+                                out _error) ||
+                            !UnitySyncSession.Connect(
+                                _joinCodeInput,
+                                _displayName,
+                                _color,
+                                out _error))
                         {
                             Repaint();
                         }
@@ -852,6 +881,21 @@ namespace Glasspage.UnitySync
                 EditorStyles.miniLabel);
             EditorGUILayout.Space();
 
+            using (new EditorGUI.DisabledScope(
+                       UnitySyncSession.IsActive ||
+                       !UnitySyncSceneBackup.CanRestoreActiveScene))
+            {
+                if (GUILayout.Button("Restore backup scene"))
+                {
+                    _error = string.Empty;
+                    if (!UnitySyncSceneBackup.TryRestoreActiveScene(out _error))
+                    {
+                        Repaint();
+                    }
+                }
+            }
+
+            EditorGUILayout.Space();
             bool connectedGuest = UnitySyncSession.State == UnitySyncSessionState.Connected;
             using (new EditorGUI.DisabledScope(!connectedGuest || UnitySyncSession.IsFileSyncing))
             {
@@ -1039,6 +1083,278 @@ namespace Glasspage.UnitySync
         {
             string value = string.IsNullOrWhiteSpace(displayName) ? "Debug User" : displayName.Trim();
             return value.Length <= 32 ? value : value.Substring(0, 32);
+        }
+    }
+
+    internal static class UnitySyncSceneBackup
+    {
+        private const string BackupDirectoryProjectPath = "Library/UnitySync/SceneBackup";
+        private const string BackupSceneProjectPath =
+            BackupDirectoryProjectPath + "/SceneBackup.unity";
+        private const string PendingSceneProjectPath =
+            BackupDirectoryProjectPath + "/SceneBackup.pending.unity";
+        private const string BackupMetadataProjectPath =
+            BackupDirectoryProjectPath + "/SceneBackup.json";
+
+        private static bool _hostCapturePending;
+        private static bool _hostCaptureCompleted;
+        private static int _hostSceneHandle;
+        private static string _hostCaptureError = string.Empty;
+
+        [Serializable]
+        private sealed class BackupMetadata
+        {
+            public string originScenePath = string.Empty;
+        }
+
+        internal static bool CanRestoreActiveScene
+        {
+            get
+            {
+                Scene scene = SceneManager.GetActiveScene();
+                if (!scene.IsValid() ||
+                    !scene.isLoaded ||
+                    string.IsNullOrEmpty(scene.path) ||
+                    !File.Exists(GetAbsoluteProjectPath(BackupSceneProjectPath)) ||
+                    !TryReadMetadata(out BackupMetadata metadata))
+                {
+                    return false;
+                }
+
+                return string.Equals(
+                    NormalizeScenePath(scene.path),
+                    NormalizeScenePath(metadata.originScenePath),
+                    StringComparison.Ordinal);
+            }
+        }
+
+        internal static void BeginHostBackupCapture()
+        {
+            EditorSceneManager.sceneSaved -= OnHostSceneSaved;
+            _hostCapturePending = true;
+            _hostCaptureCompleted = false;
+            _hostCaptureError = string.Empty;
+            _hostSceneHandle = SceneManager.GetActiveScene().handle;
+            EditorSceneManager.sceneSaved += OnHostSceneSaved;
+        }
+
+        internal static bool EndHostBackupCapture(
+            bool hostStarted,
+            out string error)
+        {
+            EditorSceneManager.sceneSaved -= OnHostSceneSaved;
+            _hostCapturePending = false;
+
+            if (!hostStarted)
+            {
+                error = string.Empty;
+                return true;
+            }
+
+            if (_hostCaptureCompleted)
+            {
+                error = string.Empty;
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(_hostCaptureError))
+            {
+                error = _hostCaptureError;
+                return false;
+            }
+
+            return TryCreateActiveSceneBackup(false, out error);
+        }
+
+        internal static bool TryCreateActiveSceneBackup(
+            bool includeUnsavedChanges,
+            out string error)
+        {
+            Scene scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded)
+            {
+                error = "No loaded scene is available to back up.";
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(scene.path))
+            {
+                error = "Save the active scene before starting a UnitySync session.";
+                return false;
+            }
+
+            return TryCreateBackup(scene, includeUnsavedChanges, out error);
+        }
+
+        internal static bool TryRestoreActiveScene(out string error)
+        {
+            error = string.Empty;
+            if (!CanRestoreActiveScene)
+            {
+                error = "The scene backup does not belong to the active scene.";
+                return false;
+            }
+
+            Scene activeScene = SceneManager.GetActiveScene();
+            string originScenePath = NormalizeScenePath(activeScene.path);
+            string backupAbsolutePath = GetAbsoluteProjectPath(BackupSceneProjectPath);
+            string originAbsolutePath = GetAbsoluteProjectPath(originScenePath);
+            bool hadMultipleScenes = SceneManager.sceneCount > 1;
+
+            try
+            {
+                File.Copy(backupAbsolutePath, originAbsolutePath, true);
+
+                if (hadMultipleScenes)
+                {
+                    EditorSceneManager.CloseScene(activeScene, true);
+                }
+
+                AssetDatabase.ImportAsset(originScenePath, ImportAssetOptions.ForceUpdate);
+                Scene restoredScene = EditorSceneManager.OpenScene(
+                    originScenePath,
+                    hadMultipleScenes
+                        ? OpenSceneMode.Additive
+                        : OpenSceneMode.Single);
+                SceneManager.SetActiveScene(restoredScene);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = "Could not restore the scene backup: " + exception.Message;
+                return false;
+            }
+        }
+
+        private static void OnHostSceneSaved(Scene scene)
+        {
+            if (!_hostCapturePending || scene.handle != _hostSceneHandle)
+            {
+                return;
+            }
+
+            EditorSceneManager.sceneSaved -= OnHostSceneSaved;
+            _hostCapturePending = false;
+            _hostCaptureCompleted = TryCreateBackup(
+                scene,
+                false,
+                out _hostCaptureError);
+        }
+
+        private static bool TryCreateBackup(
+            Scene scene,
+            bool includeUnsavedChanges,
+            out string error)
+        {
+            error = string.Empty;
+            string originScenePath = NormalizeScenePath(scene.path);
+            if (string.IsNullOrEmpty(originScenePath))
+            {
+                error = "The active scene does not have a saved origin path.";
+                return false;
+            }
+
+            string backupDirectory = GetAbsoluteProjectPath(BackupDirectoryProjectPath);
+            string backupAbsolutePath = GetAbsoluteProjectPath(BackupSceneProjectPath);
+            string pendingAbsolutePath = GetAbsoluteProjectPath(PendingSceneProjectPath);
+            string metadataAbsolutePath = GetAbsoluteProjectPath(BackupMetadataProjectPath);
+
+            try
+            {
+                Directory.CreateDirectory(backupDirectory);
+                if (File.Exists(pendingAbsolutePath))
+                {
+                    File.Delete(pendingAbsolutePath);
+                }
+
+                if (includeUnsavedChanges && scene.isDirty)
+                {
+                    if (!EditorSceneManager.SaveScene(
+                            scene,
+                            PendingSceneProjectPath,
+                            true))
+                    {
+                        error = "Could not save the active scene backup.";
+                        return false;
+                    }
+                }
+                else
+                {
+                    string originAbsolutePath = GetAbsoluteProjectPath(originScenePath);
+                    if (!File.Exists(originAbsolutePath))
+                    {
+                        error = "The active scene file could not be found for backup.";
+                        return false;
+                    }
+
+                    File.Copy(originAbsolutePath, pendingAbsolutePath, true);
+                }
+
+                BackupMetadata metadata = new BackupMetadata
+                {
+                    originScenePath = originScenePath
+                };
+                File.Copy(pendingAbsolutePath, backupAbsolutePath, true);
+                File.WriteAllText(
+                    metadataAbsolutePath,
+                    JsonUtility.ToJson(metadata));
+                File.Delete(pendingAbsolutePath);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    if (File.Exists(pendingAbsolutePath))
+                    {
+                        File.Delete(pendingAbsolutePath);
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+
+                error = "Could not create the scene backup: " + exception.Message;
+                return false;
+            }
+        }
+
+        private static bool TryReadMetadata(out BackupMetadata metadata)
+        {
+            metadata = null;
+            string metadataAbsolutePath =
+                GetAbsoluteProjectPath(BackupMetadataProjectPath);
+            if (!File.Exists(metadataAbsolutePath))
+            {
+                return false;
+            }
+
+            try
+            {
+                metadata = JsonUtility.FromJson<BackupMetadata>(
+                    File.ReadAllText(metadataAbsolutePath));
+                return metadata != null &&
+                       !string.IsNullOrEmpty(metadata.originScenePath);
+            }
+            catch (Exception)
+            {
+                metadata = null;
+                return false;
+            }
+        }
+
+        private static string GetAbsoluteProjectPath(string projectRelativePath)
+        {
+            string projectRoot = Path.GetFullPath(
+                Path.Combine(Application.dataPath, ".."));
+            string platformPath = projectRelativePath.Replace(
+                '/',
+                Path.DirectorySeparatorChar);
+            return Path.GetFullPath(Path.Combine(projectRoot, platformPath));
+        }
+
+        private static string NormalizeScenePath(string path)
+        {
+            return (path ?? string.Empty).Replace('\\', '/');
         }
     }
 }
