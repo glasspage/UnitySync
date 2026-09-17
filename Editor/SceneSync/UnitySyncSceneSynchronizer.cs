@@ -49,6 +49,7 @@ namespace Glasspage.UnitySync
                 new HashSet<string>(StringComparer.Ordinal);
             internal int Index;
             internal int ComponentIndex;
+            internal int ProcessedSnapshotChangeCount;
             internal HierarchyBatchPhase Phase;
             internal bool HasCaptureFailure;
         }
@@ -106,9 +107,10 @@ namespace Glasspage.UnitySync
         private const int MaximumDeferredRemoteRetriesPerUpdate = 8;
         private const int MaximumChangesPerUpdate = 64;
         private const int MaximumPendingKeysExaminedPerUpdate = 128;
-        // The time budget remains the primary frame-time guard. A 16-object cap made cheap
-        // unchanged hierarchy snapshots artificially take several seconds in large scenes.
-        private const int SnapshotObjectsPerUpdate = 128;
+        // Keep live hierarchy work deliberately conservative so normal Scene View interaction
+        // remains stable. Initial snapshots use a separate foreground path below.
+        private const int SnapshotObjectsPerUpdate = 16;
+        private const int SnapshotProgressUpdateInterval = 32;
         private const double CaptureBudgetSeconds = 0.008;
 
         private static readonly ProfilerMarker SceneSettingsFlushMarker =
@@ -169,6 +171,8 @@ namespace Glasspage.UnitySync
         private static string _knownSceneSettingsSignature = string.Empty;
         private static string _pendingSceneSettingsSignature = string.Empty;
         private static RemoteSnapshot _remoteSnapshot;
+        private static bool _snapshotProgressBarVisible;
+        private static int _lastSnapshotProgressCount = -1;
 
         static UnitySyncSceneSynchronizer()
         {
@@ -178,6 +182,8 @@ namespace Glasspage.UnitySync
             EditorApplication.update += UpdateRemoteTransformInterpolations;
             EditorApplication.update += UpdateDeferredRemoteChanges;
         }
+
+        internal static bool IsApplyingRemoteSnapshot => _remoteSnapshot != null;
 
         internal static string DebugBackgroundWork
         {
@@ -210,6 +216,7 @@ namespace Glasspage.UnitySync
 
         internal static void BeginSession()
         {
+            ClearSnapshotProgressBar();
             CompleteRemoteTransformInterpolations();
             _active = true;
             _nextFlushTime = 0d;
@@ -239,6 +246,7 @@ namespace Glasspage.UnitySync
 
         internal static void EndSession()
         {
+            ClearSnapshotProgressBar();
             _active = false;
             CompleteRemoteTransformInterpolations();
             _knownSceneSettingsSignature = string.Empty;
@@ -309,6 +317,11 @@ namespace Glasspage.UnitySync
             // dropped while its snapshot was still being emitted, that unfinished batch must
             // not run ahead of the new connection's snapshot request.
             CancelSnapshotsForPlayer(targetPlayerId);
+
+            ShowSnapshotProgress(
+                "UnitySync — Synchronizing Scene",
+                "Preparing scene snapshot...",
+                0f);
 
             HierarchyBatch batch = new HierarchyBatch
             {
@@ -407,6 +420,10 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            ShowSnapshotProgress(
+                "UnitySync — Synchronizing Scene",
+                "Preparing synchronized scene...",
+                0f);
             _suppressPublishedSnapshotChanges = true;
             EditorApplication.delayCall -= ReleaseSnapshotChangeSuppression;
             _applyingRemoteChange = true;
@@ -416,6 +433,7 @@ namespace Glasspage.UnitySync
                         snapshot,
                         out error))
                 {
+                    ClearSnapshotProgressBar();
                     ScheduleSnapshotChangeSuppressionRelease();
                     return false;
                 }
@@ -439,6 +457,8 @@ namespace Glasspage.UnitySync
             {
                 Boundary = snapshot
             };
+            _lastSnapshotProgressCount = -1;
+            UpdateRemoteSnapshotProgress(true);
             UnitySyncPresenceRoot.RequestSceneRepaint();
             return true;
         }
@@ -476,6 +496,7 @@ namespace Glasspage.UnitySync
             if (!hostStateComplete)
             {
                 _remoteSnapshot = null;
+                ClearSnapshotProgressBar();
                 UnitySyncPresenceRoot.RequestSceneRepaint();
                 ScheduleSnapshotChangeSuppressionRelease();
                 error = "The host could not serialize one or more objects, so unmatched local " +
@@ -486,6 +507,7 @@ namespace Glasspage.UnitySync
             if (completedSnapshot.HasApplyFailure)
             {
                 _remoteSnapshot = null;
+                ClearSnapshotProgressBar();
                 UnitySyncPresenceRoot.RequestSceneRepaint();
                 ScheduleSnapshotChangeSuppressionRelease();
                 error = "One or more host objects could not be applied, so unmatched local " +
@@ -493,6 +515,10 @@ namespace Glasspage.UnitySync
                 return false;
             }
 
+            ShowSnapshotProgress(
+                "UnitySync — Synchronizing Scene",
+                "Finalizing scene snapshot...",
+                0.99f);
             _applyingRemoteChange = true;
             try
             {
@@ -531,6 +557,7 @@ namespace Glasspage.UnitySync
             {
                 _applyingRemoteChange = false;
                 _remoteSnapshot = null;
+                ClearSnapshotProgressBar();
                 UnitySyncPresenceRoot.RequestSceneRepaint();
                 Pending.Clear();
                 PendingOrder.Clear();
@@ -563,12 +590,17 @@ namespace Glasspage.UnitySync
             }
 
             double now = EditorApplication.timeSinceStartup;
-            if (now < _nextFlushTime)
+            bool foregroundSnapshot =
+                HierarchyBatches.Count > 0 &&
+                HierarchyBatches.Peek().Snapshot != null;
+            if (!foregroundSnapshot && now < _nextFlushTime)
             {
                 return;
             }
 
-            _nextFlushTime = now + FlushIntervalSeconds;
+            // A joining collaborator already blocks on this snapshot. Run it as foreground
+            // work instead of stretching the same CPU cost across interactive Scene View frames.
+            _nextFlushTime = foregroundSnapshot ? now : now + FlushIntervalSeconds;
             using (SceneSettingsFlushMarker.Auto())
             {
                 FlushSceneSettingsIfNeeded(transport, localPlayerId, now);
@@ -733,7 +765,7 @@ namespace Glasspage.UnitySync
             if (change.SnapshotId != Guid.Empty && _remoteSnapshot != null)
             {
                 _remoteSnapshot.AppliedChangeCount++;
-                UnitySyncPresenceRoot.RequestSceneRepaint();
+                UpdateRemoteSnapshotProgress(false);
             }
 
             if (change.SnapshotId == Guid.Empty)
@@ -1833,6 +1865,10 @@ namespace Glasspage.UnitySync
             HierarchyBatch batch = HierarchyBatches.Peek();
             if (batch.Phase == HierarchyBatchPhase.BeginSnapshot)
             {
+                ShowSnapshotProgress(
+                    "UnitySync — Synchronizing Scene",
+                    "Sending scene snapshot...",
+                    0f);
                 transport.SendSceneSnapshotBegin(localPlayerId, batch.Snapshot, batch.TargetPlayerId);
                 batch.Phase = HierarchyBatchPhase.Hierarchy;
                 return true;
@@ -1840,6 +1876,10 @@ namespace Glasspage.UnitySync
 
             if (batch.Phase == HierarchyBatchPhase.EndSnapshot)
             {
+                ShowSnapshotProgress(
+                    "UnitySync — Synchronizing Scene",
+                    "Finishing scene snapshot...",
+                    1f);
                 transport.SendSceneSnapshotEnd(
                     localPlayerId,
                     batch.Snapshot.SnapshotId,
@@ -1847,6 +1887,7 @@ namespace Glasspage.UnitySync
                     batch.TargetPlayerId);
                 HierarchyBatches.Dequeue();
                 RemoveBatchTracking(batch);
+                ClearSnapshotProgressBar();
                 return true;
             }
 
@@ -1856,11 +1897,16 @@ namespace Glasspage.UnitySync
             if (batch.Phase == HierarchyBatchPhase.Hierarchy)
             {
                 while (batch.Index < batch.Objects.Count &&
-                       attempted < SnapshotObjectsPerUpdate &&
-                       (attempted == 0 || HasCaptureTimeRemaining(captureStart)))
+                       CanContinueHierarchyBatch(batch, attempted, captureStart))
                 {
                     attempted++;
                     GameObject gameObject = batch.Objects[batch.Index++];
+                    if (batch.Snapshot != null)
+                    {
+                        batch.ProcessedSnapshotChangeCount++;
+                        UpdateOutgoingSnapshotProgress(batch, false);
+                    }
+
                     if (!UnitySyncSceneSerializer.TryCaptureHierarchy(
                             gameObject,
                             out UnitySyncSceneObjectChange change))
@@ -1901,8 +1947,7 @@ namespace Glasspage.UnitySync
             // layout. Send serialized state one component at a time so one incoming event can
             // never apply every component on a large GameObject in one Editor update.
             while (batch.Index < batch.Objects.Count &&
-                   attempted < SnapshotObjectsPerUpdate &&
-                   (attempted == 0 || HasCaptureTimeRemaining(captureStart)))
+                   CanContinueHierarchyBatch(batch, attempted, captureStart))
             {
                 GameObject gameObject = batch.Objects[batch.Index];
                 if (gameObject == null)
@@ -1950,6 +1995,12 @@ namespace Glasspage.UnitySync
 
                 Component component = components[batch.ComponentIndex++];
                 attempted++;
+                if (batch.Snapshot != null)
+                {
+                    batch.ProcessedSnapshotChangeCount++;
+                    UpdateOutgoingSnapshotProgress(batch, false);
+                }
+
                 if (!UnitySyncSceneSerializer.TryCaptureComponent(
                         component,
                         out UnitySyncSceneObjectChange change))
@@ -1987,6 +2038,96 @@ namespace Glasspage.UnitySync
             }
 
             return true;
+        }
+
+        private static bool CanContinueHierarchyBatch(
+            HierarchyBatch batch,
+            int attempted,
+            long captureStart)
+        {
+            if (batch != null && batch.Snapshot != null)
+            {
+                // Initial snapshots are foreground/modal work. Finish the current phase as fast
+                // as Unity can serialize it; the normal 16-object/8 ms protection remains for
+                // live-created hierarchies after synchronization is complete.
+                return true;
+            }
+
+            return attempted < SnapshotObjectsPerUpdate &&
+                   (attempted == 0 || HasCaptureTimeRemaining(captureStart));
+        }
+
+        private static void UpdateOutgoingSnapshotProgress(
+            HierarchyBatch batch,
+            bool force)
+        {
+            if (batch == null || batch.Snapshot == null)
+            {
+                return;
+            }
+
+            int completed = batch.ProcessedSnapshotChangeCount;
+            if (!force &&
+                completed > 0 &&
+                completed % SnapshotProgressUpdateInterval != 0)
+            {
+                return;
+            }
+
+            int total = Mathf.Max(1, batch.Snapshot.TotalChangeCount);
+            ShowSnapshotProgress(
+                "UnitySync — Synchronizing Scene",
+                "Sending scene snapshot... " +
+                Mathf.Min(completed, total) + "/" + total,
+                Mathf.Clamp01(completed / (float)total));
+        }
+
+        private static void UpdateRemoteSnapshotProgress(bool force)
+        {
+            if (_remoteSnapshot == null || _remoteSnapshot.Boundary == null)
+            {
+                return;
+            }
+
+            int completed = _remoteSnapshot.AppliedChangeCount;
+            if (!force &&
+                completed - _lastSnapshotProgressCount < SnapshotProgressUpdateInterval)
+            {
+                return;
+            }
+
+            _lastSnapshotProgressCount = completed;
+            int total = Mathf.Max(1, _remoteSnapshot.Boundary.TotalChangeCount);
+            ShowSnapshotProgress(
+                "UnitySync — Synchronizing Scene",
+                "Applying scene snapshot... " +
+                Mathf.Min(completed, total) + "/" + total,
+                Mathf.Clamp01(completed / (float)total));
+            UnitySyncPresenceRoot.RequestSceneRepaint();
+        }
+
+        private static void ShowSnapshotProgress(
+            string title,
+            string info,
+            float progress)
+        {
+            _snapshotProgressBarVisible = true;
+            EditorUtility.DisplayProgressBar(
+                title,
+                info,
+                Mathf.Clamp01(progress));
+        }
+
+        private static void ClearSnapshotProgressBar()
+        {
+            if (!_snapshotProgressBarVisible)
+            {
+                return;
+            }
+
+            _snapshotProgressBarVisible = false;
+            _lastSnapshotProgressCount = -1;
+            EditorUtility.ClearProgressBar();
         }
 
         private static void RemoveBatchTracking(HierarchyBatch batch)
