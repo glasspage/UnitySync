@@ -32,6 +32,10 @@ namespace Glasspage.UnitySync
         static UnitySyncUnsyncedRecoveryTargetTracker()
         {
             EditorApplication.update += Update;
+            // Polling alone is too late for local deletions: the scene synchronizer forgets the
+            // destroyed object's registry mapping while processing the same change stream. Keep
+            // the live target/ancestor instance IDs ahead of time and consume the destroy event
+            // directly so the recovery warning disappears in the same editor change cycle.
             ObjectChangeEvents.changesPublished += OnChangesPublished;
         }
 
