@@ -2678,7 +2678,6 @@ namespace Glasspage.UnitySync
                     targetScene,
                     parentObject,
                     expectedTransformType,
-                    expectedName,
                     prefabSourceObject);
 
                 if (gameObject == null && prefabInstanceRoot)
@@ -2784,7 +2783,6 @@ namespace Glasspage.UnitySync
             Scene targetScene,
             GameObject parentObject,
             Type expectedTransformType,
-            string expectedName,
             GameObject prefabSourceObject)
         {
             if (address == null ||
@@ -2809,7 +2807,6 @@ namespace Glasspage.UnitySync
                     candidate,
                     address,
                     expectedTransformType,
-                    expectedName,
                     prefabSourceObject))
             {
                 UnitySyncSceneObjectRegistry.Assign(candidate, address.ObjectId);
@@ -2858,13 +2855,10 @@ namespace Glasspage.UnitySync
             GameObject candidate,
             UnitySyncSceneObjectAddress address,
             Type expectedTransformType,
-            string expectedName,
             GameObject prefabSourceObject)
         {
             if (!IsEligibleSceneObject(candidate) ||
-                candidate.transform.GetType() != expectedTransformType ||
-                (!string.IsNullOrEmpty(expectedName) &&
-                 !string.Equals(candidate.name, expectedName, StringComparison.Ordinal)))
+                candidate.transform.GetType() != expectedTransformType)
             {
                 return false;
             }
