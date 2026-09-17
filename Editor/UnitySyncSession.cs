@@ -550,8 +550,10 @@ namespace Glasspage.UnitySync
             while (!disconnected &&
                    !EditorApplication.isCompiling &&
                    !EditorApplication.isUpdating &&
-                   processedEvents < MaximumIncomingEventsPerUpdate &&
-                   (processedEvents == 0 ||
+                   (UnitySyncSceneSynchronizer.IsApplyingRemoteSnapshot ||
+                    processedEvents < MaximumIncomingEventsPerUpdate) &&
+                   (UnitySyncSceneSynchronizer.IsApplyingRemoteSnapshot ||
+                    processedEvents == 0 ||
                     (System.Diagnostics.Stopwatch.GetTimestamp() - incomingStart) /
                     (double)System.Diagnostics.Stopwatch.Frequency < IncomingEventBudgetSeconds))
             {
