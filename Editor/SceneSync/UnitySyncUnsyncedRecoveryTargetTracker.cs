@@ -73,15 +73,23 @@ namespace Glasspage.UnitySync
                     UnitySyncSceneSerializer.ResolveAddress(change.Address);
                 if (currentTarget != null)
                 {
-                    TrackedTargets[stateKey] = CreateTrackedTarget(currentTarget);
+                    if (!TrackedTargets.TryGetValue(
+                            stateKey,
+                            out TrackedTarget trackedTarget) ||
+                        trackedTarget == null ||
+                        trackedTarget.GameObject != currentTarget)
+                    {
+                        TrackedTargets[stateKey] = CreateTrackedTarget(currentTarget);
+                    }
+
                     continue;
                 }
 
                 bool targetWasDeleted =
                     TrackedTargets.TryGetValue(
                         stateKey,
-                        out TrackedTarget trackedTarget) &&
-                    trackedTarget.GameObject == null;
+                        out TrackedTarget previousTarget) &&
+                    previousTarget.GameObject == null;
                 bool targetNeverExistedLocally =
                     !TrackedTargets.ContainsKey(stateKey) &&
                     IsMissingTargetFailure(GetLastError(entry.Value));
