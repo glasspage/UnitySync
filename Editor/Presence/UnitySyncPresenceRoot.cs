@@ -670,100 +670,117 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            DrawStatusLog(sceneView, StatusLogOpacity);
             if (Event.current.type != EventType.Repaint)
             {
+                DrawStatusLog(sceneView, StatusLogOpacity);
                 return;
             }
 
             DrawSceneUpdateStatus(sceneView);
 
             float opacity = UnitySyncVisualSettings.ViewportOpacity;
-            if (opacity <= 0f)
+            if (opacity > 0f)
             {
-                return;
-            }
+                Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
+                Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
+                float directionLineDistance =
+                    UnitySyncVisualSettings.LineDistance * ViewportScale;
+                Matrix4x4 previousMatrix = Handles.matrix;
+                Color previousColor = Handles.color;
 
-            Guid localPlayerId = UnitySyncSession.CurrentPlayerId;
-            Guid spectatingPlayerId = UnitySyncSession.SpectatingPlayerId;
-            float directionLineDistance = UnitySyncVisualSettings.LineDistance * ViewportScale;
-            Matrix4x4 previousMatrix = Handles.matrix;
-            Color previousColor = Handles.color;
-
-            foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
-            {
-                ViewportMarker marker = pair.Value;
-                if (marker.GameObject == null)
+                foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
                 {
-                    continue;
-                }
+                    ViewportMarker marker = pair.Value;
+                    if (marker.GameObject == null)
+                    {
+                        continue;
+                    }
 
-                bool isSpectatingRelation =
-                    !marker.IsDebug &&
-                    (pair.Key == spectatingPlayerId ||
-                     marker.SpectatingPlayerId == localPlayerId);
-                if (isSpectatingRelation)
-                {
-                    continue;
-                }
+                    bool isSpectatingRelation =
+                        !marker.IsDebug &&
+                        (pair.Key == spectatingPlayerId ||
+                         marker.SpectatingPlayerId == localPlayerId);
+                    if (isSpectatingRelation)
+                    {
+                        continue;
+                    }
 
-                Transform markerTransform = marker.GameObject.transform;
-                Color foregroundColor = WithAlpha(marker.Color, opacity);
-                Color outlineColor = CalculateOutlineColor(marker.Color, opacity);
-                Handles.matrix = Matrix4x4.TRS(
-                    markerTransform.position,
-                    markerTransform.rotation,
-                    Vector3.one);
+                    Transform markerTransform = marker.GameObject.transform;
+                    Color foregroundColor = WithAlpha(marker.Color, opacity);
+                    Color outlineColor = CalculateOutlineColor(marker.Color, opacity);
+                    Handles.matrix = Matrix4x4.TRS(
+                        markerTransform.position,
+                        markerTransform.rotation,
+                        Vector3.one);
 
-                if (marker.Orthographic)
-                {
-                    float height = Mathf.Clamp(marker.OrthographicSize * 0.12f, 0.15f, 1.5f) * ViewportScale;
-                    float width = height * marker.Aspect;
-                    DrawWireCube(
-                        Vector3.forward * (0.08f * ViewportScale),
-                        new Vector3(width, height, 0.16f * ViewportScale),
-                        outlineColor,
-                        foregroundColor);
-                }
-                else
-                {
-                    DrawPerspectiveFrustum(
-                        marker.FieldOfView,
-                        marker.Aspect,
-                        outlineColor,
-                        foregroundColor);
-                }
+                    if (marker.Orthographic)
+                    {
+                        float height = Mathf.Clamp(
+                            marker.OrthographicSize * 0.12f,
+                            0.15f,
+                            1.5f) * ViewportScale;
+                        float width = height * marker.Aspect;
+                        DrawWireCube(
+                            Vector3.forward * (0.08f * ViewportScale),
+                            new Vector3(
+                                width,
+                                height,
+                                0.16f * ViewportScale),
+                            outlineColor,
+                            foregroundColor);
+                    }
+                    else
+                    {
+                        DrawPerspectiveFrustum(
+                            marker.FieldOfView,
+                            marker.Aspect,
+                            outlineColor,
+                            foregroundColor);
+                    }
 
-                if (directionLineDistance > 0f)
-                {
-                    float directionLineOpacity = opacity * DirectionLineOpacityMultiplier;
-                    Color directionLineColor = WithAlpha(marker.Color, directionLineOpacity);
-                    Color directionLineOutlineColor = CalculateOutlineColor(
-                        marker.Color,
-                        directionLineOpacity);
-                    DrawOutlinedLine(
-                        Vector3.zero,
-                        Vector3.forward * directionLineDistance,
-                        directionLineOutlineColor,
-                        directionLineColor);
-                    DrawOutlinedDisc(
-                        Vector3.forward * directionLineDistance,
-                        0.04f * ViewportScale,
-                        directionLineOutlineColor,
-                        directionLineColor);
+                    if (directionLineDistance > 0f)
+                    {
+                        float directionLineOpacity =
+                            opacity * DirectionLineOpacityMultiplier;
+                        Color directionLineColor = WithAlpha(
+                            marker.Color,
+                            directionLineOpacity);
+                        Color directionLineOutlineColor =
+                            CalculateOutlineColor(
+                                marker.Color,
+                                directionLineOpacity);
+                        DrawOutlinedLine(
+                            Vector3.zero,
+                            Vector3.forward * directionLineDistance,
+                            directionLineOutlineColor,
+                            directionLineColor);
+                        DrawOutlinedDisc(
+                            Vector3.forward * directionLineDistance,
+                            0.04f * ViewportScale,
+                            directionLineOutlineColor,
+                            directionLineColor);
+                    }
+
+                    Handles.matrix = previousMatrix;
+                    DrawDisplayName(
+                        sceneView,
+                        marker,
+                        markerTransform,
+                        opacity);
                 }
 
                 Handles.matrix = previousMatrix;
-                DrawDisplayName(sceneView, marker, markerTransform, opacity);
+                Handles.color = previousColor;
+                DrawSpectatingStatuses(
+                    sceneView,
+                    localPlayerId,
+                    spectatingPlayerId,
+                    opacity);
             }
 
-            Handles.matrix = previousMatrix;
-            Handles.color = previousColor;
-            DrawSpectatingStatuses(
-                sceneView,
-                localPlayerId,
-                spectatingPlayerId,
-                opacity);
+            // Draw the status log after every viewport/name overlay so the pill and
+            // its text remain visually in front of collaborator presence graphics.
+            DrawStatusLog(sceneView, StatusLogOpacity);
         }
 
         private static void DrawDisplayName(
@@ -898,6 +915,8 @@ namespace Glasspage.UnitySync
 
             float bottom = sceneView.position.height - StatusLogBottomMargin;
             Handles.BeginGUI();
+            int previousGuiDepth = GUI.depth;
+            GUI.depth = -1000;
 
             if (showPill && UnitySyncSession.IsActive)
             {
@@ -1036,6 +1055,7 @@ namespace Glasspage.UnitySync
                 }
             }
 
+            GUI.depth = previousGuiDepth;
             Handles.EndGUI();
         }
 
