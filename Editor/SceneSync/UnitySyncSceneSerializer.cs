@@ -4080,6 +4080,29 @@ namespace Glasspage.UnitySync
                 return true;
             }
 
+            // Audio filters require either an AudioSource or an AudioListener. Unity
+            // cannot choose this native either/or dependency on an empty staging object.
+            // Supply a fresh, inactive owner without copying live audio state.
+            if (IsBuiltinAudioFilter(componentType))
+            {
+                Type ownerType = sourceComponent.GetComponent<AudioSource>() != null
+                    ? typeof(AudioSource)
+                    : typeof(AudioListener);
+                if (stagingObject.AddComponent(ownerType) == null)
+                {
+                    return false;
+                }
+            }
+
+            // A ParticleSystemRenderer must be obtained from its owning ParticleSystem;
+            // adding the renderer directly fails even though it exists on the live object.
+            if (componentType == typeof(ParticleSystemRenderer))
+            {
+                stagingObject.AddComponent<ParticleSystem>();
+                stagingComponent = stagingObject.GetComponent<ParticleSystemRenderer>();
+                return stagingComponent != null;
+            }
+
             // Native components can require a Renderer without specifying a concrete
             // subtype that AddComponent can construct (for example VRCAVProVideoScreen).
             // Reproduce the source object's renderer before adding the dependent component.
@@ -4106,6 +4129,16 @@ namespace Glasspage.UnitySync
                 stagingComponent = stagingObject.AddComponent(componentType);
             }
             return stagingComponent != null;
+        }
+
+        private static bool IsBuiltinAudioFilter(Type componentType)
+        {
+            return componentType == typeof(AudioLowPassFilter) ||
+                   componentType == typeof(AudioHighPassFilter) ||
+                   componentType == typeof(AudioEchoFilter) ||
+                   componentType == typeof(AudioDistortionFilter) ||
+                   componentType == typeof(AudioReverbFilter) ||
+                   componentType == typeof(AudioChorusFilter);
         }
 
         private static bool TryValidateObjectReferencesWithoutDereferencing(
