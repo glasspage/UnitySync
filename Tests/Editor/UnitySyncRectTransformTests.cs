@@ -94,6 +94,83 @@ namespace Glasspage.UnitySync.Tests
             }
         }
 
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void ExistingObjectRevertsToTransform(bool hierarchyOnly, bool removeCanvas)
+        {
+            GameObject parent = new GameObject("Transform removal test parent");
+            GameObject source = new GameObject("Incoming ordinary object");
+            GameObject target = new GameObject("Existing UI", typeof(RectTransform));
+            GameObject child = new GameObject("Existing child");
+            try
+            {
+                source.SetActive(false);
+                target.SetActive(false);
+                source.transform.SetParent(parent.transform, false);
+                target.transform.SetParent(parent.transform, false);
+                child.transform.SetParent(target.transform, false);
+                child.transform.localPosition = new Vector3(3f, 4f, 5f);
+                source.AddComponent<BoxCollider>();
+                BoxCollider retained = target.AddComponent<BoxCollider>();
+                if (removeCanvas)
+                {
+                    target.AddComponent<Canvas>();
+                    target.AddComponent<CanvasRenderer>();
+                }
+
+                target.transform.localPosition = new Vector3(9f, 8f, 7f);
+                target.transform.localRotation = Quaternion.Euler(10f, 20f, 30f);
+                target.transform.localScale = new Vector3(2f, 3f, 4f);
+                Vector3 previousPosition = target.transform.localPosition;
+                Quaternion previousRotation = target.transform.localRotation;
+                Vector3 previousScale = target.transform.localScale;
+                source.transform.localPosition = new Vector3(12f, 34f, 56f);
+                source.transform.localRotation = Quaternion.Euler(30f, 40f, 50f);
+                source.transform.localScale = new Vector3(4f, 5f, 6f);
+
+                object change = Capture(source, hierarchyOnly);
+                object fullChange = Capture(source, false);
+                string objectId = (string)Field(Field(change, "Address"), "ObjectId");
+                Registry.GetMethod("Assign", Static).Invoke(null, new object[] { target, objectId });
+                int instanceId = target.GetInstanceID();
+
+                Apply(change);
+                Transform received = target.transform;
+                Assert.That(received.GetType(), Is.EqualTo(typeof(Transform)));
+                Assert.That(target.GetInstanceID(), Is.EqualTo(instanceId));
+                Assert.That(received.parent, Is.EqualTo(parent.transform));
+                Assert.That(child.transform.parent, Is.EqualTo(received));
+                Assert.That(child.transform.localPosition, Is.EqualTo(new Vector3(3f, 4f, 5f)));
+                Assert.That(target.GetComponent<BoxCollider>(), Is.SameAs(retained));
+                Assert.That(target.GetComponents<Component>().Length, Is.EqualTo(2));
+                object[] resolve = { objectId, null };
+                Assert.That(Registry.GetMethod("TryResolve", Static).Invoke(null, resolve), Is.True);
+                Assert.That(resolve[1], Is.SameAs(target));
+                if (hierarchyOnly)
+                {
+                    Assert.That(received.localPosition, Is.EqualTo(previousPosition));
+                    Assert.That(Quaternion.Angle(received.localRotation, previousRotation), Is.LessThan(0.01f));
+                    Assert.That(received.localScale, Is.EqualTo(previousScale));
+                }
+
+                Apply(fullChange);
+                Assert.That(received.localPosition, Is.EqualTo(source.transform.localPosition));
+                Assert.That(Quaternion.Angle(received.localRotation, source.transform.localRotation),
+                    Is.LessThan(0.01f));
+                Assert.That(received.localScale, Is.EqualTo(source.transform.localScale));
+                Apply(change);
+                Assert.That(target.transform, Is.SameAs(received));
+                Assert.That(target.GetComponent<BoxCollider>(), Is.SameAs(retained));
+            }
+            finally
+            {
+                Object.DestroyImmediate(parent);
+                Registry.GetMethod("Clear", Static).Invoke(null, null);
+            }
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void NewObjectsStartWithRectTransform(bool canvas)
