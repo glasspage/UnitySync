@@ -7,6 +7,7 @@ using UnityEditor.Compilation;
 using UnityEditor.SceneManagement;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace Glasspage.UnitySync
 {
@@ -1043,6 +1044,7 @@ namespace Glasspage.UnitySync
                 camera.orthographic,
                 camera.orthographicSize,
                 sceneView.size,
+                NormalizeScenePath(SceneManager.GetActiveScene().path),
                 _spectatingPlayerId);
             if (_hasLastViewportState && ViewportStatesEqual(viewport, _lastViewportState))
             {
@@ -1133,7 +1135,13 @@ namespace Glasspage.UnitySync
                    left.Orthographic == right.Orthographic &&
                    Mathf.Approximately(left.OrthographicSize, right.OrthographicSize) &&
                    Mathf.Approximately(left.SceneViewSize, right.SceneViewSize) &&
+                   string.Equals(left.ScenePath, right.ScenePath, StringComparison.Ordinal) &&
                    left.SpectatingPlayerId == right.SpectatingPlayerId;
+        }
+
+        private static string NormalizeScenePath(string path)
+        {
+            return (path ?? string.Empty).Replace('\\', '/');
         }
 
         private static void UpdateSpectatedSceneView()
