@@ -1,9 +1,20 @@
 # UnitySync
 
-UnitySync is an experimental real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same project with live scene editing, project asset syncing, shared Scene view presence, and spectating.
+UnitySync is a real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same Unity project with live scene editing, project-file synchronization, shared Scene view presence, and spectating.
 
-> [!WARNING]
-> UnitySync is *not* considered a fully-functioning add-on yet and issues are expected. ***Use a backup project for testing!***
+> [!IMPORTANT]
+> UnitySync directly changes scenes and project files while a session is active. It creates local scene backups before sessions, but source control or another project backup is still recommended.
+
+## Features
+
+- **Live scene editing** — synchronizes GameObjects, hierarchy, Transforms/RectTransforms, components, serialized properties, prefabs, and supported scene settings.
+- **Project-file sync** — synchronizes supported files under **Assets**, including scripts, `.asmdef`, `.asmref`, metadata, and supported **ProjectSettings** changes.
+- **Host-authoritative ordering** — live scene, scene-setting, and project-file changes are ordered through the host.
+- **Scene view collaboration** — see collaborator viewports, status information, and spectate other users.
+- **Build-target sync** — collaborators follow the host's active build target.
+- **Package compatibility checks** — package differences are shown before project synchronization begins.
+- **Encrypted sessions** — session traffic is encrypted and authenticated using the generated join code.
+- **Scene backups** — project scenes are backed up locally before sessions and can be restored from UnitySync's Debug section.
 
 ## Install
 
@@ -17,12 +28,17 @@ Git must be installed on the computer running Unity.
 
 After installation, a **UnitySync** menu is added to the top bar of the Unity Editor.
 
+## Requirements
+
+Collaborators must use the same Unity editor version.
+
+UnitySync connects users directly over IPv4. A reachable LAN/VPN address or other direct network route is required.
+
 ## Network setup
 
-UnitySync connects collaborators directly to the host over IPv4.
-[Hamachi](https://www.vpn.net/) is the most reliable way to connect users together, but other direct network setups work as well.
+[Hamachi](https://www.vpn.net/) is the recommended simple VPN option, but any setup that gives collaborators direct IPv4 connectivity can work.
 
-The default port is **47832**.
+The default TCP port is **47832**.
 
 ## Host a session
 
@@ -34,7 +50,9 @@ The default port is **47832**.
 6. Select **Start Hosting**.
 7. Share the generated join code with your collaborators.
 
-When using Hamachi or other VPN, the host address should be the host's VPN-provided IPv4 address.
+When using Hamachi or another VPN, use the host's VPN-provided IPv4 address.
+
+Starting a host session saves the host's open scenes and creates a local scene backup before synchronization begins.
 
 ## Join a session
 
@@ -44,44 +62,64 @@ When using Hamachi or other VPN, the host address should be the host's VPN-provi
 4. Paste the host's join code.
 5. Select **Connect**.
 
-When someone first joins, UnitySync brings their project and loaded scenes in line with the host before normal collaboration begins. This can involve importing assets or recompiling scripts, so the initial connection may take longer.
+On join, UnitySync verifies the Unity version and package state, then lets the guest review the host file download before applying it. Initial synchronization may trigger asset imports, compilation, domain reloads, or a build-target change; UnitySync resumes the session around supported reloads.
+
+After project synchronization finishes, UnitySync applies the host scene snapshot and live collaboration begins.
 
 ## What it syncs
 
-UnitySync synchronizes loaded scene edits and supported project files between connected editors. This includes normal GameObject, Transform, hierarchy, component, and serialized property changes, along with project assets under **Assets** and supported **ProjectSettings** changes.
+### Scenes
 
-Connected collaborators also appear in the Scene view with colored viewport indicators and can be spectated from the **Collaborators** list.
+UnitySync synchronizes supported changes in loaded scenes, including GameObject creation/deletion, hierarchy, Transforms/RectTransforms, components, serialized properties, prefab identity, object references, and supported scene environment settings.
 
-## Visual options
+Scene view presence is associated with the matching scene.
 
-Open **UnitySync > Visual Options** to adjust collaborator viewport indicators.
+### Project files
 
-## Security
+UnitySync synchronizes supported changes under **Assets** and **ProjectSettings**, including Unity assets, metadata, `.cs`, `.asmdef`, and `.asmref` files.
 
-Session traffic is encrypted and authenticated. Keep join codes private.
+`.unity` scene files are handled by scene synchronization rather than the normal project-file watcher. `.dll` files are not live-synchronized.
 
-UnitySync does not currently provide accounts, permissions, host approval prompts, relay servers, matchmaking, or automatic NAT traversal.
+### Packages
+
+The **Packages** directory is not transferred or modified.
+
+Before project synchronization, guests receive a checklist for missing packages, version differences, and guest-only packages to remove. Resolve those changes manually, then choose **Recheck packages**. **Copy checklist** keeps the instructions available if Unity must close while making package changes.
+
+## Scene view tools
+
+Open **UnitySync > Visual Options** to configure collaborator viewport indicators, direction indicators, and status display.
+
+Use the **Collaborators** list in **UnitySync > Session** to spectate another collaborator.
+
+## Backups
+
+Before hosting or joining, UnitySync backs up project scenes under:
+
+```text
+Library/UnitySync/SceneBackup
+```
+
+Backups can be restored from the Debug section while no UnitySync session is active. They are a safeguard, not a replacement for source control.
 
 ## Limitations
 
-- Direct IPv4 connectivity to the host is required.
-- **Packages** are checked by installed name and version, never transferred or changed. Before Assets sync, the guest sees a checklist of missing packages, version differences, and guest-only packages to remove. Make those changes manually, then choose **Recheck packages**; **Copy checklist** keeps the instructions available if Unity must close.
-- The host-approved Debug restore replaces **Assets** and **ProjectSettings** only; it preserves **Packages**.
-- Collaborators should use compatible Unity versions, packages, and third-party dependencies.
-- UnitySync does not automatically open, close, or save scenes.
-- There is no merge or conflict-resolution system for simultaneous edits.
+- UnitySync does not automatically open or close scenes to match another collaborator.
+- Simultaneous edits are host-ordered rather than semantically merged.
+- Some Unity or third-party serialized data may not have a stable cross-editor identity and may require special handling.
 
 ## Troubleshooting
 
 If someone cannot connect:
 
+- Confirm everyone is using the same Unity editor version.
 - Confirm they can reach the host's chosen IPv4 address.
 - Confirm TCP port **47832** is available, or choose another port.
 - If using a VPN:
   - Confirm everyone is connected to the same VPN network.
-  - Ensure your firewall isn't blocking VPN connections.
+  - Ensure the firewall is not blocking VPN traffic or UnitySync's TCP connection.
 
-If synchronization appears incomplete, let any initial asset import or script compilation finish, check the **Activity Log** in **UnitySync > Session**, and confirm everyone has the required packages and dependencies installed.
+If synchronization appears incomplete, let any asset import, script compilation, assembly reload, or build-target switch finish. Check the **Activity Log** in **UnitySync > Session** and the Unity Console for `[UnitySync]` errors, then confirm everyone has the required packages and dependencies installed.
 
 ## AI assistance disclosure
 
