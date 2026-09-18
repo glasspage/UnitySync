@@ -3,7 +3,8 @@
 UnitySync is a real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same Unity project at the same time with live scene editing, project-file synchronization, shared Scene view presence, spectating, and host-authoritative conflict ordering.
 
 > [!IMPORTANT]
-> UnitySync directly changes scenes and project files while a session is active. It creates local scene backups before sessions, but using source control or another project backup is still strongly recommended.
+> UnitySync directly changes scenes and project files while a session is active.\
+> It creates local scene backups before sessions, but using source control or another project backup is still recommended.
 
 ## Features
 
@@ -33,15 +34,13 @@ After installation, a **UnitySync** menu is added to the top bar of the Unity Ed
 
 ## Requirements
 
-Collaborators must use the **same Unity editor version**. UnitySync checks this during the connection handshake and rejects mismatched versions before synchronization begins.
+Collaborators must use the same Unity editor version.
 
-Collaborators should also have compatible third-party dependencies and the same required packages installed. UnitySync checks package names and versions, but it does not install, remove, or update packages automatically.
-
-UnitySync connects directly to the host over IPv4. A reachable LAN/VPN address or other direct network route is required.
+UnitySync connects users directly over IPv4. A reachable LAN/VPN address or other direct network route is required.
 
 ## Network setup
 
-[Hamachi](https://www.vpn.net/) is the recommended simple VPN option, but any setup that gives collaborators direct IPv4 connectivity to the host can work.
+[Hamachi](https://www.vpn.net/) is the recommended simple VPN option, but any setup that gives collaborators direct IPv4 connectivity can work.
 
 The default TCP port is **47832**.
 
@@ -106,10 +105,6 @@ The **Packages** directory is not transferred or modified.
 
 Before project-file synchronization, the guest receives a checklist for missing packages, version differences, and guest-only packages that should be removed. Resolve those changes manually, then choose **Recheck packages**. **Copy checklist** keeps the instructions available if Unity needs to close while package changes are made.
 
-### Build target
-
-The host's active build target is sent during the initial connection and synchronized during the session. UnitySync preserves supported sessions across build-target-triggered script/domain reloads.
-
 ## Scene view tools
 
 Connected collaborators appear in the Scene view with colored viewport indicators. Open **UnitySync > Visual Options** to configure viewport appearance, direction indicators, status-log visibility, and status placement.
@@ -132,17 +127,8 @@ UnitySync also keeps recovery state for failed incoming live scene edits and exp
 
 These recovery systems are intended as safeguards, not a replacement for source control.
 
-## Security
-
-Session traffic is encrypted and authenticated. Keep join codes private.
-
-UnitySync does not provide accounts, per-user permissions, host approval prompts, relay servers, matchmaking, or automatic NAT traversal.
-
 ## Limitations
 
-- Direct IPv4 connectivity to the host is required.
-- All collaborators must use the exact same Unity editor version.
-- Packages and third-party dependencies must be made compatible manually.
 - UnitySync does not automatically open or close scenes to match another collaborator.
 - `.dll` files are not live-synchronized.
 - There is no semantic merge/conflict-resolution system for simultaneous edits to the same state.
