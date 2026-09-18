@@ -2235,6 +2235,7 @@ namespace Glasspage.UnitySync
                         return true;
                     }
 
+                    UnitySyncSession.NotifyLocalSceneChangeSent(change);
                     transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
                     if (change.Address != null &&
                         !string.IsNullOrEmpty(change.Address.ObjectId))
@@ -2330,6 +2331,7 @@ namespace Glasspage.UnitySync
                     change.SnapshotId = batch.Snapshot.SnapshotId;
                 }
 
+                UnitySyncSession.NotifyLocalSceneChangeSent(change);
                 transport.SendSceneObjectChange(localPlayerId, change, batch.TargetPlayerId);
             }
 
@@ -2574,6 +2576,7 @@ namespace Glasspage.UnitySync
                 // A real local edit means a later packet equal to an older remote state must be
                 // allowed through; only suppress consecutive identical incoming live states.
                 LastIncomingLiveHashes.Remove(stateKey);
+                UnitySyncSession.NotifyLocalSceneChangeSent(change);
                 transport.SendSceneObjectChange(localPlayerId, change);
                 sentAny = true;
             }
