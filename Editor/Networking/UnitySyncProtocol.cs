@@ -57,6 +57,7 @@ namespace Glasspage.UnitySync
         internal readonly bool Orthographic;
         internal readonly float OrthographicSize;
         internal readonly float SceneViewSize;
+        internal readonly string ScenePath;
         internal readonly Guid SpectatingPlayerId;
 
         internal UnitySyncViewportState(
@@ -71,6 +72,7 @@ namespace Glasspage.UnitySync
             bool orthographic,
             float orthographicSize,
             float sceneViewSize,
+            string scenePath,
             Guid spectatingPlayerId)
         {
             PlayerId = playerId;
@@ -84,6 +86,7 @@ namespace Glasspage.UnitySync
             Orthographic = orthographic;
             OrthographicSize = orthographicSize;
             SceneViewSize = sceneViewSize;
+            ScenePath = scenePath ?? string.Empty;
             SpectatingPlayerId = spectatingPlayerId;
         }
     }
@@ -163,7 +166,7 @@ namespace Glasspage.UnitySync
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 22;
+        internal const int Version = 23;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -254,6 +257,7 @@ namespace Glasspage.UnitySync
                 writer.Write(state.Orthographic);
                 writer.Write(state.OrthographicSize);
                 writer.Write(state.SceneViewSize);
+                WriteLimitedString(writer, state.ScenePath ?? string.Empty);
                 WriteGuid(writer, state.SpectatingPlayerId);
             });
         }
@@ -770,6 +774,7 @@ namespace Glasspage.UnitySync
                                 reader.ReadBoolean(),
                                 reader.ReadSingle(),
                                 reader.ReadSingle(),
+                                ReadLimitedString(reader),
                                 ReadGuid(reader));
                             message = new UnitySyncMessage(type, playerId, displayName, viewport);
                             break;

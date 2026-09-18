@@ -1612,6 +1612,7 @@ namespace Glasspage.UnitySync
                 viewport.Orthographic,
                 viewport.OrthographicSize,
                 viewport.SceneViewSize,
+                viewport.ScenePath,
                 viewport.SpectatingPlayerId);
         }
 
@@ -1665,6 +1666,8 @@ namespace Glasspage.UnitySync
                    viewport.OrthographicSize > 0f &&
                    IsFinite(viewport.SceneViewSize) &&
                    viewport.SceneViewSize > 0f &&
+                   viewport.ScenePath != null &&
+                   viewport.ScenePath.Length <= 4096 &&
                    viewport.SpectatingPlayerId != viewport.PlayerId;
         }
 
