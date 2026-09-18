@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace Glasspage.UnitySync
 {
@@ -48,6 +49,7 @@ namespace Glasspage.UnitySync
             internal bool Orthographic;
             internal float OrthographicSize;
             internal float SceneViewSize;
+            internal string ScenePath;
             internal Guid SpectatingPlayerId;
 
             private readonly struct TransformSample
@@ -84,6 +86,7 @@ namespace Glasspage.UnitySync
                 Aspect = 1.777f;
                 OrthographicSize = 5f;
                 SceneViewSize = 10f;
+                ScenePath = string.Empty;
                 SpectatingPlayerId = Guid.Empty;
             }
 
@@ -96,6 +99,7 @@ namespace Glasspage.UnitySync
                 Orthographic = viewport.Orthographic;
                 OrthographicSize = viewport.OrthographicSize;
                 SceneViewSize = Mathf.Max(0.0001f, viewport.SceneViewSize);
+                ScenePath = NormalizeScenePath(viewport.ScenePath);
                 SpectatingPlayerId = viewport.SpectatingPlayerId;
 
                 string markerName = DisplayName + " (Viewport)";
@@ -365,6 +369,7 @@ namespace Glasspage.UnitySync
                 orthographic,
                 orthographicSize,
                 sceneViewSize,
+                string.Empty,
                 Guid.Empty);
             ApplyMarker(viewport, true, GetMonotonicSeconds());
             RequestSceneRepaint();
@@ -485,6 +490,7 @@ namespace Glasspage.UnitySync
                 marker.Orthographic,
                 marker.OrthographicSize,
                 marker.SceneViewSize,
+                marker.ScenePath,
                 marker.SpectatingPlayerId);
             return true;
         }
@@ -663,6 +669,20 @@ namespace Glasspage.UnitySync
             return Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
         }
 
+        private static bool IsMarkerInActiveScene(ViewportMarker marker)
+        {
+            string activeScenePath = NormalizeScenePath(SceneManager.GetActiveScene().path);
+            return string.Equals(
+                marker.ScenePath,
+                activeScenePath,
+                StringComparison.Ordinal);
+        }
+
+        private static string NormalizeScenePath(string path)
+        {
+            return (path ?? string.Empty).Replace('\\', '/');
+        }
+
         private static void OnSceneGUI(SceneView sceneView)
         {
             if (Event.current == null)
@@ -691,7 +711,8 @@ namespace Glasspage.UnitySync
                 foreach (KeyValuePair<Guid, ViewportMarker> pair in Markers)
                 {
                     ViewportMarker marker = pair.Value;
-                    if (marker.GameObject == null)
+                    if (marker.GameObject == null ||
+                        (!marker.IsDebug && !IsMarkerInActiveScene(marker)))
                     {
                         continue;
                     }
