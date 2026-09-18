@@ -1030,53 +1030,45 @@ namespace Glasspage.UnitySync
                                     "A collaborator sent an invalid project file update.");
                             }
 
-                            // Project-file transfers can arrive concurrently from multiple guests.
+                            // Project-file transfers can arrive concurrently from guests.
                             // Establish one host-observed packet order for both local application and
                             // relay, then send that exact order back through the host outbound queue
-                            // to every guest (including the originator) in multi-guest sessions.
+                            // to every guest, including the originator.
                             lock (_eventsLock)
                             {
                                 EnqueueFileSync(message.Type, message.PlayerId, message.FileSync);
-                                if (HasMultipleAuthenticatedGuests())
+                                switch (message.Type)
                                 {
-                                    switch (message.Type)
-                                    {
-                                        case UnitySyncMessageType.ProjectFileBegin:
-                                            SendProjectFileBegin(
-                                                message.PlayerId,
-                                                message.FileSync);
-                                            break;
+                                    case UnitySyncMessageType.ProjectFileBegin:
+                                        SendProjectFileBegin(
+                                            message.PlayerId,
+                                            message.FileSync);
+                                        break;
 
-                                        case UnitySyncMessageType.ProjectFileChunk:
-                                            SendProjectFileChunk(
-                                                message.PlayerId,
-                                                message.FileSync);
-                                            break;
+                                    case UnitySyncMessageType.ProjectFileChunk:
+                                        SendProjectFileChunk(
+                                            message.PlayerId,
+                                            message.FileSync);
+                                        break;
 
-                                        case UnitySyncMessageType.ProjectFileDelete:
-                                            SendProjectFileDelete(
-                                                message.PlayerId,
-                                                message.FileSync.Path);
-                                            break;
-                                    }
+                                    case UnitySyncMessageType.ProjectFileDelete:
+                                        SendProjectFileDelete(
+                                            message.PlayerId,
+                                            message.FileSync.Path);
+                                        break;
                                 }
                             }
                             break;
 
                         case UnitySyncMessageType.SceneObjectChange:
-                            // Multiple guest receive loops can race here. Serialize host ingestion
-                            // with the event queue so the host's apply order and the authoritative
-                            // relay order use the same last-write-wins sequence.
+                            // Guest receive loops can race here. Serialize host ingestion with the
+                            // event queue so the host's apply order and the authoritative relay order
+                            // use the same last-write-wins sequence. Echo the host-observed packet to
+                            // every guest, including the originator, even in a two-user session.
                             lock (_eventsLock)
                             {
                                 EnqueueSceneChange(message.PlayerId, message.SceneChange);
-                                if (HasMultipleAuthenticatedGuests())
-                                {
-                                    // In 3+ user sessions, rebroadcast through the host outbound
-                                    // queue to every guest, including the originator. This gives all
-                                    // guests the same host-observed final packet for a shared path.
-                                    SendSceneObjectChange(message.PlayerId, message.SceneChange);
-                                }
+                                SendSceneObjectChange(message.PlayerId, message.SceneChange);
                             }
                             break;
 
@@ -1088,19 +1080,16 @@ namespace Glasspage.UnitySync
                             }
 
                             // Use the same host-authoritative ordering as live scene objects.
-                            // Multiple guest receive loops can race, so serialize ingestion and
-                            // relay through the host queue and include the originator in the echo.
+                            // Serialize ingestion and relay through the host queue and include the
+                            // originator in the echo, even when there is only one guest.
                             lock (_eventsLock)
                             {
                                 EnqueueSceneSettingsChange(
                                     message.PlayerId,
                                     message.SceneSnapshot);
-                                if (HasMultipleAuthenticatedGuests())
-                                {
-                                    SendSceneSettingsChange(
-                                        message.PlayerId,
-                                        message.SceneSnapshot);
-                                }
+                                SendSceneSettingsChange(
+                                    message.PlayerId,
+                                    message.SceneSnapshot);
                             }
                             break;
 
@@ -1469,29 +1458,6 @@ namespace Glasspage.UnitySync
                     ref _totalBytesSent,
                     lengthBytes.LongLength + envelope.LongLength);
             }
-        }
-
-        private bool HasMultipleAuthenticatedGuests()
-        {
-            int authenticatedGuestCount = 0;
-            lock (_peersLock)
-            {
-                foreach (Peer peer in _peers)
-                {
-                    if (peer.PlayerId == Guid.Empty || peer.Superseded)
-                    {
-                        continue;
-                    }
-
-                    authenticatedGuestCount++;
-                    if (authenticatedGuestCount >= 2)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
         }
 
         private void Broadcast(byte[] payload, Peer except)
@@ -1902,7 +1868,7 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool TryGetLiveSceneStateKey(
+        internal static bool TryGetLiveSceneStateKey(
             UnitySyncSceneObjectChange change,
             out string stateKey)
         {

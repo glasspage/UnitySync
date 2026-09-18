@@ -22,6 +22,12 @@ namespace Glasspage.UnitySync
     [InitializeOnLoad]
     internal static class UnitySyncSession
     {
+        private sealed class DeferredSelfAuthoritativeSceneChange
+        {
+            internal UnitySyncSceneObjectChange Change;
+            internal double ApplyAfterTime;
+        }
+
         private const double SendIntervalSeconds = 0.1;
         private const int MaximumIncomingEventsPerUpdate = 128;
         private const double IncomingEventBudgetSeconds = 0.008;
@@ -35,6 +41,8 @@ namespace Glasspage.UnitySync
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
         private const double StatusEventDurationSeconds = 8d;
+        private const double SelfAuthoritativeSceneQuietSeconds = 1.0d;
+        private const int MaximumDeferredSelfAuthoritativeAppliesPerUpdate = 32;
 
         private static readonly ProfilerMarker ImportStatusUpdateMarker =
             new ProfilerMarker("UnitySync.Session.ImportStatus");
@@ -61,6 +69,12 @@ namespace Glasspage.UnitySync
         private static readonly List<string> Logs = new List<string>();
         private static readonly HashSet<Guid> HostProjectSyncPlayers = new HashSet<Guid>();
         private static readonly HashSet<Guid> HostSceneSyncPlayers = new HashSet<Guid>();
+        private static readonly Dictionary<string, DeferredSelfAuthoritativeSceneChange>
+            DeferredSelfAuthoritativeSceneChanges =
+                new Dictionary<string, DeferredSelfAuthoritativeSceneChange>(
+                    StringComparer.Ordinal);
+        private static readonly Dictionary<string, double> LastLocalLiveSceneSendTimes =
+            new Dictionary<string, double>(StringComparer.Ordinal);
         private static UnitySyncTransport _transport;
         private static UnitySyncSessionState _state;
         private static string _displayName = "Collaborator";
@@ -220,6 +234,7 @@ namespace Glasspage.UnitySync
                 _hostProjectSyncActive = false;
                 _hostSceneSyncActive = false;
                 _unsyncedSceneRecoveryFailed = false;
+                ResetDeferredSelfAuthoritativeSceneChanges();
                 UnitySyncPresenceRoot.AddTimedStatus(
                     "Session started",
                     Color.white,
@@ -280,6 +295,7 @@ namespace Glasspage.UnitySync
                 _lastSelectionSignature = string.Empty;
                 ResetLocalAssetImportStatusTracking();
                 _unsyncedSceneRecoveryFailed = false;
+                ResetDeferredSelfAuthoritativeSceneChanges();
                 AddLog("Connecting to " + data.Address + ":" + data.Port + "...");
                 Changed?.Invoke();
                 return true;
@@ -349,6 +365,187 @@ namespace Glasspage.UnitySync
 
             UnitySyncPresenceRoot.RequestSceneRepaint();
             Changed?.Invoke();
+        }
+
+        internal static void NotifyLocalSceneChangeSent(
+            UnitySyncSceneObjectChange change)
+        {
+            if (_state != UnitySyncSessionState.Connected ||
+                !UnitySyncTransport.TryGetLiveSceneStateKey(change, out string stateKey))
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            LastLocalLiveSceneSendTimes[stateKey] = now;
+            if (DeferredSelfAuthoritativeSceneChanges.TryGetValue(
+                    stateKey,
+                    out DeferredSelfAuthoritativeSceneChange deferred) &&
+                deferred != null)
+            {
+                deferred.ApplyAfterTime = Math.Max(
+                    deferred.ApplyAfterTime,
+                    now + SelfAuthoritativeSceneQuietSeconds);
+            }
+        }
+
+        private static bool TryDeferSelfAuthoritativeSceneChange(
+            UnitySyncSceneObjectChange change)
+        {
+            if (!UnitySyncTransport.TryGetLiveSceneStateKey(change, out string stateKey))
+            {
+                return false;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            double applyAfterTime = now + SelfAuthoritativeSceneQuietSeconds;
+            if (LastLocalLiveSceneSendTimes.TryGetValue(
+                    stateKey,
+                    out double lastLocalSendTime))
+            {
+                applyAfterTime = Math.Max(
+                    applyAfterTime,
+                    lastLocalSendTime + SelfAuthoritativeSceneQuietSeconds);
+            }
+
+            if (DeferredSelfAuthoritativeSceneChanges.TryGetValue(
+                    stateKey,
+                    out DeferredSelfAuthoritativeSceneChange existing) &&
+                existing != null)
+            {
+                existing.Change = change;
+                existing.ApplyAfterTime = applyAfterTime;
+            }
+            else
+            {
+                DeferredSelfAuthoritativeSceneChanges[stateKey] =
+                    new DeferredSelfAuthoritativeSceneChange
+                    {
+                        Change = change,
+                        ApplyAfterTime = applyAfterTime
+                    };
+            }
+
+            return true;
+        }
+
+        private static void DiscardSupersededDeferredSelfAuthoritativeSceneChange(
+            UnitySyncSceneObjectChange change)
+        {
+            if (UnitySyncTransport.TryGetLiveSceneStateKey(change, out string stateKey))
+            {
+                DeferredSelfAuthoritativeSceneChanges.Remove(stateKey);
+                return;
+            }
+
+            // Structural packets are ordering barriers. Do not let an older optimistic
+            // self-echo survive across a hierarchy/component-layout change.
+            DeferredSelfAuthoritativeSceneChanges.Clear();
+        }
+
+        private static void ApplyReadyDeferredSelfAuthoritativeSceneChanges()
+        {
+            if (_state != UnitySyncSessionState.Connected ||
+                DeferredSelfAuthoritativeSceneChanges.Count == 0 ||
+                IsGuestSyncDeferred ||
+                UnitySyncFileSynchronizer.IsGuestSyncing ||
+                UnitySyncSceneSynchronizer.IsApplyingRemoteSnapshot)
+            {
+                return;
+            }
+
+            double now = EditorApplication.timeSinceStartup;
+            bool editorControlActive =
+                GUIUtility.hotControl != 0 ||
+                EditorGUIUtility.editingTextField;
+            List<string> readyKeys = null;
+
+            foreach (KeyValuePair<string, DeferredSelfAuthoritativeSceneChange> pair
+                     in DeferredSelfAuthoritativeSceneChanges)
+            {
+                DeferredSelfAuthoritativeSceneChange deferred = pair.Value;
+                if (deferred == null || deferred.Change == null)
+                {
+                    if (readyKeys == null)
+                    {
+                        readyKeys = new List<string>();
+                    }
+
+                    readyKeys.Add(pair.Key);
+                    continue;
+                }
+
+                double applyAfterTime = deferred.ApplyAfterTime;
+                if (LastLocalLiveSceneSendTimes.TryGetValue(
+                        pair.Key,
+                        out double lastLocalSendTime))
+                {
+                    applyAfterTime = Math.Max(
+                        applyAfterTime,
+                        lastLocalSendTime + SelfAuthoritativeSceneQuietSeconds);
+                }
+
+                if (editorControlActive)
+                {
+                    deferred.ApplyAfterTime = Math.Max(
+                        applyAfterTime,
+                        now + SelfAuthoritativeSceneQuietSeconds);
+                    continue;
+                }
+
+                deferred.ApplyAfterTime = applyAfterTime;
+                if (now < applyAfterTime)
+                {
+                    continue;
+                }
+
+                if (readyKeys == null)
+                {
+                    readyKeys = new List<string>();
+                }
+
+                readyKeys.Add(pair.Key);
+                if (readyKeys.Count >= MaximumDeferredSelfAuthoritativeAppliesPerUpdate)
+                {
+                    break;
+                }
+            }
+
+            if (readyKeys == null)
+            {
+                return;
+            }
+
+            foreach (string stateKey in readyKeys)
+            {
+                if (!DeferredSelfAuthoritativeSceneChanges.TryGetValue(
+                        stateKey,
+                        out DeferredSelfAuthoritativeSceneChange deferred))
+                {
+                    continue;
+                }
+
+                DeferredSelfAuthoritativeSceneChanges.Remove(stateKey);
+                LastLocalLiveSceneSendTimes.Remove(stateKey);
+                if (deferred == null || deferred.Change == null)
+                {
+                    continue;
+                }
+
+                if (!UnitySyncSceneSynchronizer.ApplyRemoteChange(
+                        deferred.Change,
+                        out string sceneError))
+                {
+                    AddFailure("Scene sync skipped an authoritative update: " + sceneError);
+                    Changed?.Invoke();
+                }
+            }
+        }
+
+        private static void ResetDeferredSelfAuthoritativeSceneChanges()
+        {
+            DeferredSelfAuthoritativeSceneChanges.Clear();
+            LastLocalLiveSceneSendTimes.Clear();
         }
 
         internal static bool ContinueFileSync(out string error)
@@ -822,6 +1019,19 @@ namespace Glasspage.UnitySync
                             break;
                         }
 
+                        if (_state == UnitySyncSessionState.Connected &&
+                            transportEvent.PlayerId == LocalPlayerId &&
+                            TryDeferSelfAuthoritativeSceneChange(
+                                transportEvent.SceneChange))
+                        {
+                            // The host echo can trail an active local drag by several packets.
+                            // Keep only the newest self-authored live state and apply it after the
+                            // local edit stream has gone quiet instead of snapping to stale samples.
+                            break;
+                        }
+
+                        DiscardSupersededDeferredSelfAuthoritativeSceneChange(
+                            transportEvent.SceneChange);
                         if (!UnitySyncSceneSynchronizer.ApplyRemoteChange(
                                 transportEvent.SceneChange,
                                 out string sceneError))
@@ -837,6 +1047,7 @@ namespace Glasspage.UnitySync
                             break;
                         }
 
+                        ResetDeferredSelfAuthoritativeSceneChanges();
                         if (!UnitySyncSceneSynchronizer.BeginRemoteSnapshot(
                                 transportEvent.SceneSnapshot,
                                 out string snapshotBeginError))
@@ -1010,6 +1221,10 @@ namespace Glasspage.UnitySync
                 {
                     UnitySyncSceneSynchronizer.Flush(transport, LocalPlayerId);
                 }
+
+                // Flush local edits first so a newly-published value extends the quiet period
+                // before any delayed self-authoritative echo can be applied.
+                ApplyReadyDeferredSelfAuthoritativeSceneChanges();
             }
 
             if (EditorApplication.timeSinceStartup < _nextSendTime ||
@@ -1619,6 +1834,7 @@ namespace Glasspage.UnitySync
             _hostProjectSyncActive = false;
             _hostSceneSyncActive = false;
             _unsyncedSceneRecoveryFailed = false;
+            ResetDeferredSelfAuthoritativeSceneChanges();
             UnitySyncPresenceRoot.Clear();
             UnitySyncSelectionPresence.Clear();
             _hasLastViewportState = false;
