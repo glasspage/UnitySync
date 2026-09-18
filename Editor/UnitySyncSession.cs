@@ -1044,7 +1044,7 @@ namespace Glasspage.UnitySync
                 camera.orthographic,
                 camera.orthographicSize,
                 sceneView.size,
-                NormalizeScenePath(SceneManager.GetActiveScene().path),
+                GetActiveSceneIdentity(),
                 _spectatingPlayerId);
             if (_hasLastViewportState && ViewportStatesEqual(viewport, _lastViewportState))
             {
@@ -1137,6 +1137,21 @@ namespace Glasspage.UnitySync
                    Mathf.Approximately(left.SceneViewSize, right.SceneViewSize) &&
                    string.Equals(left.ScenePath, right.ScenePath, StringComparison.Ordinal) &&
                    left.SpectatingPlayerId == right.SpectatingPlayerId;
+        }
+
+        private static string GetActiveSceneIdentity()
+        {
+            Scene activeScene = SceneManager.GetActiveScene();
+            string scenePath = NormalizeScenePath(activeScene.path);
+            if (!string.IsNullOrEmpty(scenePath))
+            {
+                return scenePath;
+            }
+
+            return "unsaved://" +
+                   LocalPlayerId.ToString("N") +
+                   "/" +
+                   activeScene.handle;
         }
 
         private static string NormalizeScenePath(string path)
