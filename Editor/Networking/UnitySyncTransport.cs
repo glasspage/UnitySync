@@ -1868,7 +1868,7 @@ namespace Glasspage.UnitySync
             }
         }
 
-        private static bool TryGetLiveSceneStateKey(
+        internal static bool TryGetLiveSceneStateKey(
             UnitySyncSceneObjectChange change,
             out string stateKey)
         {
