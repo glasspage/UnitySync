@@ -1281,10 +1281,10 @@ namespace Glasspage.UnitySync
                     effectivePath.Length - ".meta".Length);
             }
 
-            return string.Equals(
-                Path.GetExtension(effectivePath),
-                ".cs",
-                StringComparison.OrdinalIgnoreCase);
+            string extension = Path.GetExtension(effectivePath);
+            return string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(extension, ".asmdef", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(extension, ".asmref", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsLiveSyncPath(string path)
@@ -1337,9 +1337,7 @@ namespace Glasspage.UnitySync
 
             string extension = Path.GetExtension(effectivePath);
             if (string.Equals(extension, ".unity", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(extension, ".dll", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(extension, ".asmdef", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(extension, ".asmref", StringComparison.OrdinalIgnoreCase))
+                string.Equals(extension, ".dll", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
