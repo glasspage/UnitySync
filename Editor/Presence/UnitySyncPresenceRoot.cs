@@ -222,7 +222,7 @@ namespace Glasspage.UnitySync
         private const float NeutralOutlineSwitchValue = 0.35f;
         private const float SaturatedOutlineSwitchValue = 0.65f;
         private const float MinimumOutlineOpacity = 0.35f;
-        private const float SpectateStatusLeftMargin = 12f;
+        private const float SpectateStatusHorizontalMargin = 12f;
         private const float SpectateStatusBottomMargin = 12f;
         private const float SpectateStatusSpacing = 4f;
         private const float StatusLogHorizontalMargin = 12f;
@@ -845,6 +845,14 @@ namespace Glasspage.UnitySync
             Guid spectatingPlayerId,
             float opacity)
         {
+            UnitySyncStatusLogVisibility visibility =
+                UnitySyncVisualSettings.StatusLogVisibility;
+            if (visibility == UnitySyncStatusLogVisibility.PillOnly ||
+                visibility == UnitySyncStatusLogVisibility.Disabled)
+            {
+                return;
+            }
+
             EnsureLabelStyles();
             int statusIndex = 0;
 
@@ -1251,8 +1259,14 @@ namespace Glasspage.UnitySync
                       SpectateStatusBottomMargin -
                       labelSize.y -
                       index * (labelSize.y + SpectateStatusSpacing);
+            bool statusLogOnLeft =
+                UnitySyncVisualSettings.StatusLogPosition ==
+                UnitySyncStatusLogPosition.Left;
+            float x = statusLogOnLeft
+                ? viewport.xMax - SpectateStatusHorizontalMargin - labelSize.x
+                : viewport.xMin + SpectateStatusHorizontalMargin;
             Rect labelRect = new Rect(
-                viewport.xMin + SpectateStatusLeftMargin,
+                x,
                 y,
                 labelSize.x,
                 labelSize.y);
