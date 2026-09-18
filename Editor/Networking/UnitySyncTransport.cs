@@ -124,6 +124,7 @@ namespace Glasspage.UnitySync
 
         private readonly Guid _localPlayerId;
         private readonly string _localDisplayName;
+        private readonly string _localUnityVersion;
         private readonly UnitySyncCrypto _crypto;
         private readonly object _cryptoLock = new object();
         private readonly object _peersLock = new object();
@@ -158,6 +159,7 @@ namespace Glasspage.UnitySync
         {
             _localPlayerId = localPlayerId;
             _localDisplayName = NormalizeDisplayName(localDisplayName);
+            _localUnityVersion = UnityEngine.Application.unityVersion ?? string.Empty;
             _crypto = new UnitySyncCrypto(secret);
         }
 
@@ -828,6 +830,22 @@ namespace Glasspage.UnitySync
                     throw new InvalidDataException("The collaborator did not send a valid hello message.");
                 }
 
+                if (!string.Equals(
+                        hello.UnityVersion,
+                        _localUnityVersion,
+                        StringComparison.Ordinal))
+                {
+                    string versionError =
+                        "Unity version mismatch. Host is using " + _localUnityVersion +
+                        ", but the connecting editor is using " + hello.UnityVersion + ".";
+                    Send(
+                        peer,
+                        UnitySyncProtocol.CreateHandshakeRejected(
+                            _localPlayerId,
+                            versionError));
+                    throw new InvalidDataException(versionError);
+                }
+
                 Peer supersededPeer = null;
                 lock (_peersLock)
                 {
@@ -856,7 +874,8 @@ namespace Glasspage.UnitySync
                     UnitySyncProtocol.CreateWelcome(
                         _localPlayerId,
                         _localDisplayName,
-                        _localBuildTargetName));
+                        _localBuildTargetName,
+                        _localUnityVersion));
                 authenticated = true;
                 Enqueue(UnitySyncTransportEventKind.Log, peer.DisplayName + " joined the session.");
 
@@ -1129,7 +1148,12 @@ namespace Glasspage.UnitySync
 
                 client.Connect(address, port);
                 server.Stream = client.GetStream();
-                Send(server, UnitySyncProtocol.CreateHello(_localPlayerId, _localDisplayName));
+                Send(
+                    server,
+                    UnitySyncProtocol.CreateHello(
+                        _localPlayerId,
+                        _localDisplayName,
+                        _localUnityVersion));
 
                 UnitySyncMessage welcome;
                 try
@@ -1144,9 +1168,24 @@ namespace Glasspage.UnitySync
                         exception);
                 }
 
+                if (welcome.Type == UnitySyncMessageType.HandshakeRejected)
+                {
+                    throw new InvalidDataException(welcome.HandshakeError);
+                }
+
                 if (welcome.Type != UnitySyncMessageType.Welcome || welcome.PlayerId == Guid.Empty)
                 {
                     throw new InvalidDataException("The host did not complete the UnitySync handshake.");
+                }
+
+                if (!string.Equals(
+                        welcome.UnityVersion,
+                        _localUnityVersion,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        "Unity version mismatch. Host is using " + welcome.UnityVersion +
+                        ", but this editor is using " + _localUnityVersion + ".");
                 }
 
                 server.PlayerId = welcome.PlayerId;
