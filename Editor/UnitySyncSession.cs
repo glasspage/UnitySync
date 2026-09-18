@@ -41,7 +41,7 @@ namespace Glasspage.UnitySync
         private const int MaximumFileSyncResumeAttempts = 8;
         private const double FileSyncResumeRetrySeconds = 0.5d;
         private const double StatusEventDurationSeconds = 8d;
-        private const double SelfAuthoritativeSceneQuietSeconds = 0.25d;
+        private const double SelfAuthoritativeSceneQuietSeconds = 1.0d;
         private const int MaximumDeferredSelfAuthoritativeAppliesPerUpdate = 32;
 
         private static readonly ProfilerMarker ImportStatusUpdateMarker =
