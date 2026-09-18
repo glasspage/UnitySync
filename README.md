@@ -7,8 +7,8 @@ UnitySync is a real-time collaboration add-on for **Unity Editor 2021.3+**. It l
 
 ## Features
 
-- **Live scene editing** — synchronizes GameObjects, hierarchy, Transforms/RectTransforms, components, serialized properties, prefabs, and supported scene settings.
-- **Project-file sync** — synchronizes supported files under **Assets**, including scripts, `.asmdef`, `.asmref`, metadata, and supported **ProjectSettings** changes.
+- **Live scene editing** — synchronizes GameObjects, hierarchy, Transforms/RectTransforms, components, serialized properties, prefabs, and scene settings.
+- **Project-file sync** — synchronizes supported files under **Assets**, including scripts, metadata, and ProjectSettings changes.
 - **Host-authoritative ordering** — live scene, scene-setting, and project-file changes are ordered through the host.
 - **Scene view collaboration** — see collaborator viewports, status information, and spectate other users.
 - **Build-target sync** — collaborators follow the host's active build target.
