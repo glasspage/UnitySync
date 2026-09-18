@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
 using UnityEditor.Build;
+using UnityEditor.Compilation;
 using UnityEditor.SceneManagement;
 using Unity.Profiling;
 using UnityEngine;
@@ -127,6 +128,7 @@ namespace Glasspage.UnitySync
             EditorApplication.update += Update;
             EditorApplication.quitting += Shutdown;
             AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.delayCall += ScheduleFileSyncResume;
         }
@@ -1622,6 +1624,19 @@ namespace Glasspage.UnitySync
         private static void Shutdown()
         {
             StopInternal(false, false);
+        }
+
+        private static void OnCompilationStarted(object context)
+        {
+            UnitySyncTransport transport = _transport;
+            if (transport == null)
+            {
+                return;
+            }
+
+            UnitySyncProjectSynchronizer.FlushPendingScriptChangesBeforeCompilation(
+                transport,
+                LocalPlayerId);
         }
 
         private static void BeforeAssemblyReload()
