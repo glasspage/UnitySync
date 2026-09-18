@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using UnityEditor;
 using UnityEditor.Build;
+using UnityEditor.Compilation;
 using UnityEditor.SceneManagement;
 using Unity.Profiling;
 using UnityEngine;
@@ -127,6 +128,7 @@ namespace Glasspage.UnitySync
             EditorApplication.update += Update;
             EditorApplication.quitting += Shutdown;
             AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.delayCall += ScheduleFileSyncResume;
         }
@@ -1624,8 +1626,32 @@ namespace Glasspage.UnitySync
             StopInternal(false, false);
         }
 
+        private static void OnCompilationStarted(object context)
+        {
+            UnitySyncTransport transport = _transport;
+            if (transport == null)
+            {
+                return;
+            }
+
+            UnitySyncProjectSynchronizer.FlushPendingScriptChangesBeforeCompilation(
+                transport,
+                LocalPlayerId);
+        }
+
         private static void BeforeAssemblyReload()
         {
+            // A watcher event can arrive after compilationStarted while Unity is compiling.
+            // Give pending script changes one final synchronous send before this domain and
+            // its transport are torn down.
+            UnitySyncTransport transport = _transport;
+            if (transport != null)
+            {
+                UnitySyncProjectSynchronizer.FlushPendingScriptChangesBeforeCompilation(
+                    transport,
+                    LocalPlayerId);
+            }
+
             // Package changes and active-build-target switches can both reload Unity's
             // editor assemblies. Preserve either side of the session before disposing the
             // transport so hosts can reopen the same listener/join code and guests reconnect.

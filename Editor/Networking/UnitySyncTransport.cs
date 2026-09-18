@@ -411,27 +411,65 @@ namespace Glasspage.UnitySync
 
         internal void SendProjectFileBegin(
             Guid playerId,
-            UnitySyncFileSyncMessage state)
+            UnitySyncFileSyncMessage state,
+            bool sendImmediately = false)
         {
-            QueueMessage(
+            SendProjectFilePacket(
                 UnitySyncProtocol.CreateProjectFileBegin(playerId, state),
-                Guid.Empty);
+                sendImmediately);
         }
 
         internal void SendProjectFileChunk(
             Guid playerId,
-            UnitySyncFileSyncMessage state)
+            UnitySyncFileSyncMessage state,
+            bool sendImmediately = false)
         {
-            QueueMessage(
+            SendProjectFilePacket(
                 UnitySyncProtocol.CreateProjectFileChunk(playerId, state),
-                Guid.Empty);
+                sendImmediately);
         }
 
-        internal void SendProjectFileDelete(Guid playerId, string path)
+        internal void SendProjectFileDelete(
+            Guid playerId,
+            string path,
+            bool sendImmediately = false)
         {
-            QueueMessage(
+            SendProjectFilePacket(
                 UnitySyncProtocol.CreateProjectFileDelete(playerId, path),
-                Guid.Empty);
+                sendImmediately);
+        }
+
+        private void SendProjectFilePacket(byte[] payload, bool sendImmediately)
+        {
+            if (sendImmediately && TrySendImmediate(payload))
+            {
+                return;
+            }
+
+            QueueMessage(payload, Guid.Empty);
+        }
+
+        private bool TrySendImmediate(byte[] payload)
+        {
+            if (!_running)
+            {
+                return false;
+            }
+
+            if (_isHost)
+            {
+                Broadcast(payload, null);
+                return true;
+            }
+
+            Peer server = _serverPeer;
+            if (_clientReady && server != null)
+            {
+                TrySend(server, payload);
+                return true;
+            }
+
+            return false;
         }
 
         internal void SendSceneObjectChange(
