@@ -21,7 +21,7 @@ namespace Glasspage.UnitySync
         private const string HostAddressPreference = "Glasspage.UnitySync.HostAddress";
         private const string PortPreference = "Glasspage.UnitySync.Port";
         // Keep this in sync with package.json when releasing a new UnitySync version.
-        private const string Version = "0.9.0";
+        private const string Version = "1.0.0";
         private const string HeaderTitle = "UnitySync v" + Version;
         private const int DefaultPort = 47832;
         private const double DebugRefreshIntervalSeconds = 0.5d;
