@@ -72,7 +72,7 @@ After project synchronization finishes, UnitySync applies the host scene snapsho
 
 UnitySync synchronizes supported changes in loaded scenes, including GameObject creation/deletion, hierarchy, Transforms/RectTransforms, components, serialized properties, prefab identity, object references, and supported scene environment settings.
 
-Scene view presence is associated with the matching scene. UnitySync does not automatically open or close scenes to match another collaborator.
+Scene view presence is associated with the matching scene.
 
 ### Project files
 
@@ -105,7 +105,6 @@ Backups can be restored from the Debug section while no UnitySync session is act
 ## Limitations
 
 - UnitySync does not automatically open or close scenes to match another collaborator.
-- `.dll` files are not live-synchronized.
 - Simultaneous edits are host-ordered rather than semantically merged.
 - Some Unity or third-party serialized data may not have a stable cross-editor identity and may require special handling.
 
