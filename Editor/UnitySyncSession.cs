@@ -1641,6 +1641,17 @@ namespace Glasspage.UnitySync
 
         private static void BeforeAssemblyReload()
         {
+            // A watcher event can arrive after compilationStarted while Unity is compiling.
+            // Give pending script changes one final synchronous send before this domain and
+            // its transport are torn down.
+            UnitySyncTransport transport = _transport;
+            if (transport != null)
+            {
+                UnitySyncProjectSynchronizer.FlushPendingScriptChangesBeforeCompilation(
+                    transport,
+                    LocalPlayerId);
+            }
+
             // Package changes and active-build-target switches can both reload Unity's
             // editor assemblies. Preserve either side of the session before disposing the
             // transport so hosts can reopen the same listener/join code and guests reconnect.
