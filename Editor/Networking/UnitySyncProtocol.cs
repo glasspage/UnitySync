@@ -33,7 +33,8 @@ namespace Glasspage.UnitySync
         RestoreProjectDeclined = 24,
         FileDownloadProgress = 25,
         AssetImportState = 26,
-        BuildTarget = 27
+        BuildTarget = 27,
+        HandshakeRejected = 28
     }
 
     internal enum UnitySyncFileSyncScope : byte
@@ -128,6 +129,8 @@ namespace Glasspage.UnitySync
         internal readonly UnitySyncFileSyncMessage FileSync;
         internal readonly bool IsImportingAssets;
         internal readonly string BuildTargetName;
+        internal readonly string UnityVersion;
+        internal readonly string HandshakeError;
 
         internal UnitySyncMessage(
             UnitySyncMessageType type,
@@ -139,7 +142,9 @@ namespace Glasspage.UnitySync
             UnitySyncSelectionState selection = default,
             UnitySyncFileSyncMessage fileSync = null,
             bool isImportingAssets = false,
-            string buildTargetName = "")
+            string buildTargetName = "",
+            string unityVersion = "",
+            string handshakeError = "")
         {
             Type = type;
             PlayerId = playerId;
@@ -151,12 +156,14 @@ namespace Glasspage.UnitySync
             FileSync = fileSync;
             IsImportingAssets = isImportingAssets;
             BuildTargetName = buildTargetName ?? string.Empty;
+            UnityVersion = unityVersion ?? string.Empty;
+            HandshakeError = handshakeError ?? string.Empty;
         }
     }
 
     internal static class UnitySyncProtocol
     {
-        internal const int Version = 21;
+        internal const int Version = 22;
         internal const int MaximumFrameSize = 8 * 1024 * 1024;
         internal const int MaximumDisplayNameBytes = 128;
         private const int MaximumStringBytes = 1024 * 1024;
@@ -170,24 +177,39 @@ namespace Glasspage.UnitySync
         private const int MaximumFilePathBytes = 4096;
         internal const int MaximumFileChunkBytes = 4 * 1024 * 1024;
 
-        internal static byte[] CreateHello(Guid playerId, string displayName)
+        internal static byte[] CreateHello(
+            Guid playerId,
+            string displayName,
+            string unityVersion)
         {
+            if (string.IsNullOrEmpty(unityVersion))
+            {
+                throw new InvalidDataException("A hello message requires a Unity version.");
+            }
+
             return WriteMessage(writer =>
             {
                 writer.Write((byte)UnitySyncMessageType.Hello);
                 WriteGuid(writer, playerId);
                 WriteString(writer, displayName);
+                WriteLimitedString(writer, unityVersion);
             });
         }
 
         internal static byte[] CreateWelcome(
             Guid playerId,
             string displayName,
-            string buildTargetName)
+            string buildTargetName,
+            string unityVersion)
         {
             if (string.IsNullOrEmpty(buildTargetName))
             {
                 throw new InvalidDataException("A welcome message requires a build target.");
+            }
+
+            if (string.IsNullOrEmpty(unityVersion))
+            {
+                throw new InvalidDataException("A welcome message requires a Unity version.");
             }
 
             return WriteMessage(writer =>
@@ -196,6 +218,23 @@ namespace Glasspage.UnitySync
                 WriteGuid(writer, playerId);
                 WriteString(writer, displayName);
                 WriteLimitedString(writer, buildTargetName);
+                WriteLimitedString(writer, unityVersion);
+            });
+        }
+
+        internal static byte[] CreateHandshakeRejected(Guid playerId, string error)
+        {
+            if (playerId == Guid.Empty || string.IsNullOrEmpty(error))
+            {
+                throw new InvalidDataException(
+                    "A handshake rejection requires a player ID and reason.");
+            }
+
+            return WriteMessage(writer =>
+            {
+                writer.Write((byte)UnitySyncMessageType.HandshakeRejected);
+                WriteGuid(writer, playerId);
+                WriteLimitedString(writer, error);
             });
         }
 
@@ -659,16 +698,11 @@ namespace Glasspage.UnitySync
                         case UnitySyncMessageType.Hello:
                             playerId = ReadGuid(reader);
                             displayName = ReadString(reader);
-                            message = new UnitySyncMessage(type, playerId, displayName, default);
-                            break;
-
-                        case UnitySyncMessageType.Welcome:
-                            playerId = ReadGuid(reader);
-                            displayName = ReadString(reader);
-                            string welcomeBuildTarget = ReadLimitedString(reader);
-                            if (string.IsNullOrEmpty(welcomeBuildTarget))
+                            string helloUnityVersion = ReadLimitedString(reader);
+                            if (string.IsNullOrEmpty(helloUnityVersion))
                             {
-                                throw new InvalidDataException("The welcome message has no build target.");
+                                throw new InvalidDataException(
+                                    "The hello message has no Unity version.");
                             }
 
                             message = new UnitySyncMessage(
@@ -676,7 +710,49 @@ namespace Glasspage.UnitySync
                                 playerId,
                                 displayName,
                                 default,
-                                buildTargetName: welcomeBuildTarget);
+                                unityVersion: helloUnityVersion);
+                            break;
+
+                        case UnitySyncMessageType.Welcome:
+                            playerId = ReadGuid(reader);
+                            displayName = ReadString(reader);
+                            string welcomeBuildTarget = ReadLimitedString(reader);
+                            string welcomeUnityVersion = ReadLimitedString(reader);
+                            if (string.IsNullOrEmpty(welcomeBuildTarget))
+                            {
+                                throw new InvalidDataException("The welcome message has no build target.");
+                            }
+
+                            if (string.IsNullOrEmpty(welcomeUnityVersion))
+                            {
+                                throw new InvalidDataException(
+                                    "The welcome message has no Unity version.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                displayName,
+                                default,
+                                buildTargetName: welcomeBuildTarget,
+                                unityVersion: welcomeUnityVersion);
+                            break;
+
+                        case UnitySyncMessageType.HandshakeRejected:
+                            playerId = ReadGuid(reader);
+                            string handshakeError = ReadLimitedString(reader);
+                            if (playerId == Guid.Empty || string.IsNullOrEmpty(handshakeError))
+                            {
+                                throw new InvalidDataException(
+                                    "The handshake rejection is invalid.");
+                            }
+
+                            message = new UnitySyncMessage(
+                                type,
+                                playerId,
+                                string.Empty,
+                                default,
+                                handshakeError: handshakeError);
                             break;
 
                         case UnitySyncMessageType.Viewport:
