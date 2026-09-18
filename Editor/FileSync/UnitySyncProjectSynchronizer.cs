@@ -213,6 +213,52 @@ namespace Glasspage.UnitySync
             }
         }
 
+        internal static void FlushPendingScriptChangesBeforeCompilation(
+            UnitySyncTransport transport,
+            Guid localPlayerId)
+        {
+            if (!_active || transport == null)
+            {
+                return;
+            }
+
+            double now = GetMonotonicSeconds();
+            List<string> pendingScripts = new List<string>();
+            lock (PendingLock)
+            {
+                foreach (string path in PendingLocalChanges.Keys)
+                {
+                    if (!IsScriptPath(path))
+                    {
+                        continue;
+                    }
+
+                    if (SuppressedUntil.TryGetValue(path, out double suppressedUntil) &&
+                        suppressedUntil > now)
+                    {
+                        continue;
+                    }
+
+                    pendingScripts.Add(path);
+                }
+
+                foreach (string path in pendingScripts)
+                {
+                    PendingLocalChanges.Remove(path);
+                }
+            }
+
+            pendingScripts.Sort(StringComparer.Ordinal);
+            foreach (string path in pendingScripts)
+            {
+                // Script compilation can reload the editor domain before the normal
+                // debounced project-sync update runs. Send these packets synchronously
+                // while the current transport is still alive so every collaborator starts
+                // compiling the same source before this editor reloads.
+                TrySendLocalChange(transport, localPlayerId, path, true);
+            }
+        }
+
         private static UndoPropertyModification[] OnPostprocessModifications(
             UndoPropertyModification[] modifications)
         {
@@ -704,7 +750,8 @@ namespace Glasspage.UnitySync
         private static void TrySendLocalChange(
             UnitySyncTransport transport,
             Guid localPlayerId,
-            string path)
+            string path,
+            bool sendImmediately = false)
         {
             if (!TryGetFullProjectPath(path, out string fullPath))
             {
@@ -724,7 +771,11 @@ namespace Glasspage.UnitySync
                     File.Exists(fullMetaPath) &&
                     ProjectFileNeedsSend(metaPath, fullMetaPath))
                 {
-                    TrySendLocalChange(transport, localPlayerId, metaPath);
+                    TrySendLocalChange(
+                        transport,
+                        localPlayerId,
+                        metaPath,
+                        sendImmediately);
                     if (ProjectFileNeedsSend(metaPath, fullMetaPath))
                     {
                         Requeue(path);
@@ -737,12 +788,18 @@ namespace Glasspage.UnitySync
             {
                 if (KnownFiles.Remove(path))
                 {
-                    transport.SendProjectFileDelete(localPlayerId, path);
+                    transport.SendProjectFileDelete(
+                        localPlayerId,
+                        path,
+                        sendImmediately);
                 }
                 else
                 {
                     // A deletion can be the first event observed after a rename or refresh.
-                    transport.SendProjectFileDelete(localPlayerId, path);
+                    transport.SendProjectFileDelete(
+                        localPlayerId,
+                        path,
+                        sendImmediately);
                 }
 
                 return;
@@ -785,7 +842,8 @@ namespace Glasspage.UnitySync
                             Path = path,
                             Length = length,
                             Hash = hash
-                        });
+                        },
+                        sendImmediately);
 
                     long offset = 0;
                     if (length == 0)
@@ -800,7 +858,8 @@ namespace Glasspage.UnitySync
                                 Offset = 0,
                                 Hash = hash,
                                 Data = new byte[0]
-                            });
+                            },
+                            sendImmediately);
                     }
 
                     while (offset < length)
@@ -830,7 +889,8 @@ namespace Glasspage.UnitySync
                                 Offset = offset,
                                 Hash = hash,
                                 Data = data
-                            });
+                            },
+                            sendImmediately);
                         offset += read;
                     }
                 }
@@ -1075,8 +1135,18 @@ namespace Glasspage.UnitySync
                         GetProjectRoot(),
                         importPath.Replace('/', Path.DirectorySeparatorChar));
                     string metaFullPath = assetFullPath + ".meta";
-                    if (!File.Exists(assetFullPath) || !File.Exists(metaFullPath))
+                    bool assetExists = File.Exists(assetFullPath);
+                    bool metaExists = File.Exists(metaFullPath);
+                    if (!assetExists || !metaExists)
                     {
+                        // New assets wait until source and meta are both present. Deleted
+                        // assets wait until both are gone, then refresh once so script
+                        // deletions/renames also trigger Unity's normal recompile path.
+                        if (!assetExists && !metaExists)
+                        {
+                            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                        }
+
                         return;
                     }
 
@@ -1196,6 +1266,27 @@ namespace Glasspage.UnitySync
             return true;
         }
 
+        private static bool IsScriptPath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return false;
+            }
+
+            string effectivePath = path.Replace('\\', '/');
+            if (effectivePath.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+            {
+                effectivePath = effectivePath.Substring(
+                    0,
+                    effectivePath.Length - ".meta".Length);
+            }
+
+            return string.Equals(
+                Path.GetExtension(effectivePath),
+                ".cs",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsLiveSyncPath(string path)
         {
             if (string.IsNullOrEmpty(path))
@@ -1246,7 +1337,6 @@ namespace Glasspage.UnitySync
 
             string extension = Path.GetExtension(effectivePath);
             if (string.Equals(extension, ".unity", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".dll", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".asmdef", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(extension, ".asmref", StringComparison.OrdinalIgnoreCase))
