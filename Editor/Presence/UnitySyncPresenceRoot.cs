@@ -222,7 +222,7 @@ namespace Glasspage.UnitySync
         private const float NeutralOutlineSwitchValue = 0.35f;
         private const float SaturatedOutlineSwitchValue = 0.65f;
         private const float MinimumOutlineOpacity = 0.35f;
-        private const float SpectateStatusLeftMargin = 12f;
+        private const float SpectateStatusHorizontalMargin = 12f;
         private const float SpectateStatusBottomMargin = 12f;
         private const float SpectateStatusSpacing = 4f;
         private const float StatusLogHorizontalMargin = 12f;
@@ -845,6 +845,14 @@ namespace Glasspage.UnitySync
             Guid spectatingPlayerId,
             float opacity)
         {
+            UnitySyncStatusLogVisibility visibility =
+                UnitySyncVisualSettings.StatusLogVisibility;
+            if (visibility == UnitySyncStatusLogVisibility.PillOnly ||
+                visibility == UnitySyncStatusLogVisibility.Disabled)
+            {
+                return;
+            }
+
             EnsureLabelStyles();
             int statusIndex = 0;
 
@@ -901,9 +909,10 @@ namespace Glasspage.UnitySync
                 "Updating scene (" + percent + "%)...");
             EnsureLabelStyles();
             Vector2 labelSize = _labelStyle.CalcSize(content);
+            Rect viewport = GetSceneViewport(sceneView);
             Rect labelRect = new Rect(
-                (sceneView.position.width - labelSize.x) * 0.5f,
-                sceneView.position.height - SceneUpdateStatusBottomMargin - labelSize.y,
+                viewport.xMin + (viewport.width - labelSize.x) * 0.5f,
+                viewport.yMax - SceneUpdateStatusBottomMargin - labelSize.y,
                 labelSize.x,
                 labelSize.y);
 
@@ -934,7 +943,8 @@ namespace Glasspage.UnitySync
                 return;
             }
 
-            float bottom = sceneView.position.height - StatusLogBottomMargin;
+            Rect viewport = GetSceneViewport(sceneView);
+            float bottom = viewport.yMax - StatusLogBottomMargin;
             Handles.BeginGUI();
             int previousGuiDepth = GUI.depth;
             GUI.depth = -1000;
@@ -955,7 +965,7 @@ namespace Glasspage.UnitySync
                 pillSize.y = StatusPillHeight;
 
                 Rect pillRect = new Rect(
-                    GetStatusLogX(sceneView, pillSize.x),
+                    GetStatusLogX(viewport, pillSize.x),
                     bottom - pillSize.y,
                     pillSize.x,
                     pillSize.y);
@@ -1068,7 +1078,7 @@ namespace Glasspage.UnitySync
                     Vector2 labelSize = _labelStyle.CalcSize(content);
                     float y = bottom - labelSize.y;
                     Rect labelRect = new Rect(
-                        GetStatusLogX(sceneView, labelSize.x),
+                        GetStatusLogX(viewport, labelSize.x),
                         y,
                         labelSize.x,
                         labelSize.y);
@@ -1086,13 +1096,28 @@ namespace Glasspage.UnitySync
         }
 
         private static float GetStatusLogX(
-            SceneView sceneView,
+            Rect viewport,
             float width)
         {
             return UnitySyncVisualSettings.StatusLogPosition ==
                    UnitySyncStatusLogPosition.Left
-                ? StatusLogHorizontalMargin
-                : sceneView.position.width - StatusLogHorizontalMargin - width;
+                ? viewport.xMin + StatusLogHorizontalMargin
+                : viewport.xMax - StatusLogHorizontalMargin - width;
+        }
+
+        private static Rect GetSceneViewport(SceneView sceneView)
+        {
+            Rect viewport = sceneView.cameraViewport;
+            if (viewport.width > 0f && viewport.height > 0f)
+            {
+                return viewport;
+            }
+
+            return new Rect(
+                0f,
+                0f,
+                sceneView.position.width,
+                sceneView.position.height);
         }
 
         private static int GetConnectedUserCount()
@@ -1229,12 +1254,19 @@ namespace Glasspage.UnitySync
         {
             GUIContent content = new GUIContent(text);
             Vector2 labelSize = _labelStyle.CalcSize(content);
-            float y = sceneView.position.height -
+            Rect viewport = GetSceneViewport(sceneView);
+            float y = viewport.yMax -
                       SpectateStatusBottomMargin -
                       labelSize.y -
                       index * (labelSize.y + SpectateStatusSpacing);
+            bool statusLogOnLeft =
+                UnitySyncVisualSettings.StatusLogPosition ==
+                UnitySyncStatusLogPosition.Left;
+            float x = statusLogOnLeft
+                ? viewport.xMax - SpectateStatusHorizontalMargin - labelSize.x
+                : viewport.xMin + SpectateStatusHorizontalMargin;
             Rect labelRect = new Rect(
-                SpectateStatusLeftMargin,
+                x,
                 y,
                 labelSize.x,
                 labelSize.y);
