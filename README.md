@@ -24,7 +24,7 @@ In Unity, open **Window > Package Manager**, choose **Add package from git URL**
 https://github.com/glasspage/UnitySync.git
 ```
 
-Git must be installed on the computer running Unity.
+[Git](https://git-scm.com/install/) must be installed on the computer running Unity.
 
 After installation, a **UnitySync** menu is added to the top bar of the Unity Editor.
 
