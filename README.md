@@ -28,12 +28,6 @@ This method requires [Git](https://git-scm.com/install/) to be installed. You ca
 
 After installation, a **UnitySync** menu is added to the top bar of the Unity Editor.
 
-## Requirements
-
-Collaborators must use the same Unity editor version.
-
-UnitySync connects users directly over IPv4. A reachable LAN/VPN address or other direct network route is required.
-
 ## Network setup
 
 [Hamachi](https://www.vpn.net/) is the recommended simple VPN option. Other network sharing setups may work but aren't directly supported for now.
