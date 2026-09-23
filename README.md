@@ -3,7 +3,7 @@
 UnitySync is a real-time collaboration add-on for **Unity Editor 2021.3+**. It lets multiple people work in the same Unity project with live scene editing, project-file synchronization, shared Scene view presence, and spectating.
 
 > [!IMPORTANT]
-> UnitySync directly changes scenes and project files while a session is active. It creates local scene backups before sessions, but source control or another project backup is still recommended.
+> UnitySync directly changes scenes and project files while a session is active.<br>It creates local scene backups before sessions, but source control or a project backup is still recommended.
 
 ## Features
 
