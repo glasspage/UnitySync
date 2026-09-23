@@ -36,7 +36,7 @@ UnitySync connects users directly over IPv4. A reachable LAN/VPN address or othe
 
 ## Network setup
 
-[Hamachi](https://www.vpn.net/) is the recommended simple VPN option, but any setup that gives collaborators direct IPv4 connectivity can work.
+[Hamachi](https://www.vpn.net/) is the recommended simple VPN option. Other network sharing setups may work but aren't directly supported for now.
 
 The default TCP port is **47832**.
 
@@ -100,7 +100,7 @@ Before hosting or joining, UnitySync backs up project scenes under:
 Library/UnitySync/SceneBackup
 ```
 
-Backups can be restored from the Debug section while no UnitySync session is active. They are a safeguard, not a replacement for source control.
+Backups can be restored from the Debug section while no UnitySync session is active. They are a safeguard but shouldn't be relied upon.
 
 ## Limitations
 
