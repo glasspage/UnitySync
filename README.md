@@ -40,6 +40,25 @@ UnitySync connects users directly over IPv4. A reachable LAN/VPN address or othe
 
 The default TCP port is **47832**.
 
+UnitySync connects directly between collaborators, so the host must allow the selected TCP port through their firewall. VPN software may also require its network interface to be allowed through the firewall.
+
+### Hamachi firewall setup
+
+For Hamachi on Windows, you can configure its network profile and allow inbound traffic easily using PowerShell (run as Administrator):
+
+```powershell
+Set-NetConnectionProfile -InterfaceAlias "Hamachi" -NetworkCategory Private
+
+New-NetFirewallRule `
+    -DisplayName "Hamachi - Allow Inbound" `
+    -Direction Inbound `
+    -Action Allow `
+    -InterfaceAlias "Hamachi" `
+    -Profile Any
+```
+
+The first command marks the Hamachi network as Private, and the second allows inbound traffic through the Hamachi network interface.
+
 ## Host a session
 
 1. Open **UnitySync > Session**.
